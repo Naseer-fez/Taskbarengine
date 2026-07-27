@@ -1,0 +1,29 @@
+# Build output
+build/
+out/
+
+# Object files and libraries
+*.obj
+*.o
+*.lib
+*.a
+*.exp
+
+# Executables and DLLs
+*.exe
+*.dll
+*.pdb
+*.ilk
+
+# Logs
+*.log
+
+# IDE
+.vs/
+*.suo
+*.user
+*.sln
+*.vcxproj*
+
+# CMake
+CMakeUserPresets.json
