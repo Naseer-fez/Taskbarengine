@@ -1,5 +1,7 @@
 #include "core/taskbar_subclass.h"
 #include "core/config_watcher.h"
+#include "core/shell_hook.h"
+#include "core/power_device.h"
 #include <commctrl.h>
 #include <sdk/te_log.h>
 
@@ -25,6 +27,11 @@ static LRESULT CALLBACK TaskbarSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam,
 {
     (void)uIdSubclass;
     SubclassRefData* ref = (SubclassRefData*)dwRefData;
+
+    if (TE_ShellHookHandleMessage(uMsg, wParam, lParam) ||
+        TE_PowerDeviceHandleMessage(uMsg, wParam, lParam)) {
+        return 0;
+    }
 
     switch (uMsg) {
         case WM_SIZE:

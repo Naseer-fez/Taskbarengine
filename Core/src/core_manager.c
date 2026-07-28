@@ -5,6 +5,10 @@
 #include "core/plugin_loader.h"
 #include "core/fault_isolation.h"
 #include "core/taskbar_subclass.h"
+#include "core/ipc_server.h"
+#include "core/shell_hook.h"
+#include "core/power_device.h"
+#include "core/vdesktop_notify.h"
 #include <sdk/te_log.h>
 #include <sdk/te_log_impl.h>
 #include <sdk/te_events.h>
@@ -115,6 +119,9 @@ HRESULT TE_CoreManagerInit(HINSTANCE hinstance)
         if (FAILED(sub_hr)) {
             TE_LogWrite(TE_LOG_WARN, "Failed to subclass Shell_TrayWnd (hr: 0x%08X)", (unsigned int)sub_hr);
         }
+        TE_ShellHookStart(g_core_state->taskbar_hwnd, g_core_state->subscriptions, &g_core_state->subscription_count);
+        TE_PowerDeviceStart(g_core_state->taskbar_hwnd, g_core_state->subscriptions, &g_core_state->subscription_count);
+        TE_VDesktopNotifyStart(g_core_state->subscriptions, &g_core_state->subscription_count);
     }
 
     /* Start Config Directory Watcher */
@@ -172,21 +179,33 @@ HRESULT TE_CoreManagerInit(HINSTANCE hinstance)
 
     g_core_state->current_plugin_id = 0;
 
+    HRESULT ipc_hr = TE_IpcServerStart();
+    if (FAILED(ipc_hr)) {
+        TE_LogWrite(TE_LOG_WARN, "Failed to start IPC server (hr: 0x%08X)", (unsigned int)ipc_hr);
+    }
+
     TE_LogWrite(TE_LOG_INFO, "Core Manager initialization complete with %u plugins loaded", g_core_state->plugin_count);
     return S_OK;
 }
 
-void TE_CoreManagerShutdown(void)
+static void CoreManagerShutdownInternal(bool stop_ipc_server)
 {
     if (!g_core_state) return;
 
     TE_LogWrite(TE_LOG_INFO, "Core Manager shutting down...");
 
+    if (stop_ipc_server) {
+        TE_IpcServerStop();
+    }
+
     TE_ConfigWatcherStop();
 
     if (g_core_state->taskbar_hwnd) {
+        TE_ShellHookStop(g_core_state->taskbar_hwnd);
         TE_TaskbarSubclassRemove(g_core_state->taskbar_hwnd);
     }
+    TE_PowerDeviceStop();
+    TE_VDesktopNotifyStop();
 
     TE_PluginLoaderUnloadAll(g_core_state->plugins, g_core_state->plugin_count);
 
@@ -199,6 +218,16 @@ void TE_CoreManagerShutdown(void)
 
     HeapFree(GetProcessHeap(), 0, g_core_state);
     g_core_state = NULL;
+}
+
+void TE_CoreManagerShutdown(void)
+{
+    CoreManagerShutdownInternal(true);
+}
+
+void TE_CoreManagerShutdownFromIpc(void)
+{
+    CoreManagerShutdownInternal(false);
 }
 
 void TE_CoreManagerOnConfigChanged(void* core_state_ptr)
@@ -253,6 +282,50 @@ void TE_CoreManagerOnConfigChanged(void* core_state_ptr)
     TE_LogWrite(TE_LOG_INFO, "Config hot-reload complete");
 }
 
+void TE_CoreManagerReloadConfig(void)
+{
+    if (g_core_state) {
+        TE_CoreManagerOnConfigChanged(g_core_state);
+    }
+}
+
+HRESULT TE_CoreManagerSetPluginEnabledByName(const char* plugin_name, bool enabled)
+{
+    if (!g_core_state || !plugin_name) return E_POINTER;
+
+    for (uint32_t i = 0; i < g_core_state->plugin_count; i++) {
+        TE_PluginEntry* plugin = &g_core_state->plugins[i];
+        if (plugin->metadata && plugin->metadata->name && strcmp(plugin->metadata->name, plugin_name) == 0) {
+            return enabled ? TE_PluginLoaderEnable(plugin) : TE_PluginLoaderDisable(plugin);
+        }
+    }
+
+    return HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
+}
+
+uint32_t TE_CoreManagerBuildPluginList(char* buffer, size_t buffer_len)
+{
+    if (!buffer || buffer_len == 0) return 0;
+    buffer[0] = '\0';
+    if (!g_core_state) return 0;
+
+    size_t used = 0;
+    for (uint32_t i = 0; i < g_core_state->plugin_count && used < buffer_len; i++) {
+        TE_PluginEntry* plugin = &g_core_state->plugins[i];
+        const char* name = (plugin->metadata && plugin->metadata->name) ? plugin->metadata->name : "unknown";
+        int wrote = snprintf(buffer + used, buffer_len - used, "%s\t%s\n", name, plugin->enabled ? "enabled" : "disabled");
+        if (wrote < 0) break;
+        if ((size_t)wrote >= buffer_len - used) {
+            used = buffer_len - 1;
+            buffer[used] = '\0';
+            break;
+        }
+        used += (size_t)wrote;
+    }
+
+    return (uint32_t)(used + 1);
+}
+
 uint32_t TE_CoreManagerGetCurrentPluginId(void)
 {
     return g_core_state ? g_core_state->current_plugin_id : 0;
@@ -264,4 +337,3 @@ void TE_CoreManagerSetCurrentPluginId(uint32_t plugin_id)
         g_core_state->current_plugin_id = plugin_id;
     }
 }
-

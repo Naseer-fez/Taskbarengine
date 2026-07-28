@@ -1,6 +1,7 @@
 #define TE_EXPORTS
 #include "core/engine.h"
 #include "core/core_manager.h"
+#include "core/ipc_server.h"
 #include <sdk/te_log.h>
 #include <shlwapi.h>
 #include <wchar.h>
@@ -44,6 +45,7 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
             break;
 
         case DLL_PROCESS_DETACH:
+            TE_IpcServerStop();
             TE_CoreManagerShutdown();
             break;
     }
@@ -52,7 +54,12 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
 
 TE_API LRESULT CALLBACK TE_CbtHookProc(int nCode, WPARAM wParam, LPARAM lParam)
 {
-    /* In-process hook procedure: passes messages down the hook chain.
-     * Engine initialization is deferred to WM_TE_INIT message pump handler. */
+    (void)wParam;
+    (void)lParam;
+
+    if (nCode >= 0) {
+        TE_EngineInitialize();
+    }
+
     return CallNextHookEx(NULL, nCode, wParam, lParam);
 }

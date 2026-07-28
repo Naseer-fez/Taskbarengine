@@ -8,6 +8,11 @@ add_library(EngineDLL SHARED
     src/plugin_loader.c
     src/fault_isolation.c
     src/taskbar_subclass.c
+    src/ipc_protocol.c
+    src/ipc_server.c
+    src/shell_hook.c
+    src/power_device.c
+    src/vdesktop_notify.cpp
 )
 
 target_include_directories(EngineDLL PUBLIC
@@ -20,6 +25,8 @@ target_link_libraries(EngineDLL PRIVATE
     comctl32
     ole32
     shell32
+    powrprof
+    advapi32
 )
 
 set_target_properties(EngineDLL PROPERTIES

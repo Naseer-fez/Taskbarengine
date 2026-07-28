@@ -24,6 +24,27 @@ HRESULT TE_CoreManagerInit(HINSTANCE hinstance);
 void TE_CoreManagerShutdown(void);
 
 /**
+ * @brief Disable plugins and release core state without stopping the IPC server thread.
+ * @note Used by the IPC server so it can send SHUTDOWN_COMPLETE before exiting.
+ */
+void TE_CoreManagerShutdownFromIpc(void);
+
+/**
+ * @brief Re-read config and dispatch hot-reload events for changed plugin sections.
+ */
+void TE_CoreManagerReloadConfig(void);
+
+/**
+ * @brief Enable or disable a plugin by metadata name.
+ */
+HRESULT TE_CoreManagerSetPluginEnabledByName(const char* plugin_name, bool enabled);
+
+/**
+ * @brief Write a newline-separated plugin status list into a caller-provided buffer.
+ */
+uint32_t TE_CoreManagerBuildPluginList(char* buffer, size_t buffer_len);
+
+/**
  * @brief Process config file change notification, re-parse config, and dispatch targeted events.
  * @param core_state_ptr Opaque pointer to TE_CoreState instance.
  */

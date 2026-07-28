@@ -5,7 +5,7 @@ Your behavior is governed by the XML blocks below. You must read, evaluate, and 
 
 <active_phase>
 <!-- USER: Change this filename to the phase you want the agent to execute -->
-phase_2_core_manager.md
+phase_3_taskbar_resize.md
 </active_phase>
 
 <global_constraints>

@@ -15,15 +15,24 @@ add_executable(te_tests
     test_plugin_loader.cpp
     test_ring_buffer.cpp
     test_dpi.cpp
+    test_ipc_protocol.cpp
+    test_taskbar_resize.cpp
+    test_crash_recovery.cpp
     ${CMAKE_SOURCE_DIR}/Core/src/config.c
     ${CMAKE_SOURCE_DIR}/Core/src/event_dispatch.c
     ${CMAKE_SOURCE_DIR}/Core/src/plugin_loader.c
     ${CMAKE_SOURCE_DIR}/Core/src/fault_isolation.c
+    ${CMAKE_SOURCE_DIR}/Core/src/ipc_protocol.c
+    ${CMAKE_SOURCE_DIR}/Modules/taskbar_resize/taskbar_resize.c
+    ${CMAKE_SOURCE_DIR}/App/src/crash_recovery.c
 )
 
 target_include_directories(te_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/Core/include
     ${CMAKE_SOURCE_DIR}/SDK/include
+    ${CMAKE_SOURCE_DIR}/App/include
+    ${CMAKE_SOURCE_DIR}/Modules/taskbar_resize
+    ${CMAKE_SOURCE_DIR}/ThirdParty
 )
 
 target_compile_definitions(te_tests PRIVATE
@@ -36,6 +45,7 @@ target_link_libraries(te_tests PRIVATE
     shlwapi
     ole32
     shell32
+    user32
 )
 
 add_dependencies(te_tests DummyPlugin FaultPlugin)
