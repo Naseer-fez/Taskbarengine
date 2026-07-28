@@ -1,6 +1,13 @@
 add_library(EngineDLL SHARED
     src/dllmain.c
     src/engine_init.c
+    src/core_manager.c
+    src/config.c
+    src/config_watcher.c
+    src/event_dispatch.c
+    src/plugin_loader.c
+    src/fault_isolation.c
+    src/taskbar_subclass.c
 )
 
 target_include_directories(EngineDLL PUBLIC
@@ -10,6 +17,9 @@ target_include_directories(EngineDLL PUBLIC
 target_link_libraries(EngineDLL PRIVATE
     te_sdk
     shlwapi
+    comctl32
+    ole32
+    shell32
 )
 
 set_target_properties(EngineDLL PROPERTIES

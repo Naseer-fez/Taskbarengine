@@ -32,7 +32,7 @@ static const PluginSettings G_SETTINGS = {
     sizeof(G_SETTINGS_DESCS) / sizeof(G_SETTINGS_DESCS[0])
 };
 
-static void OnConfigChanged(TE_EventType type, const void* event_data, void* user_data)
+static HRESULT OnConfigChanged(uint32_t type, const void* event_data, void* user_data)
 {
     (void)type; (void)user_data;
     const TE_ConfigChangedEvent* evt = (const TE_ConfigChangedEvent*)event_data;
@@ -40,6 +40,7 @@ static void OnConfigChanged(TE_EventType type, const void* event_data, void* use
         g_ctx->log(TE_LOG_INFO, "DummyPlugin: Config changed event received (new_config ptr: 0x%p)",
                    evt ? (const void*)evt->new_config : NULL);
     }
+    return S_OK;
 }
 
 static HRESULT DummyInitialize(const PluginContext* ctx)
@@ -57,7 +58,7 @@ static HRESULT DummyEnable(void)
         g_ctx->log(TE_LOG_INFO, "DummyPlugin: Enable called");
     }
     if (g_ctx && g_ctx->subscribe) {
-        g_ctx->subscribe(TE_EVENT_CONFIG_CHANGED, (EventCallbackFunc)OnConfigChanged, NULL);
+        g_ctx->subscribe(TE_EVENT_CONFIG_CHANGED, OnConfigChanged, NULL);
     }
     return S_OK;
 }
@@ -68,7 +69,7 @@ static HRESULT DummyDisable(void)
         g_ctx->log(TE_LOG_INFO, "DummyPlugin: Disable called");
     }
     if (g_ctx && g_ctx->unsubscribe) {
-        g_ctx->unsubscribe(TE_EVENT_CONFIG_CHANGED, (EventCallbackFunc)OnConfigChanged);
+        g_ctx->unsubscribe(TE_EVENT_CONFIG_CHANGED, OnConfigChanged);
     }
     return S_OK;
 }
@@ -77,7 +78,7 @@ static HRESULT DummyUpdate(float deltaTime)
 {
     (void)deltaTime;
     if (g_ctx && g_ctx->log) {
-        g_ctx->log(TE_LOG_DEBUG, "DummyPlugin: Update(dt=%.3f)", deltaTime);
+        g_ctx->log(TE_LOG_DEBUG, "DummyPlugin: Update(dt=%.3f)", (double)deltaTime);
     }
     return S_OK;
 }

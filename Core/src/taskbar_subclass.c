@@ -68,6 +68,12 @@ static LRESULT CALLBACK TaskbarSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam,
             }
             return 0;
         }
+
+        case WM_NCDESTROY: {
+            RemoveWindowSubclass(hWnd, TaskbarSubclassProc, TASKBAR_SUBCLASS_ID);
+            TE_LogWrite(TE_LOG_INFO, "Subclass automatically removed on WM_NCDESTROY");
+            break;
+        }
     }
 
     return DefSubclassProc(hWnd, uMsg, wParam, lParam);

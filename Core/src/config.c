@@ -64,8 +64,9 @@ HRESULT TE_ConfigLoad(const wchar_t* path, cJSON** out_root)
         }
     }
 
-    cJSON* root = TE_JsoncParse(path);
-    if (!root) {
+    cJSON* root = NULL;
+    HRESULT hr_p = TE_JsoncParse(path, &root);
+    if (FAILED(hr_p) || !root) {
         TE_LogWrite(TE_LOG_ERROR, "Failed to parse config file at: %ls", path);
         return E_FAIL;
     }

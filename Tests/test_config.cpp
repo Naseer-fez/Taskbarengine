@@ -18,7 +18,9 @@ TEST_CASE("Config Parsing and Section Retrieval", "[config]") {
             }
         })";
 
-        cJSON* root = TE_JsoncParseString(json_str);
+        cJSON* root = nullptr;
+        HRESULT hr_parse = TE_JsoncParseString(json_str, &root);
+        REQUIRE(SUCCEEDED(hr_parse));
         REQUIRE(root != nullptr);
 
         const cJSON* core_sec = TE_ConfigGetCoreSection(root);
@@ -35,6 +37,40 @@ TEST_CASE("Config Parsing and Section Retrieval", "[config]") {
 
         const cJSON* missing_sec = TE_ConfigGetPluginSection(root, "NonExistentPlugin");
         REQUIRE(missing_sec == nullptr);
+
+        cJSON_Delete(root);
+    }
+
+    SECTION("Parse config with missing fields and unknown sections") {
+        const char* json_str = R"({
+            "plugin": {
+                "KnownPlugin": {
+                    "size": 32
+                },
+                "UnknownPlugin": {
+                    "foo": "bar"
+                }
+            }
+        })";
+
+        cJSON* root = nullptr;
+        HRESULT hr_parse = TE_JsoncParseString(json_str, &root);
+        REQUIRE(SUCCEEDED(hr_parse));
+        REQUIRE(root != nullptr);
+
+        /* Core section missing -> returns null */
+        const cJSON* core_sec = TE_ConfigGetCoreSection(root);
+        REQUIRE(core_sec == nullptr);
+
+        /* Known plugin retrieved */
+        const cJSON* known_sec = TE_ConfigGetPluginSection(root, "KnownPlugin");
+        REQUIRE(known_sec != nullptr);
+        cJSON* enabled = cJSON_GetObjectItemCaseSensitive(known_sec, "enabled");
+        REQUIRE(enabled == nullptr); /* Missing field returns null safely */
+
+        /* Unknown plugin section present but safely ignored by core engine lookup */
+        const cJSON* unk_sec = TE_ConfigGetPluginSection(root, "UnknownPlugin");
+        REQUIRE(unk_sec != nullptr);
 
         cJSON_Delete(root);
     }

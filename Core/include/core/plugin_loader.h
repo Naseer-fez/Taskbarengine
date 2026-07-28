@@ -11,7 +11,7 @@ extern "C" {
 
 typedef struct TE_PluginEntry {
     HMODULE                  dll_handle;
-    const PluginInterface*   interface;
+    const PluginInterface*   iface;
     const PluginMetadata*    metadata;
     PluginContext*           context;          /* heap-allocated, per-plugin */
     bool                     enabled;
@@ -19,10 +19,41 @@ typedef struct TE_PluginEntry {
     bool                     disabled_by_fault;
 } TE_PluginEntry;
 
+/**
+ * @brief Scan modules directory for plugin DLLs, load them, and sort by priority.
+ * @param modules_dir Path to Modules/ directory.
+ * @param registry Array to store plugin entries.
+ * @param count Pointer to receive loaded plugin count.
+ * @return S_OK on success, or error HRESULT.
+ */
 HRESULT TE_PluginLoaderScan(const wchar_t* modules_dir, TE_PluginEntry* registry, uint32_t* count);
+
+/**
+ * @brief Enable a loaded plugin by invoking its Enable() callback.
+ * @param entry Pointer to plugin registry entry.
+ * @return S_OK on success, or error HRESULT.
+ */
 HRESULT TE_PluginLoaderEnable(TE_PluginEntry* entry);
+
+/**
+ * @brief Disable an enabled plugin by invoking its Disable() callback.
+ * @param entry Pointer to plugin registry entry.
+ * @return S_OK on success, or error HRESULT.
+ */
 HRESULT TE_PluginLoaderDisable(TE_PluginEntry* entry);
+
+/**
+ * @brief Disable and shutdown a plugin, free context, and unload DLL.
+ * @param entry Pointer to plugin registry entry.
+ * @return S_OK on success, or error HRESULT.
+ */
 HRESULT TE_PluginLoaderShutdown(TE_PluginEntry* entry);
+
+/**
+ * @brief Unload and shutdown all plugins in reverse priority order.
+ * @param registry Array of plugin entries.
+ * @param count Number of loaded plugins.
+ */
 void TE_PluginLoaderUnloadAll(TE_PluginEntry* registry, uint32_t count);
 
 #ifdef __cplusplus

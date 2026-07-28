@@ -57,7 +57,7 @@ static DWORD WINAPI WatcherThreadProc(LPVOID param)
         } else if (wait_res == WAIT_OBJECT_0 + 1) {
             /* Directory change signaled */
             if (g_timer_handle) {
-                DeleteTimerQueueTimer(NULL, g_timer_handle, NULL);
+                DeleteTimerQueueTimer(NULL, g_timer_handle, INVALID_HANDLE_VALUE);
                 g_timer_handle = NULL;
             }
             CreateTimerQueueTimer(&g_timer_handle, NULL, DebounceTimerCallback, NULL, 100, 0, WT_EXECUTEONLYONCE);
@@ -115,7 +115,7 @@ void TE_ConfigWatcherStop(void)
     }
 
     if (g_timer_handle) {
-        DeleteTimerQueueTimer(NULL, g_timer_handle, NULL);
+        DeleteTimerQueueTimer(NULL, g_timer_handle, INVALID_HANDLE_VALUE);
         g_timer_handle = NULL;
     }
 }

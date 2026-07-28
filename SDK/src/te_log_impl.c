@@ -79,8 +79,20 @@ static DWORD WINAPI TE_LogFlushThreadProc(LPVOID param)
         WaitForSingleObject(g_flush_event, 100);
 
         if (!g_log_to_file || g_log_file_path[0] == L'\0') {
-            /* If file logging is disabled, just advance read pointer to write pointer */
-            g_read_idx = g_write_idx;
+            /* If file logging is disabled, drain and clear unread entries */
+            LONG r = g_read_idx;
+            LONG w = g_write_idx;
+            while (r != w) {
+                uint32_t idx = ((uint32_t)r) & (TE_LOG_RING_SIZE - 1);
+                TE_LogEntry* entry = &g_ring_buffer[idx];
+                if (InterlockedCompareExchange(&entry->state, TE_LOG_STATE_READING, TE_LOG_STATE_UNREAD) == TE_LOG_STATE_UNREAD) {
+                    InterlockedExchange(&entry->state, TE_LOG_STATE_EMPTY);
+                    r++;
+                } else {
+                    break;
+                }
+            }
+            g_read_idx = r;
             continue;
         }
 
@@ -97,8 +109,13 @@ static DWORD WINAPI TE_LogFlushThreadProc(LPVOID param)
         }
 
         while (r != w) {
-            uint32_t idx = (uint32_t)(r % TE_LOG_RING_SIZE);
+            uint32_t idx = ((uint32_t)r) & (TE_LOG_RING_SIZE - 1);
             TE_LogEntry* entry = &g_ring_buffer[idx];
+
+            if (InterlockedCompareExchange(&entry->state, TE_LOG_STATE_READING, TE_LOG_STATE_UNREAD) != TE_LOG_STATE_UNREAD) {
+                /* Slot is not ready for reading */
+                break;
+            }
 
             const char* level_str = "[INFO]";
             switch (entry->level) {
@@ -116,6 +133,7 @@ static DWORD WINAPI TE_LogFlushThreadProc(LPVOID param)
                 WriteFile(hfile, formatted, (DWORD)len, &written, NULL);
             }
 
+            InterlockedExchange(&entry->state, TE_LOG_STATE_EMPTY);
             r++;
         }
 
@@ -147,7 +165,15 @@ HRESULT TE_LogInit(const wchar_t* log_dir, TE_LogLevel min_level, bool to_file)
         }
     }
 
-    CreateDirectoryW(g_log_dir_path, NULL);
+    if (!CreateDirectoryW(g_log_dir_path, NULL)) {
+        DWORD err = GetLastError();
+        if (err != ERROR_ALREADY_EXISTS && err != ERROR_ACCESS_DENIED) {
+            /* Log directory creation warning in debug output */
+#ifdef TE_DEBUG
+            OutputDebugStringA("[TE_WARN] Failed to create log directory\n");
+#endif
+        }
+    }
 
     if (g_log_to_file) {
         TE_RotateLogs(g_log_dir_path);
@@ -160,6 +186,7 @@ HRESULT TE_LogInit(const wchar_t* log_dir, TE_LogLevel min_level, bool to_file)
 
     g_write_idx = 0;
     g_read_idx = 0;
+    ZeroMemory(g_ring_buffer, sizeof(g_ring_buffer));
     g_flush_event = CreateEventW(NULL, FALSE, FALSE, NULL);
     g_log_running = 1;
 
@@ -200,14 +227,21 @@ void TE_LogWriteV(TE_LogLevel level, const char* fmt, va_list args)
     if (level < g_min_level) return;
 
     LONG w = InterlockedIncrement(&g_write_idx) - 1;
-    uint32_t idx = (uint32_t)(w % TE_LOG_RING_SIZE);
+    uint32_t idx = ((uint32_t)w) & (TE_LOG_RING_SIZE - 1);
     TE_LogEntry* entry = &g_ring_buffer[idx];
+
+    /* Atomically claim slot from EMPTY to WRITING. If not EMPTY, slot is busy/full, drop log */
+    if (InterlockedCompareExchange(&entry->state, TE_LOG_STATE_WRITING, TE_LOG_STATE_EMPTY) != TE_LOG_STATE_EMPTY) {
+        return;
+    }
 
     entry->level = (uint32_t)level;
     entry->timestamp_ms = (uint32_t)GetTickCount64();
 
     vsnprintf(entry->message, sizeof(entry->message), fmt, args);
     entry->message[sizeof(entry->message) - 1] = '\0';
+
+    InterlockedExchange(&entry->state, TE_LOG_STATE_UNREAD);
 
 #ifdef TE_DEBUG
     const char* prefix = "[TE_INFO]";

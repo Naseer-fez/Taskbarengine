@@ -24,7 +24,7 @@ typedef enum TE_EventType {
 /**
  * @brief Event callback function signature.
  */
-typedef void (*TE_EventCallback)(TE_EventType type, const void* event_data, void* user_data);
+typedef HRESULT (*TE_EventCallback)(uint32_t type, const void* event_data, void* user_data);
 
 /**
  * @brief Payload for TE_EVENT_CONFIG_CHANGED.

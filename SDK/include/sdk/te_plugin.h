@@ -83,7 +83,7 @@ typedef struct StateValue {
 } StateValue;
 
 /* Callback function pointer types */
-typedef HRESULT (*EventCallbackFunc)(uint32_t event_type, void* event_data, void* user_data);
+typedef HRESULT (*EventCallbackFunc)(uint32_t event_type, const void* event_data, void* user_data);
 typedef HRESULT (*SubscribeFunc)(uint32_t event_type, EventCallbackFunc callback, void* user_data);
 typedef HRESULT (*UnsubscribeFunc)(uint32_t event_type, EventCallbackFunc callback);
 typedef void (*RequestRedrawFunc)(void);

@@ -60,7 +60,7 @@
 | **Discovery** | Directory scan of `Modules/*.dll` at startup. `LoadLibrary` + `GetProcAddress("GetPluginInterface")` + `GetMetadata()` for each. |
 | **Enable/Disable** | Controlled by `"enabled": true/false` in `config.jsonc` under each `plugin.<name>` section. |
 | **Load order** | Priority field (`uint32_t priority`) in `PluginMetadata`. Lower = loaded first. Convention: 0-99 geometry, 100-199 visual, 200-299 behavior, 300+ widgets. |
-| **Fault isolation** | SEH (`__try/__except`) around all plugin callbacks + watchdog timer (100ms timeout, N consecutive timeouts → disable plugin). |
+| **Fault isolation** | SEH (`__try/__except`) around all plugin callbacks + watchdog timer (100ms timeout, N consecutive timeouts → disable plugin). Note: Watchdog tracks slow execution (>100ms); true deadlocks (infinite loops) cannot safely terminate threads in Explorer and will freeze the host process. |
 | **Disable contract** | `Disable()` must **fully revert** all visual/behavioral changes. Hard contract. |
 | **Security** | No signature verification — trust the user. |
 | **Inter-plugin communication** | Soft dependencies via typed state queries. Core provides `PublishState` / `QueryState` with a typed variant store (`StateValue` union of `int`, `float`, `bool`, `RECT`). |

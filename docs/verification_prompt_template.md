@@ -5,7 +5,7 @@ Your behavior is governed by the XML blocks below. You must read, evaluate, and 
 
 <active_phase>
 <!-- USER: Change this filename to the phase that was just implemented -->
-phase_1_foundation.md
+phase_2_core_manager.md.md
 </active_phase>
 
 <verification_mandate>

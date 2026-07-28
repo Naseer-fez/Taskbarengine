@@ -3,6 +3,7 @@
 #include "core/config_watcher.h"
 #include "core/event_dispatch.h"
 #include "core/plugin_loader.h"
+#include "core/fault_isolation.h"
 #include "core/taskbar_subclass.h"
 #include <sdk/te_log.h>
 #include <sdk/te_log_impl.h>
@@ -20,6 +21,7 @@ struct TE_CoreState {
     uint32_t       plugin_count;
     TE_EventEntry  subscriptions[TE_MAX_SUBSCRIPTIONS];
     uint32_t       subscription_count;
+    uint32_t       current_plugin_id;
 };
 
 static TE_CoreState* g_core_state = NULL;
@@ -27,15 +29,17 @@ static TE_CoreState* g_core_state = NULL;
 static HRESULT CoreSubscribeWrapper(uint32_t event_type, EventCallbackFunc callback, void* user_data)
 {
     if (!g_core_state) return E_POINTER;
-    return TE_EventSubscribe(g_core_state->subscriptions, &g_core_state->subscription_count,
-                             (TE_EventType)event_type, (TE_EventCallback)callback, user_data, 0);
+    uint32_t plugin_id = g_core_state->current_plugin_id;
+    TE_PluginEntry* entry = (plugin_id > 0 && plugin_id <= g_core_state->plugin_count) ? &g_core_state->plugins[plugin_id - 1] : NULL;
+    return TE_EventSubscribeEx(g_core_state->subscriptions, &g_core_state->subscription_count,
+                               (TE_EventType)event_type, callback, user_data, plugin_id, entry);
 }
 
 static HRESULT CoreUnsubscribeWrapper(uint32_t event_type, EventCallbackFunc callback)
 {
     if (!g_core_state) return E_POINTER;
     return TE_EventUnsubscribe(g_core_state->subscriptions, &g_core_state->subscription_count,
-                               (TE_EventType)event_type, (TE_EventCallback)callback);
+                               (TE_EventType)event_type, callback);
 }
 
 static void CoreRequestRedrawNoop(void) {}
@@ -62,16 +66,20 @@ HRESULT TE_CoreManagerInit(HINSTANCE hinstance)
     g_core_state->hinstance = hinstance;
     g_core_state->taskbar_hwnd = FindWindowW(L"Shell_TrayWnd", NULL);
 
-    TE_ConfigResolvePath(g_core_state->config_path, MAX_PATH);
+    HRESULT path_hr = TE_ConfigResolvePath(g_core_state->config_path, MAX_PATH);
+    if (FAILED(path_hr)) {
+        wcsncpy(g_core_state->config_path, L"config.jsonc", MAX_PATH - 1);
+    }
 
     /* Initialize Logging */
     wchar_t log_dir[MAX_PATH];
-    wcscpy(log_dir, g_core_state->config_path);
+    wcsncpy(log_dir, g_core_state->config_path, MAX_PATH - 1);
+    log_dir[MAX_PATH - 1] = L'\0';
     wchar_t* last_slash = wcsrchr(log_dir, L'\\');
     if (last_slash) {
-        wcscpy(last_slash + 1, L"logs");
+        wcsncpy(last_slash + 1, L"logs", MAX_PATH - (last_slash + 1 - log_dir) - 1);
     } else {
-        wcscpy(log_dir, L"logs");
+        wcsncpy(log_dir, L"logs", MAX_PATH - 1);
     }
     TE_LogInit(log_dir, TE_LOG_DEBUG, true);
 
@@ -94,7 +102,7 @@ HRESULT TE_CoreManagerInit(HINSTANCE hinstance)
         }
     }
     if (g_core_state->modules_dir[0] == L'\0') {
-        wcscpy(g_core_state->modules_dir, L"Modules");
+        wcsncpy(g_core_state->modules_dir, L"Modules", MAX_PATH - 1);
     }
 
     /* Initialize Event Dispatch Table */
@@ -102,16 +110,23 @@ HRESULT TE_CoreManagerInit(HINSTANCE hinstance)
 
     /* Install Taskbar Subclass */
     if (g_core_state->taskbar_hwnd) {
-        TE_TaskbarSubclassInstall(g_core_state->taskbar_hwnd, g_core_state->subscriptions,
-                                 &g_core_state->subscription_count, g_core_state);
+        HRESULT sub_hr = TE_TaskbarSubclassInstall(g_core_state->taskbar_hwnd, g_core_state->subscriptions,
+                                                  &g_core_state->subscription_count, g_core_state);
+        if (FAILED(sub_hr)) {
+            TE_LogWrite(TE_LOG_WARN, "Failed to subclass Shell_TrayWnd (hr: 0x%08X)", (unsigned int)sub_hr);
+        }
     }
 
     /* Start Config Directory Watcher */
     wchar_t config_dir[MAX_PATH];
-    wcscpy(config_dir, g_core_state->config_path);
+    wcsncpy(config_dir, g_core_state->config_path, MAX_PATH - 1);
+    config_dir[MAX_PATH - 1] = L'\0';
     last_slash = wcsrchr(config_dir, L'\\');
     if (last_slash) *last_slash = L'\0';
-    TE_ConfigWatcherStart(config_dir, g_core_state->taskbar_hwnd);
+    HRESULT watch_hr = TE_ConfigWatcherStart(config_dir, g_core_state->taskbar_hwnd);
+    if (FAILED(watch_hr)) {
+        TE_LogWrite(TE_LOG_WARN, "Failed to start config watcher (hr: 0x%08X)", (unsigned int)watch_hr);
+    }
 
     /* Discover & Load Plugins */
     TE_PluginLoaderScan(g_core_state->modules_dir, g_core_state->plugins, &g_core_state->plugin_count);
@@ -120,6 +135,8 @@ HRESULT TE_CoreManagerInit(HINSTANCE hinstance)
     for (uint32_t i = 0; i < g_core_state->plugin_count; i++) {
         TE_PluginEntry* plugin = &g_core_state->plugins[i];
         if (!plugin->context) continue;
+
+        g_core_state->current_plugin_id = i + 1;
 
         plugin->context->api_version = TE_API_VERSION;
         plugin->context->taskbar_hwnd = g_core_state->taskbar_hwnd;
@@ -134,8 +151,8 @@ HRESULT TE_CoreManagerInit(HINSTANCE hinstance)
         plugin->context->query_state = CoreQueryStateNoop;
         plugin->context->core_opaque = (void*)(uintptr_t)i;
 
-        if (plugin->interface->Initialize) {
-            plugin->interface->Initialize(plugin->context);
+        if (plugin->iface->Initialize) {
+            TE_FaultIsolationCallPluginInit(plugin, plugin->iface->Initialize, plugin->context);
         }
 
         /* Check enabled setting in config */
@@ -152,6 +169,8 @@ HRESULT TE_CoreManagerInit(HINSTANCE hinstance)
             TE_PluginLoaderEnable(plugin);
         }
     }
+
+    g_core_state->current_plugin_id = 0;
 
     TE_LogWrite(TE_LOG_INFO, "Core Manager initialization complete with %u plugins loaded", g_core_state->plugin_count);
     return S_OK;
@@ -221,9 +240,9 @@ void TE_CoreManagerOnConfigChanged(void* core_state_ptr)
                 plugin->context->config = new_sec;
             }
 
-            /* Dispatch CONFIG_CHANGED */
+            /* Dispatch CONFIG_CHANGED targeted specifically to this plugin (plugin_id = i + 1) */
             TE_ConfigChangedEvent evt = { .new_config = new_sec };
-            TE_EventDispatch(state->subscriptions, state->subscription_count, TE_EVENT_CONFIG_CHANGED, &evt);
+            TE_EventDispatchTargeted(state->subscriptions, state->subscription_count, TE_EVENT_CONFIG_CHANGED, &evt, i + 1);
         }
     }
 
@@ -233,3 +252,16 @@ void TE_CoreManagerOnConfigChanged(void* core_state_ptr)
     state->config_root = new_root;
     TE_LogWrite(TE_LOG_INFO, "Config hot-reload complete");
 }
+
+uint32_t TE_CoreManagerGetCurrentPluginId(void)
+{
+    return g_core_state ? g_core_state->current_plugin_id : 0;
+}
+
+void TE_CoreManagerSetCurrentPluginId(uint32_t plugin_id)
+{
+    if (g_core_state) {
+        g_core_state->current_plugin_id = plugin_id;
+    }
+}
+

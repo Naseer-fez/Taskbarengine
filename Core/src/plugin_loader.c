@@ -40,13 +40,14 @@ HRESULT TE_PluginLoaderScan(const wchar_t* modules_dir, TE_PluginEntry* registry
             continue;
         }
 
-        GetPluginInterfaceFunc get_iface = (GetPluginInterfaceFunc)GetProcAddress(hdll, "GetPluginInterface");
-        if (!get_iface) {
+        FARPROC proc = GetProcAddress(hdll, "GetPluginInterface");
+        if (!proc) {
             TE_LogWrite(TE_LOG_WARN, "DLL %ls does not export GetPluginInterface", find_data.cFileName);
             FreeLibrary(hdll);
             continue;
         }
 
+        GetPluginInterfaceFunc get_iface = (GetPluginInterfaceFunc)(uintptr_t)proc;
         const PluginInterface* iface = get_iface();
         if (!iface || !iface->GetMetadata) {
             TE_LogWrite(TE_LOG_WARN, "Plugin in %ls returned invalid interface or missing GetMetadata", find_data.cFileName);
@@ -63,7 +64,7 @@ HRESULT TE_PluginLoaderScan(const wchar_t* modules_dir, TE_PluginEntry* registry
 
         TE_PluginEntry entry = { 0 };
         entry.dll_handle = hdll;
-        entry.interface = iface;
+        entry.iface = iface;
         entry.metadata = meta;
         entry.context = (PluginContext*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(PluginContext));
         entry.enabled = false;
@@ -94,24 +95,18 @@ HRESULT TE_PluginLoaderScan(const wchar_t* modules_dir, TE_PluginEntry* registry
     return S_OK;
 }
 
-static HRESULT HelperEnable(void) {
-    /* Helper called via fault isolation */
-    /* Note: Context pointer is passed via tls or we wrap call in fault_isolation with function pointer */
-    return S_OK;
-}
-
 HRESULT TE_PluginLoaderEnable(TE_PluginEntry* entry)
 {
-    if (!entry || !entry->interface) return E_POINTER;
+    if (!entry || !entry->iface) return E_POINTER;
     if (entry->enabled) return S_OK;
     if (entry->disabled_by_fault) return E_ABORT;
 
-    if (!entry->interface->Enable) {
+    if (!entry->iface->Enable) {
         entry->enabled = true;
         return S_OK;
     }
 
-    HRESULT hr = TE_FaultIsolationCallPlugin(entry, entry->interface->Enable, "Enable");
+    HRESULT hr = TE_FaultIsolationCallPlugin(entry, entry->iface->Enable, "Enable");
     if (SUCCEEDED(hr)) {
         entry->enabled = true;
         TE_LogWrite(TE_LOG_INFO, "Plugin '%s' enabled successfully", entry->metadata->name);
@@ -123,30 +118,31 @@ HRESULT TE_PluginLoaderEnable(TE_PluginEntry* entry)
 
 HRESULT TE_PluginLoaderDisable(TE_PluginEntry* entry)
 {
-    if (!entry || !entry->interface) return E_POINTER;
+    if (!entry || !entry->iface) return E_POINTER;
     if (!entry->enabled) return S_OK;
 
-    entry->enabled = false;
-
-    if (entry->interface->Disable) {
-        TE_FaultIsolationCallPlugin(entry, entry->interface->Disable, "Disable");
+    if (entry->iface->Disable) {
+        TE_FaultIsolationCallPlugin(entry, entry->iface->Disable, "Disable");
     }
 
+    entry->enabled = false;
     TE_LogWrite(TE_LOG_INFO, "Plugin '%s' disabled", entry->metadata->name);
     return S_OK;
 }
 
 HRESULT TE_PluginLoaderShutdown(TE_PluginEntry* entry)
 {
-    if (!entry || !entry->interface) return E_POINTER;
+    if (!entry || !entry->iface) return E_POINTER;
 
     if (entry->enabled) {
         TE_PluginLoaderDisable(entry);
     }
 
-    if (entry->interface->Shutdown) {
-        TE_FaultIsolationCallPlugin(entry, entry->interface->Shutdown, "Shutdown");
+    if (entry->iface->Shutdown) {
+        TE_FaultIsolationCallPlugin(entry, entry->iface->Shutdown, "Shutdown");
     }
+
+    TE_LogWrite(TE_LOG_INFO, "Plugin '%s' shutdown and unloaded", (entry->metadata && entry->metadata->name) ? entry->metadata->name : "unknown");
 
     if (entry->context) {
         HeapFree(GetProcessHeap(), 0, entry->context);
@@ -158,7 +154,6 @@ HRESULT TE_PluginLoaderShutdown(TE_PluginEntry* entry)
         entry->dll_handle = NULL;
     }
 
-    TE_LogWrite(TE_LOG_INFO, "Plugin '%s' shutdown and unloaded", entry->metadata ? entry->metadata->name : "unknown");
     return S_OK;
 }
 

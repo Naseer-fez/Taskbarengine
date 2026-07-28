@@ -7,10 +7,19 @@
 extern "C" {
 #endif
 
+/* TE_LOG_RING_SIZE: 256 entries * 256 bytes per entry = 64 KB pre-allocated circular buffer */
 #define TE_LOG_RING_SIZE 256
-#define TE_LOG_MESSAGE_SIZE 248
+#define TE_LOG_MESSAGE_SIZE 244
+
+enum {
+    TE_LOG_STATE_EMPTY = 0,
+    TE_LOG_STATE_WRITING = 1,
+    TE_LOG_STATE_UNREAD = 2,
+    TE_LOG_STATE_READING = 3
+};
 
 typedef struct TE_LogEntry {
+    volatile LONG state; /* TE_LOG_STATE_* transitions */
     uint32_t level;
     uint32_t timestamp_ms;
     char message[TE_LOG_MESSAGE_SIZE];

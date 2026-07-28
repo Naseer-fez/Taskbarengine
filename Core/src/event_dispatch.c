@@ -1,4 +1,6 @@
 #include "core/event_dispatch.h"
+#include "core/plugin_loader.h"
+#include "core/fault_isolation.h"
 #include <windows.h>
 #include <sdk/te_log.h>
 
@@ -10,7 +12,7 @@ void TE_EventDispatchInit(TE_EventEntry* table, uint32_t* count)
     }
 }
 
-HRESULT TE_EventSubscribe(TE_EventEntry* table, uint32_t* count, TE_EventType type, TE_EventCallback cb, void* user_data, uint32_t plugin_id)
+HRESULT TE_EventSubscribeEx(TE_EventEntry* table, uint32_t* count, TE_EventType type, TE_EventCallback cb, void* user_data, uint32_t plugin_id, void* plugin_entry)
 {
     if (!table || !count || !cb) return E_POINTER;
     if (*count >= TE_MAX_SUBSCRIPTIONS) {
@@ -21,6 +23,7 @@ HRESULT TE_EventSubscribe(TE_EventEntry* table, uint32_t* count, TE_EventType ty
     /* Check if already subscribed */
     for (uint32_t i = 0; i < *count; i++) {
         if (table[i].type == type && table[i].callback == cb && table[i].user_data == user_data) {
+            table[i].plugin_entry = plugin_entry;
             return S_OK; /* Already subscribed */
         }
     }
@@ -29,9 +32,15 @@ HRESULT TE_EventSubscribe(TE_EventEntry* table, uint32_t* count, TE_EventType ty
     table[*count].callback = cb;
     table[*count].user_data = user_data;
     table[*count].plugin_id = plugin_id;
+    table[*count].plugin_entry = plugin_entry;
     (*count)++;
 
     return S_OK;
+}
+
+HRESULT TE_EventSubscribe(TE_EventEntry* table, uint32_t* count, TE_EventType type, TE_EventCallback cb, void* user_data, uint32_t plugin_id)
+{
+    return TE_EventSubscribeEx(table, count, type, cb, user_data, plugin_id, NULL);
 }
 
 HRESULT TE_EventUnsubscribe(TE_EventEntry* table, uint32_t* count, TE_EventType type, TE_EventCallback cb)
@@ -53,17 +62,27 @@ HRESULT TE_EventUnsubscribe(TE_EventEntry* table, uint32_t* count, TE_EventType 
     return S_FALSE; /* Not found */
 }
 
-void TE_EventDispatch(const TE_EventEntry* table, uint32_t count, TE_EventType type, const void* event_data)
+void TE_EventDispatchTargeted(const TE_EventEntry* table, uint32_t count, TE_EventType type, const void* event_data, uint32_t target_plugin_id)
 {
     if (!table || count == 0) return;
 
     for (uint32_t i = 0; i < count; i++) {
         if (table[i].type == type && table[i].callback != NULL) {
-            __try {
-                table[i].callback(type, event_data, table[i].user_data);
-            } __except (EXCEPTION_EXECUTE_HANDLER) {
-                TE_LogWrite(TE_LOG_ERROR, "SEH Exception caught in event callback for event type %d", (int)type);
+            if (target_plugin_id != 0 && table[i].plugin_id != 0 && table[i].plugin_id != target_plugin_id) {
+                continue; /* Skip event for non-targeted plugins */
             }
+
+            TE_PluginEntry* entry = (TE_PluginEntry*)table[i].plugin_entry;
+            if (entry && (!entry->enabled || entry->disabled_by_fault)) {
+                continue; /* Skip disabled or fault-disabled plugins */
+            }
+
+            TE_FaultIsolationCallEventCallback(entry, table[i].callback, type, event_data, table[i].user_data);
         }
     }
+}
+
+void TE_EventDispatch(const TE_EventEntry* table, uint32_t count, TE_EventType type, const void* event_data)
+{
+    TE_EventDispatchTargeted(table, count, type, event_data, 0);
 }
