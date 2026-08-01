@@ -1,5 +1,6 @@
 #include "core/taskbar_subclass.h"
 #include "core/config_watcher.h"
+#include "core/core_manager.h"
 #include "core/shell_hook.h"
 #include "core/power_device.h"
 #include <commctrl.h>
@@ -72,6 +73,20 @@ static LRESULT CALLBACK TaskbarSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam,
             TE_LogWrite(TE_LOG_INFO, "Taskbar subclass received WM_TE_CONFIG_CHANGED");
             if (ref && ref->core_state_ptr) {
                 TE_CoreManagerOnConfigChanged(ref->core_state_ptr);
+            }
+            return 0;
+        }
+
+        case WM_TE_IPC_COMMAND: {
+            TE_LogWrite(TE_LOG_INFO, "Taskbar subclass received WM_TE_IPC_COMMAND (cmd=%lu)", (unsigned long)wParam);
+            if (wParam == TE_IPC_CMD_RELOAD_CONFIG) {
+                TE_CoreManagerReloadConfig();
+            } else if (wParam == TE_IPC_CMD_ENABLE_PLUGIN || wParam == TE_IPC_CMD_DISABLE_PLUGIN) {
+                char* name = (char*)lParam;
+                if (name) {
+                    TE_CoreManagerSetPluginEnabledByName(name, wParam == TE_IPC_CMD_ENABLE_PLUGIN);
+                    HeapFree(GetProcessHeap(), 0, name);
+                }
             }
             return 0;
         }

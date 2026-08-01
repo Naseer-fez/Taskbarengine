@@ -38,7 +38,11 @@ static void TE_RotateLogs(const wchar_t* dir)
         FILETIME ft;
     } FileInfo;
 
-    FileInfo files[32];
+    FileInfo* files = (FileInfo*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(FileInfo) * 32);
+    if (!files) {
+        FindClose(hfind);
+        return;
+    }
     int count = 0;
 
     do {
@@ -70,6 +74,8 @@ static void TE_RotateLogs(const wchar_t* dir)
         }
         count--;
     }
+
+    HeapFree(GetProcessHeap(), 0, files);
 }
 
 static DWORD WINAPI TE_LogFlushThreadProc(LPVOID param)

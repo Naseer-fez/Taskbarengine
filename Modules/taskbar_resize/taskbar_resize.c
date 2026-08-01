@@ -164,6 +164,13 @@ static void ApplyHeight(void)
     while ((secondary = FindWindowExW(NULL, secondary, L"Shell_SecondaryTrayWnd", NULL)) != NULL) {
         ApplyHeightToWindow(secondary);
     }
+
+    if (g_state.ctx.publish_state) {
+        StateValue val;
+        val.type = TE_STATE_TYPE_INT;
+        val.value.i = TE_TaskbarResizeScaleForDpi(g_state.settings.height, CurrentDpi());
+        g_state.ctx.publish_state("taskbar_resize.height", &val);
+    }
 }
 
 static void RestoreGeometry(void)

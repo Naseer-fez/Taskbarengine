@@ -3,6 +3,8 @@
 #include "app/crash_recovery.h"
 #include <sdk/te_types.h>
 #include <sdk/te_log.h>
+#include <stdio.h>
+#include <wchar.h>
 #include <tlhelp32.h>
 #include <windows.h>
 
@@ -28,7 +30,18 @@ static HRESULT InstallEngineHook(void* context)
     (void)context;
 
     if (!g_engine_dll) {
-        g_engine_dll = LoadLibraryW(L"EngineDLL.dll");
+        wchar_t dll_path[MAX_PATH];
+        DWORD len = GetModuleFileNameW(NULL, dll_path, MAX_PATH);
+        if (len > 0 && len < MAX_PATH) {
+            wchar_t* slash = wcsrchr(dll_path, L'\\');
+            if (slash) {
+                swprintf(slash + 1, MAX_PATH - (slash + 1 - dll_path), L"EngineDLL.dll");
+                g_engine_dll = LoadLibraryW(dll_path);
+            }
+        }
+        if (!g_engine_dll) {
+            g_engine_dll = LoadLibraryW(L"EngineDLL.dll");
+        }
         if (!g_engine_dll) {
             return HRESULT_FROM_WIN32(GetLastError());
         }

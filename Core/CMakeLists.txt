@@ -13,6 +13,7 @@ add_library(EngineDLL SHARED
     src/shell_hook.c
     src/power_device.c
     src/vdesktop_notify.cpp
+    src/state_store.c
 )
 
 target_include_directories(EngineDLL PUBLIC

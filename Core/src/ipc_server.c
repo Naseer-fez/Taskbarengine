@@ -1,6 +1,7 @@
 #include "core/ipc_server.h"
 #include "core/ipc_protocol.h"
 #include "core/core_manager.h"
+#include "core/taskbar_subclass.h"
 #include <sdk/te_log.h>
 #include <sddl.h>
 
@@ -42,6 +43,8 @@ static HRESULT IpcReadExact(HANDLE pipe, void* buffer, DWORD bytes)
 
 static void IpcHandleMessage(HANDLE pipe, const TE_IpcHeader* header, const uint8_t* payload)
 {
+    HWND taskbar_hwnd = FindWindowW(L"Shell_TrayWnd", NULL);
+
     switch ((TE_IpcMsgType)header->type) {
         case TE_IPC_MSG_SHUTDOWN:
             TE_LogWrite(TE_LOG_INFO, "IPC shutdown requested");
@@ -51,19 +54,31 @@ static void IpcHandleMessage(HANDLE pipe, const TE_IpcHeader* header, const uint
             break;
 
         case TE_IPC_MSG_RELOAD_CONFIG:
-            TE_CoreManagerReloadConfig();
+            if (taskbar_hwnd && IsWindow(taskbar_hwnd)) {
+                PostMessageW(taskbar_hwnd, WM_TE_IPC_COMMAND, TE_IPC_CMD_RELOAD_CONFIG, 0);
+            }
             IpcWriteMessage(pipe, TE_IPC_MSG_STATUS, "OK", 3);
             break;
 
         case TE_IPC_MSG_ENABLE_PLUGIN:
-            TE_CoreManagerSetPluginEnabledByName((const char*)payload, true);
+        case TE_IPC_MSG_DISABLE_PLUGIN: {
+            char* name_dup = NULL;
+            if (payload && payload[0] != '\0') {
+                size_t len = strlen((const char*)payload) + 1;
+                name_dup = (char*)HeapAlloc(GetProcessHeap(), 0, len);
+                if (name_dup) {
+                    memcpy(name_dup, payload, len);
+                }
+            }
+            if (taskbar_hwnd && IsWindow(taskbar_hwnd) && name_dup) {
+                WPARAM cmd = (header->type == TE_IPC_MSG_ENABLE_PLUGIN) ? TE_IPC_CMD_ENABLE_PLUGIN : TE_IPC_CMD_DISABLE_PLUGIN;
+                PostMessageW(taskbar_hwnd, WM_TE_IPC_COMMAND, cmd, (LPARAM)name_dup);
+            } else if (name_dup) {
+                HeapFree(GetProcessHeap(), 0, name_dup);
+            }
             IpcWriteMessage(pipe, TE_IPC_MSG_STATUS, "OK", 3);
             break;
-
-        case TE_IPC_MSG_DISABLE_PLUGIN:
-            TE_CoreManagerSetPluginEnabledByName((const char*)payload, false);
-            IpcWriteMessage(pipe, TE_IPC_MSG_STATUS, "OK", 3);
-            break;
+        }
 
         case TE_IPC_MSG_GET_PLUGIN_LIST: {
             char list[2048];

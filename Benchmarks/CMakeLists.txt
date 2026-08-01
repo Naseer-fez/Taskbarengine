@@ -16,13 +16,18 @@ FetchContent_MakeAvailable(benchmark)
 
 add_executable(te_benchmarks
     bench_event_dispatch.cpp
+    bench_magnification.cpp
+    bench_state_store.cpp
     ${CMAKE_SOURCE_DIR}/Core/src/event_dispatch.c
     ${CMAKE_SOURCE_DIR}/Core/src/fault_isolation.c
+    ${CMAKE_SOURCE_DIR}/Core/src/state_store.c
+    ${CMAKE_SOURCE_DIR}/Modules/icon_hover/magnification.c
 )
 
 target_include_directories(te_benchmarks PRIVATE
     ${CMAKE_SOURCE_DIR}/Core/include
     ${CMAKE_SOURCE_DIR}/SDK/include
+    ${CMAKE_SOURCE_DIR}/Modules/icon_hover
 )
 
 target_link_libraries(te_benchmarks PRIVATE

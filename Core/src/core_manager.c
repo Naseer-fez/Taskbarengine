@@ -48,16 +48,16 @@ static HRESULT CoreUnsubscribeWrapper(uint32_t event_type, EventCallbackFunc cal
 
 static void CoreRequestRedrawNoop(void) {}
 
-static HRESULT CorePublishStateNoop(const char* key, const StateValue* val)
+#include "core/state_store.h"
+
+static HRESULT CorePublishState(const char* key, const StateValue* val)
 {
-    (void)key; (void)val;
-    return S_OK;
+    return TE_StatePublish(key, val);
 }
 
-static HRESULT CoreQueryStateNoop(const char* key, StateValue* out_val)
+static HRESULT CoreQueryState(const char* key, StateValue* out_val)
 {
-    (void)key; (void)out_val;
-    return E_NOTIMPL;
+    return TE_StateQuery(key, out_val);
 }
 
 HRESULT TE_CoreManagerInit(HINSTANCE hinstance)
@@ -74,6 +74,9 @@ HRESULT TE_CoreManagerInit(HINSTANCE hinstance)
     if (FAILED(path_hr)) {
         wcsncpy(g_core_state->config_path, L"config.jsonc", MAX_PATH - 1);
     }
+
+    /* Initialize State Store */
+    TE_StateStoreInit();
 
     /* Initialize Logging */
     wchar_t log_dir[MAX_PATH];
@@ -154,8 +157,8 @@ HRESULT TE_CoreManagerInit(HINSTANCE hinstance)
         plugin->context->subscribe = CoreSubscribeWrapper;
         plugin->context->unsubscribe = CoreUnsubscribeWrapper;
         plugin->context->request_redraw = CoreRequestRedrawNoop;
-        plugin->context->publish_state = CorePublishStateNoop;
-        plugin->context->query_state = CoreQueryStateNoop;
+        plugin->context->publish_state = CorePublishState;
+        plugin->context->query_state = CoreQueryState;
         plugin->context->core_opaque = (void*)(uintptr_t)i;
 
         if (plugin->iface->Initialize) {
@@ -213,6 +216,8 @@ static void CoreManagerShutdownInternal(bool stop_ipc_server)
         cJSON_Delete(g_core_state->config_root);
         g_core_state->config_root = NULL;
     }
+
+    TE_StateStoreShutdown();
 
     TE_LogShutdown();
 
