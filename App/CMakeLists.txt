@@ -19,14 +19,18 @@ target_link_libraries(TaskbarEngine PRIVATE
     shell32
     user32
     taskschd
-    comsuppw
 )
+
+if(MSVC)
+    target_link_libraries(TaskbarEngine PRIVATE comsuppw)
+endif()
 
 set_target_properties(TaskbarEngine PROPERTIES
     OUTPUT_NAME "TaskbarEngine"
 )
 
-# GUI Target (Requires C++17 and Windows App SDK)
+# GUI Target (Requires C++17, MSVC, and Windows App SDK)
+if(MSVC)
 add_executable(TaskbarEngineSettings WIN32
     src/gui_main.cpp
     src/settings_page.cpp
@@ -42,10 +46,8 @@ target_include_directories(TaskbarEngineSettings PRIVATE
     ${CMAKE_SOURCE_DIR}/SDK/include
 )
 
-# Define WinUI 3 requirements here (find_package, target_link_libraries)
-# Note: Actual NuGet restore/find_package(WindowsAppSDK) is expected to be handled
-# by a wrapper script or vcpkg integration in a real build environment.
 target_link_libraries(TaskbarEngineSettings PRIVATE
     te_sdk
     windowsapp
 )
+endif()

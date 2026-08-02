@@ -36,7 +36,7 @@ HRESULT ConfigIO_Save(const std::wstring& path, cJSON* root)
     std::wstring dir = path.substr(0, path.find_last_of(L"\\/"));
     SHCreateDirectoryExW(NULL, dir.c_str(), NULL);
 
-    std::ofstream out(path, std::ios::binary);
+    std::ofstream out(path.c_str(), std::ios::binary);
     if (!out) {
         cJSON_free(json_str);
         return E_FAIL;

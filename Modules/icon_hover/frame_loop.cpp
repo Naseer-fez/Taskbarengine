@@ -15,10 +15,10 @@ static volatile LONG g_running = 0;
 static volatile LONG g_timer_active = 0;
 
 /* Frame timing stats */
-static float g_frame_times_ms[120] = {0};
+static float g_frame_times_ms[120] = {};
 static int g_frame_index = 0;
 static int g_frame_count_total = 0;
-static LARGE_INTEGER g_last_frame_qpc = {0};
+static LARGE_INTEGER g_last_frame_qpc = {};
 
 /**
  * @brief Deactivates the frame loop timer from a non-callback context.
