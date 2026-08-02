@@ -1,122 +1,163 @@
 #include "frame_loop.h"
 #include "dcomp_overlay.h"
+#include "icon_layout.h"
 #include <dwmapi.h>
 #include <windows.h>
-#include <vector>
+#include <sdk/te_log.h>
+#include <sdk/te_easing.h>
+#include <math.h>
 
-#ifdef _MSC_VER
-#pragma comment(lib, "dwmapi.lib")
-#endif
-
+static TE_IconHoverState* g_state = nullptr;
 static HANDLE g_timer_queue = NULL;
 static HANDLE g_timer = NULL;
-static TE_IconHoverState* g_active_state = nullptr;
-static bool g_settling = false;
-static DWORD g_settle_start_time = 0;
-static std::vector<float> g_start_settle_scales;
+static HANDLE g_stop_event = NULL;
+static volatile LONG g_running = 0;
+static volatile LONG g_timer_active = 0;
 
-static void CALLBACK FrameLoopTimerCallback(PVOID lpParameter, BOOLEAN TimerOrWaitFired)
+static void CALLBACK FrameLoopCallback(PVOID lpParam, BOOLEAN TimerOrWaitFired)
 {
+    (void)lpParam;
     (void)TimerOrWaitFired;
-    TE_IconHoverState* state = (TE_IconHoverState*)lpParameter;
-    if (!state || !state->enabled) return;
+
+    if (!g_state || !g_running) return;
+
+    if (WaitForSingleObject(g_stop_event, 0) == WAIT_OBJECT_0) {
+        return;
+    }
 
     POINT pt;
-    GetCursorPos(&pt);
+    if (!GetCursorPos(&pt)) return;
 
-    HWND taskbar_hwnd = state->ctx.taskbar_hwnd;
-    RECT rc;
-    ZeroMemory(&rc, sizeof(rc));
-    if (taskbar_hwnd && IsWindow(taskbar_hwnd)) {
-        GetWindowRect(taskbar_hwnd, &rc);
+    bool in_taskbar = PtInRect(&g_state->taskbar_rect, pt);
+    bool is_settling = (g_state->settling == 1);
+
+    // If mouse is outside taskbar and settle is complete, reset layout and exit (idle state - 0% CPU)
+    if (!in_taskbar && !is_settling) {
+        if (g_state->was_in_taskbar) {
+            g_state->was_in_taskbar = false;
+        }
+        return;
     }
 
-    /* Inflate bounds slightly by hover radius */
-    InflateRect(&rc, state->radius, state->radius);
+    // Wait for vsync when active
+    DwmFlush();
 
-    bool inside = PtInRect(&rc, pt) != FALSE;
+    AcquireSRWLockExclusive(&g_state->icon_lock);
 
-    if (inside) {
-        g_settling = false;
-        TE_DCompOverlaySetVisible(true);
+    int count = g_state->icon_count;
+    if (count <= 0) {
+        ReleaseSRWLockExclusive(&g_state->icon_lock);
+        return;
+    }
 
-        std::vector<float> centers(state->icon_count);
-        for (int i = 0; i < state->icon_count; ++i) {
-            centers[i] = (float)(state->icons[i].bounds.left + state->icons[i].bounds.right) / 2.0f;
-        }
+    // Compute base icon center coordinates
+    for (int i = 0; i < count; i++) {
+        g_state->base_centers_x[i] = (float)g_state->icons[i].bounds.left + 
+            ((float)g_state->icons[i].bounds.right - (float)g_state->icons[i].bounds.left) / 2.0f;
+    }
 
-        TE_MagnifyComputeScales((float)pt.x, centers.data(), state->scales, state->icon_count,
-                               (float)state->radius, state->max_scale, state->curve);
-
-        TE_DCompOverlaySetScales(state->scales, state->icon_count);
-
-        /* Vsync lock */
-        DwmFlush();
-        TE_DCompOverlayCommit();
-    } else {
-        if (!g_settling) {
-            g_settling = true;
-            g_settle_start_time = GetTickCount();
-            g_start_settle_scales.assign(state->scales, state->scales + state->icon_count);
-        }
-
-        DWORD elapsed = GetTickCount() - g_settle_start_time;
-        float duration = (state->speed_ms > 0) ? (float)state->speed_ms : 150.0f;
-        float t = (float)elapsed / duration;
-
-        if (t >= 1.0f) {
-            /* Settle complete -> reset scales to 1.0 and stop timer */
-            for (int i = 0; i < state->icon_count; ++i) {
-                state->scales[i] = 1.0f;
-            }
-            TE_DCompOverlaySetScales(state->scales, state->icon_count);
-            DwmFlush();
-            TE_DCompOverlayCommit();
-            TE_DCompOverlaySetVisible(false);
-            TE_FrameLoopStop();
-        } else {
-            /* Lerp back to 1.0 */
-            for (int i = 0; i < state->icon_count; ++i) {
-                float start_s = (i < (int)g_start_settle_scales.size()) ? g_start_settle_scales[i] : 1.0f;
-                state->scales[i] = start_s + (1.0f - start_s) * t;
-            }
-            TE_DCompOverlaySetScales(state->scales, state->icon_count);
-            DwmFlush();
-            TE_DCompOverlayCommit();
+    // Handle mouse leaving taskbar: trigger settle transition
+    if (g_state->was_in_taskbar && !in_taskbar && !is_settling) {
+        g_state->settling = 1;
+        is_settling = true;
+        QueryPerformanceCounter(&g_state->settle_start_qpc);
+        for (int i = 0; i < count; i++) {
+            g_state->settle_start_scales[i] = g_state->scales[i];
         }
     }
-}
+    g_state->was_in_taskbar = in_taskbar;
 
-extern "C" HRESULT TE_FrameLoopStart(TE_IconHoverState* state)
-{
-    if (!state) return E_POINTER;
-    if (g_timer != NULL) return S_OK;
+    if (in_taskbar) {
+        g_state->settling = 0;
+        TE_MagnifyComputeScales((float)pt.x, g_state->base_centers_x, g_state->scales, 
+                                count, (float)g_state->radius, g_state->max_scale, g_state->curve);
+        QueryPerformanceCounter(&g_state->settle_start_qpc);
+    } else if (is_settling) {
+        LARGE_INTEGER now, freq;
+        QueryPerformanceCounter(&now);
+        QueryPerformanceFrequency(&freq);
+        float elapsed_ms = (float)(now.QuadPart - g_state->settle_start_qpc.QuadPart) * 1000.0f / (float)freq.QuadPart;
+        
+        float progress = elapsed_ms / (float)(g_state->speed_ms > 0 ? g_state->speed_ms : 150);
+        if (progress >= 1.0f) {
+            progress = 1.0f;
+            g_state->settling = 0;
+        }
 
-    g_active_state = state;
-    g_settling = false;
-
-    if (!g_timer_queue) {
-        g_timer_queue = CreateTimerQueue();
-        if (!g_timer_queue) return HRESULT_FROM_WIN32(GetLastError());
+        for (int i = 0; i < count; i++) {
+            g_state->scales[i] = TE_LerpEased(g_state->settle_start_scales[i], 1.0f, progress, TE_EASE_OUT_CUBIC);
+        }
     }
 
-    BOOL ok = CreateTimerQueueTimer(&g_timer, g_timer_queue, FrameLoopTimerCallback, state,
-                                    0, 8, WT_EXECUTEINTIMERTHREAD);
+    // Compute layout positions
+    TE_LayoutComputePositions(g_state->scales, g_state->base_centers_x, 
+                              g_state->displaced_x, g_state->displaced_y, 
+                              count, g_state->icon_size, (float)g_state->taskbar_rect.bottom);
 
-    return ok ? S_OK : HRESULT_FROM_WIN32(GetLastError());
+    ReleaseSRWLockExclusive(&g_state->icon_lock);
+
+    // Update DirectComposition visuals
+    TE_DcompUpdateVisuals(g_state);
 }
 
-extern "C" void TE_FrameLoopStop(void)
+HRESULT TE_FrameLoopStart(TE_IconHoverState* state)
 {
-    if (g_timer && g_timer_queue) {
-        DeleteTimerQueueTimer(g_timer_queue, g_timer, NULL);
-        g_timer = NULL;
+    if (g_running) return S_OK;
+
+    g_state = state;
+    g_stop_event = CreateEventW(NULL, TRUE, FALSE, NULL);
+    
+    g_timer_queue = CreateTimerQueue();
+    if (!g_timer_queue) return HRESULT_FROM_WIN32(GetLastError());
+
+    g_running = 1;
+
+    if (!CreateTimerQueueTimer(&g_timer, g_timer_queue, FrameLoopCallback, NULL, 0, 16, WT_EXECUTEDEFAULT)) {
+        g_running = 0;
+        DeleteTimerQueueEx(g_timer_queue, NULL);
+        CloseHandle(g_stop_event);
+        return HRESULT_FROM_WIN32(GetLastError());
     }
-    g_active_state = nullptr;
-    g_settling = false;
+
+    g_timer_active = 1;
+    return S_OK;
 }
 
-extern "C" bool TE_FrameLoopIsRunning(void)
+void TE_FrameLoopActivate(void)
 {
-    return g_timer != NULL;
+    InterlockedExchange(&g_timer_active, 1);
+}
+
+void TE_FrameLoopDeactivate(void)
+{
+    InterlockedExchange(&g_timer_active, 0);
+}
+
+void TE_FrameLoopStop(void)
+{
+    if (!g_running) return;
+    
+    g_running = 0;
+    g_timer_active = 0;
+    SetEvent(g_stop_event);
+
+    if (g_timer_queue && g_timer) {
+        DeleteTimerQueueTimer(g_timer_queue, g_timer, INVALID_HANDLE_VALUE);
+    }
+    if (g_timer_queue) {
+        DeleteTimerQueueEx(g_timer_queue, INVALID_HANDLE_VALUE);
+    }
+    
+    CloseHandle(g_stop_event);
+    
+    g_timer = NULL;
+    g_timer_queue = NULL;
+    g_stop_event = NULL;
+    g_state = nullptr;
+}
+
+void TE_FrameLoopUpdateMouse(int x, int y)
+{
+    (void)x;
+    (void)y;
 }

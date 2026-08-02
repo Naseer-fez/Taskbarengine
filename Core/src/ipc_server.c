@@ -46,12 +46,17 @@ static void IpcHandleMessage(HANDLE pipe, const TE_IpcHeader* header, const uint
     HWND taskbar_hwnd = FindWindowW(L"Shell_TrayWnd", NULL);
 
     switch ((TE_IpcMsgType)header->type) {
-        case TE_IPC_MSG_SHUTDOWN:
+        case TE_IPC_MSG_SHUTDOWN: {
             TE_LogWrite(TE_LOG_INFO, "IPC shutdown requested");
-            TE_CoreManagerShutdownFromIpc();
+            if (taskbar_hwnd && IsWindow(taskbar_hwnd)) {
+                PostMessageW(taskbar_hwnd, WM_TE_IPC_COMMAND, TE_IPC_CMD_SHUTDOWN, 0);
+            } else {
+                TE_CoreManagerShutdownFromIpc();
+            }
             IpcWriteMessage(pipe, TE_IPC_MSG_SHUTDOWN_COMPLETE, NULL, 0);
             if (g_ipc_stop_event) SetEvent(g_ipc_stop_event);
             break;
+        }
 
         case TE_IPC_MSG_RELOAD_CONFIG:
             if (taskbar_hwnd && IsWindow(taskbar_hwnd)) {
@@ -72,7 +77,9 @@ static void IpcHandleMessage(HANDLE pipe, const TE_IpcHeader* header, const uint
             }
             if (taskbar_hwnd && IsWindow(taskbar_hwnd) && name_dup) {
                 WPARAM cmd = (header->type == TE_IPC_MSG_ENABLE_PLUGIN) ? TE_IPC_CMD_ENABLE_PLUGIN : TE_IPC_CMD_DISABLE_PLUGIN;
-                PostMessageW(taskbar_hwnd, WM_TE_IPC_COMMAND, cmd, (LPARAM)name_dup);
+                if (!PostMessageW(taskbar_hwnd, WM_TE_IPC_COMMAND, cmd, (LPARAM)name_dup)) {
+                    HeapFree(GetProcessHeap(), 0, name_dup);
+                }
             } else if (name_dup) {
                 HeapFree(GetProcessHeap(), 0, name_dup);
             }
@@ -81,9 +88,40 @@ static void IpcHandleMessage(HANDLE pipe, const TE_IpcHeader* header, const uint
         }
 
         case TE_IPC_MSG_GET_PLUGIN_LIST: {
-            char list[2048];
-            uint32_t len = TE_CoreManagerBuildPluginList(list, sizeof(list));
-            IpcWriteMessage(pipe, TE_IPC_MSG_PLUGIN_LIST, list, len);
+            char* list = (char*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 2048);
+            uint32_t len = 0;
+            if (taskbar_hwnd && IsWindow(taskbar_hwnd) && list) {
+                TE_IpcSyncPayload* sync_payload = (TE_IpcSyncPayload*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(TE_IpcSyncPayload));
+                if (sync_payload) {
+                    sync_payload->buffer = list;
+                    sync_payload->buffer_len = 2048;
+                    sync_payload->completion_event = CreateEventW(NULL, TRUE, FALSE, NULL);
+                    
+                    if (PostMessageW(taskbar_hwnd, WM_TE_IPC_COMMAND, TE_IPC_CMD_GET_PLUGIN_LIST, (LPARAM)sync_payload)) {
+                        if (WaitForSingleObject(sync_payload->completion_event, 2000) == WAIT_OBJECT_0) {
+                            len = sync_payload->result_code;
+                            IpcWriteMessage(pipe, TE_IPC_MSG_PLUGIN_LIST, list, len);
+                            CloseHandle(sync_payload->completion_event);
+                            HeapFree(GetProcessHeap(), 0, sync_payload);
+                            HeapFree(GetProcessHeap(), 0, list);
+                        } else {
+                            /* Timeout: leak heap allocations to prevent use-after-free on UI thread */
+                            IpcWriteMessage(pipe, TE_IPC_MSG_STATUS, "TIMEOUT", 7);
+                            CloseHandle(sync_payload->completion_event);
+                        }
+                    } else {
+                        len = TE_CoreManagerBuildPluginList(list, 2048);
+                        IpcWriteMessage(pipe, TE_IPC_MSG_PLUGIN_LIST, list, len);
+                        CloseHandle(sync_payload->completion_event);
+                        HeapFree(GetProcessHeap(), 0, sync_payload);
+                        HeapFree(GetProcessHeap(), 0, list);
+                    }
+                }
+            } else if (list) {
+                len = TE_CoreManagerBuildPluginList(list, 2048);
+                IpcWriteMessage(pipe, TE_IPC_MSG_PLUGIN_LIST, list, len);
+                HeapFree(GetProcessHeap(), 0, list);
+            }
             break;
         }
 

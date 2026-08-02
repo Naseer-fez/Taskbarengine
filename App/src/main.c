@@ -32,16 +32,19 @@ static HRESULT InstallEngineHook(void* context)
     if (!g_engine_dll) {
         wchar_t dll_path[MAX_PATH];
         DWORD len = GetModuleFileNameW(NULL, dll_path, MAX_PATH);
-        if (len > 0 && len < MAX_PATH) {
-            wchar_t* slash = wcsrchr(dll_path, L'\\');
-            if (slash) {
-                swprintf(slash + 1, MAX_PATH - (slash + 1 - dll_path), L"EngineDLL.dll");
-                g_engine_dll = LoadLibraryW(dll_path);
-            }
+        if (len == 0 || len >= MAX_PATH) {
+            return HRESULT_FROM_WIN32(GetLastError());
         }
-        if (!g_engine_dll) {
-            g_engine_dll = LoadLibraryW(L"EngineDLL.dll");
+        wchar_t* slash = wcsrchr(dll_path, L'\\');
+        if (!slash) {
+            return HRESULT_FROM_WIN32(ERROR_INVALID_NAME);
         }
+        size_t remaining = MAX_PATH - (size_t)(slash + 1 - dll_path);
+        int ret = swprintf(slash + 1, remaining, L"EngineDLL.dll");
+        if (ret < 0 || (size_t)ret >= remaining) {
+            return HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER);
+        }
+        g_engine_dll = LoadLibraryExW(dll_path, NULL, LOAD_WITH_ALTERED_SEARCH_PATH);
         if (!g_engine_dll) {
             return HRESULT_FROM_WIN32(GetLastError());
         }

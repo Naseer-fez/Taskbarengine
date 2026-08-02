@@ -87,6 +87,17 @@ static LRESULT CALLBACK TaskbarSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam,
                     TE_CoreManagerSetPluginEnabledByName(name, wParam == TE_IPC_CMD_ENABLE_PLUGIN);
                     HeapFree(GetProcessHeap(), 0, name);
                 }
+            } else if (wParam == TE_IPC_CMD_SHUTDOWN) {
+                TE_LogWrite(TE_LOG_INFO, "Taskbar subclass executing TE_IPC_CMD_SHUTDOWN on UI thread");
+                TE_CoreManagerShutdownFromIpc();
+            } else if (wParam == TE_IPC_CMD_GET_PLUGIN_LIST) {
+                TE_IpcSyncPayload* sync = (TE_IpcSyncPayload*)lParam;
+                if (sync) {
+                    sync->result_code = TE_CoreManagerBuildPluginList((char*)sync->buffer, sync->buffer_len);
+                    if (sync->completion_event) {
+                        SetEvent(sync->completion_event);
+                    }
+                }
             }
             return 0;
         }

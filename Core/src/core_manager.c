@@ -99,8 +99,9 @@ HRESULT TE_CoreManagerInit(HINSTANCE hinstance)
     }
 
     /* Resolve Modules Directory */
+    HINSTANCE mod_inst = hinstance ? hinstance : GetModuleHandleW(NULL);
     wchar_t dll_path[MAX_PATH];
-    DWORD len = GetModuleFileNameW(hinstance, dll_path, MAX_PATH);
+    DWORD len = GetModuleFileNameW(mod_inst, dll_path, MAX_PATH);
     if (len > 0 && len < MAX_PATH) {
         wchar_t* slash = wcsrchr(dll_path, L'\\');
         if (slash) {
@@ -109,7 +110,14 @@ HRESULT TE_CoreManagerInit(HINSTANCE hinstance)
         }
     }
     if (g_core_state->modules_dir[0] == L'\0') {
-        wcsncpy(g_core_state->modules_dir, L"Modules", MAX_PATH - 1);
+        DWORD proc_len = GetModuleFileNameW(NULL, dll_path, MAX_PATH);
+        if (proc_len > 0 && proc_len < MAX_PATH) {
+            wchar_t* slash = wcsrchr(dll_path, L'\\');
+            if (slash) {
+                *slash = L'\0';
+                swprintf(g_core_state->modules_dir, MAX_PATH, L"%s\\Modules", dll_path);
+            }
+        }
     }
 
     /* Initialize Event Dispatch Table */

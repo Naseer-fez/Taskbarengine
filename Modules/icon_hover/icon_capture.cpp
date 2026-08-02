@@ -1,132 +1,141 @@
 #include "icon_capture.h"
-#include <windows.h>
+#include "icon_hover_internal.h"
 #include <commctrl.h>
-#include <commoncontrols.h>
 #include <shellapi.h>
+#include <shlobj.h>
+#include <commoncontrols.h>
 #include <wrl/client.h>
-#include <vector>
-#include <string>
 
 using Microsoft::WRL::ComPtr;
 
-#define MAX_CACHED_ICONS 64
+static TE_IconEntry g_cache[TE_MAX_TASKBAR_ICONS] = {};
 
-struct InternalIconEntry {
-    std::wstring app_id;
-    HBITMAP bitmap;
-    int width;
-    int height;
-};
-
-static std::vector<InternalIconEntry> g_cache;
-
-static HBITMAP CreateDefaultIconBitmap(int size)
+HRESULT TE_IconCaptureInit(void)
 {
-    BITMAPINFO bmi;
-    ZeroMemory(&bmi, sizeof(bmi));
-    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    bmi.bmiHeader.biWidth = size;
-    bmi.bmiHeader.biHeight = -size; /* Top-down */
-    bmi.bmiHeader.biPlanes = 1;
-    bmi.bmiHeader.biBitCount = 32;
-    bmi.bmiHeader.biCompression = BI_RGB;
+    return S_OK;
+}
 
-    void* bits = nullptr;
+static int FindCacheSlot(const wchar_t* app_id)
+{
+    for (int i = 0; i < TE_MAX_TASKBAR_ICONS; i++) {
+        if (g_cache[i].valid && wcscmp(g_cache[i].app_id, app_id) == 0) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static int FindFreeSlot(void)
+{
+    for (int i = 0; i < TE_MAX_TASKBAR_ICONS; i++) {
+        if (!g_cache[i].valid) return i;
+    }
+    return -1;
+}
+
+static HBITMAP CreateBitmapFromIcon(HICON hIcon, int width, int height)
+{
+    if (!hIcon) return NULL;
+
     HDC hdc = GetDC(NULL);
-    HBITMAP hbmp = CreateDIBSection(hdc, &bmi, DIB_RGB_COLORS, &bits, NULL, 0);
+    HDC memDC = CreateCompatibleDC(hdc);
+    HBITMAP hbm = CreateCompatibleBitmap(hdc, width, height);
+    
+    HBITMAP oldBmp = (HBITMAP)SelectObject(memDC, hbm);
+    
+    RECT r = {0, 0, width, height};
+    HBRUSH transparentBrush = (HBRUSH)GetStockObject(BLACK_BRUSH);
+    FillRect(memDC, &r, transparentBrush);
+
+    DrawIconEx(memDC, 0, 0, hIcon, width, height, 0, NULL, DI_NORMAL);
+
+    SelectObject(memDC, oldBmp); // Restore original bitmap before deletion (Fix F15)
+    DeleteDC(memDC);
     ReleaseDC(NULL, hdc);
 
-    if (hbmp && bits) {
-        /* Fill solid blueish square for placeholder fallback */
-        DWORD* pixels = (DWORD*)bits;
-        for (int i = 0; i < size * size; ++i) {
-            pixels[i] = 0xFF3399FF;
-        }
-    }
-    return hbmp;
+    return hbm;
 }
 
-extern "C" HRESULT TE_IconCaptureInit(void)
-{
-    g_cache.reserve(MAX_CACHED_ICONS);
-    return S_OK;
-}
-
-extern "C" HRESULT TE_IconCaptureGet(const wchar_t* app_id, TE_IconEntry* out_entry)
+HRESULT TE_IconCaptureGet(const wchar_t* app_id, TE_IconEntry* out_entry)
 {
     if (!out_entry) return E_POINTER;
-    const wchar_t* target_id = (app_id && app_id[0] != L'\0') ? app_id : L"default_app";
+    out_entry->valid = false;
 
-    /* Lookup in cache */
-    for (const auto& entry : g_cache) {
-        if (entry.app_id == target_id) {
-            wcsncpy_s(out_entry->app_id, 256, entry.app_id.c_str(), _TRUNCATE);
-            out_entry->bitmap = entry.bitmap;
-            out_entry->width = entry.width;
-            out_entry->height = entry.height;
-            return S_OK;
+    int slot = FindCacheSlot(app_id);
+    if (slot >= 0) {
+        *out_entry = g_cache[slot];
+        return S_OK;
+    }
+
+    slot = FindFreeSlot();
+    if (slot < 0) return E_OUTOFMEMORY;
+
+    HICON hIcon = NULL;
+    ComPtr<IImageList> imageList;
+    HRESULT hr = SHGetImageList(SHIL_JUMBO, IID_PPV_ARGS(&imageList));
+    if (SUCCEEDED(hr) && imageList) {
+        SHFILEINFOW sfi = {};
+        DWORD_PTR res = SHGetFileInfoW(app_id, FILE_ATTRIBUTE_NORMAL, &sfi, sizeof(sfi), 
+                                      SHGFI_SYSICONINDEX | SHGFI_USEFILEATTRIBUTES);
+        if (res != 0) {
+            imageList->GetIcon(sfi.iIcon, ILD_TRANSPARENT, &hIcon);
         }
     }
 
-    /* Try extracting icon using SHGetImageList (JUMBO 256x256) */
-    HBITMAP extracted_bmp = nullptr;
-    int bmp_w = 256;
-    int bmp_h = 256;
-
-    ComPtr<IImageList> image_list;
-    HRESULT hr = SHGetImageList(SHIL_JUMBO, IID_PPV_ARGS(&image_list));
-    if (SUCCEEDED(hr) && image_list) {
-        HICON hicon = nullptr;
-        if (SUCCEEDED(image_list->GetIcon(0, ILD_TRANSPARENT, &hicon)) && hicon) {
-            ICONINFO ii;
-            if (GetIconInfo(hicon, &ii)) {
-                extracted_bmp = ii.hbmColor;
-                if (ii.hbmMask) DeleteObject(ii.hbmMask);
-            }
-            DestroyIcon(hicon);
-        }
+    if (!hIcon) {
+        // Fallback to ExtractIconW
+        hIcon = ExtractIconW(GetModuleHandleW(NULL), app_id, 0);
     }
 
-    if (!extracted_bmp) {
-        extracted_bmp = CreateDefaultIconBitmap(256);
+    HBITMAP hbm = NULL;
+    if (hIcon) {
+        hbm = CreateBitmapFromIcon(hIcon, 256, 256);
+        DestroyIcon(hIcon);
+    } else {
+        // Fallback colored fill for unresolvable icons
+        HDC hdc = GetDC(NULL);
+        HDC memDC = CreateCompatibleDC(hdc);
+        hbm = CreateCompatibleBitmap(hdc, 256, 256);
+        HBITMAP oldBmp = (HBITMAP)SelectObject(memDC, hbm);
+        
+        int hash = 0;
+        for (const wchar_t* p = app_id; *p; p++) hash += *p;
+        HBRUSH brush = CreateSolidBrush(RGB((hash*17)%256, (hash*31)%256, (hash*47)%256));
+        RECT r = {0, 0, 256, 256};
+        FillRect(memDC, &r, brush);
+        DeleteObject(brush);
+        
+        SelectObject(memDC, oldBmp); // Restore original bitmap before deletion (Fix F15)
+        DeleteDC(memDC);
+        ReleaseDC(NULL, hdc);
     }
 
-    InternalIconEntry new_entry;
-    new_entry.app_id = target_id;
-    new_entry.bitmap = extracted_bmp;
-    new_entry.width = bmp_w;
-    new_entry.height = bmp_h;
+    g_cache[slot].bitmap = hbm;
+    g_cache[slot].width = 256;
+    g_cache[slot].height = 256;
+    wcsncpy(g_cache[slot].app_id, app_id, 255);
+    g_cache[slot].app_id[255] = L'\0';
+    g_cache[slot].valid = true;
 
-    if (g_cache.size() >= MAX_CACHED_ICONS) {
-        if (g_cache.front().bitmap) DeleteObject(g_cache.front().bitmap);
-        g_cache.erase(g_cache.begin());
-    }
-
-    g_cache.push_back(new_entry);
-
-    wcsncpy_s(out_entry->app_id, 256, new_entry.app_id.c_str(), _TRUNCATE);
-    out_entry->bitmap = new_entry.bitmap;
-    out_entry->width = new_entry.width;
-    out_entry->height = new_entry.height;
+    *out_entry = g_cache[slot];
     return S_OK;
 }
 
-extern "C" void TE_IconCaptureInvalidate(const wchar_t* app_id)
+void TE_IconCaptureInvalidate(const wchar_t* app_id)
 {
-    if (!app_id) return;
-    for (auto it = g_cache.begin(); it != g_cache.end(); ++it) {
-        if (it->app_id == app_id) {
-            if (it->bitmap) DeleteObject(it->bitmap);
-            g_cache.erase(it);
-            break;
-        }
+    int slot = FindCacheSlot(app_id);
+    if (slot >= 0) {
+        if (g_cache[slot].bitmap) DeleteObject(g_cache[slot].bitmap);
+        g_cache[slot].valid = false;
     }
 }
 
-extern "C" void TE_IconCaptureShutdown(void)
+void TE_IconCaptureShutdown(void)
 {
-    for (auto& entry : g_cache) {
-        if (entry.bitmap) DeleteObject(entry.bitmap);
+    for (int i = 0; i < TE_MAX_TASKBAR_ICONS; i++) {
+        if (g_cache[i].valid && g_cache[i].bitmap) {
+            DeleteObject(g_cache[i].bitmap);
+            g_cache[i].valid = false;
+        }
     }
-    g_cache.clear();
 }

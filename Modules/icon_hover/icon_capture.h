@@ -1,6 +1,6 @@
 #pragma once
-
-#include <sdk/te_types.h>
+#include <windows.h>
+#include <stdbool.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -11,26 +11,12 @@ typedef struct TE_IconEntry {
     HBITMAP bitmap;
     int width;
     int height;
+    bool valid;
 } TE_IconEntry;
 
-/**
- * @brief Initialize icon capture cache subsystem.
- */
 HRESULT TE_IconCaptureInit(void);
-
-/**
- * @brief Retrieve cached bitmap or extract new icon bitmap for given app_id.
- */
 HRESULT TE_IconCaptureGet(const wchar_t* app_id, TE_IconEntry* out_entry);
-
-/**
- * @brief Invalidate cached icon entry by app_id.
- */
 void TE_IconCaptureInvalidate(const wchar_t* app_id);
-
-/**
- * @brief Shutdown icon capture subsystem and free all cached HBITMAP handles.
- */
 void TE_IconCaptureShutdown(void);
 
 #ifdef __cplusplus

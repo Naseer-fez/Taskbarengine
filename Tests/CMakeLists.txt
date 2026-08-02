@@ -19,8 +19,10 @@ add_executable(te_tests
     test_taskbar_resize.cpp
     test_crash_recovery.cpp
     test_state_store.cpp
+    test_easing.cpp
     test_magnification.cpp
     test_icon_scales.cpp
+    test_icon_layout.cpp
     ${CMAKE_SOURCE_DIR}/Core/src/config.c
     ${CMAKE_SOURCE_DIR}/Core/src/event_dispatch.c
     ${CMAKE_SOURCE_DIR}/Core/src/plugin_loader.c
@@ -29,6 +31,7 @@ add_executable(te_tests
     ${CMAKE_SOURCE_DIR}/Core/src/state_store.c
     ${CMAKE_SOURCE_DIR}/Modules/taskbar_resize/taskbar_resize.c
     ${CMAKE_SOURCE_DIR}/Modules/icon_hover/magnification.c
+    ${CMAKE_SOURCE_DIR}/Modules/icon_hover/icon_layout.c
     ${CMAKE_SOURCE_DIR}/App/src/crash_recovery.c
 )
 

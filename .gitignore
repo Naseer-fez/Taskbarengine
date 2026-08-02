@@ -27,3 +27,9 @@ out/
 
 # CMake
 CMakeUserPresets.json
+
+# Agents scratch dirs
+.agents/*
+!.agents/AGENTS.md
+!.agents/skills/
+

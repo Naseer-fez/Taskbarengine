@@ -2,57 +2,48 @@
 #include <math.h>
 
 #ifndef M_PI
-#define M_PI 3.14159265358979323846f
+#define M_PI 3.14159265358979323846
 #endif
 
 float TE_MagnifyScale(float distance, float radius, float max_scale, TE_MagnifyCurveType curve)
 {
-    if (radius <= 0.0f) return 1.0f;
-    if (max_scale <= 1.0f) return 1.0f;
+    if (radius <= 0.0f || max_scale <= 1.0f) {
+        return 1.0f;
+    }
 
-    float abs_d = fabsf(distance);
+    float abs_dist = fabsf(distance);
+    if (abs_dist >= radius) {
+        return 1.0f;
+    }
+
+    float t = abs_dist / radius;
+    float influence = 0.0f;
 
     switch (curve) {
-        case TE_CURVE_GAUSSIAN: {
-            /* sigma = radius / 3.0f so at distance = radius, scale is ~1.0001 (decayed) */
-            float sigma = radius / 3.0f;
-            float exponent = -(abs_d * abs_d) / (2.0f * sigma * sigma);
-            float factor = expf(exponent);
-            return 1.0f + (max_scale - 1.0f) * factor;
-        }
-
-        case TE_CURVE_COSINE: {
-            if (abs_d >= radius) return 1.0f;
-            float norm = abs_d / radius;
-            float factor = 0.5f * (1.0f + cosf(M_PI * norm));
-            return 1.0f + (max_scale - 1.0f) * factor;
-        }
-
-        case TE_CURVE_LINEAR: {
-            if (abs_d >= radius) return 1.0f;
-            float factor = 1.0f - (abs_d / radius);
-            return 1.0f + (max_scale - 1.0f) * factor;
-        }
-
-        case TE_CURVE_CUBIC: {
-            if (abs_d >= radius) return 1.0f;
-            float norm = abs_d / radius;
-            float term = 1.0f - (norm * norm);
-            float factor = term * term; /* Smooth step cubic / quintic falloff */
-            return 1.0f + (max_scale - 1.0f) * factor;
-        }
-
+        case TE_CURVE_LINEAR:
+            influence = 1.0f - t;
+            break;
+        case TE_CURVE_CUBIC:
+            influence = (1.0f - t) * (1.0f - t) * (1.0f - t);
+            break;
+        case TE_CURVE_COSINE:
+            influence = (cosf(t * (float)M_PI) + 1.0f) * 0.5f;
+            break;
+        case TE_CURVE_GAUSSIAN:
+            // Standard gaussian falloff approx
+            influence = expf(-4.6f * t * t);
+            break;
         default:
-            return 1.0f;
+            influence = 1.0f - t;
+            break;
     }
+
+    return 1.0f + (max_scale - 1.0f) * influence;
 }
 
 void TE_MagnifyComputeScales(float cursor_x, const float icon_centers[], float out_scales[], int count, float radius, float max_scale, TE_MagnifyCurveType curve)
 {
-    if (!icon_centers || !out_scales || count <= 0) return;
-
     for (int i = 0; i < count; i++) {
-        float dist = icon_centers[i] - cursor_x;
-        out_scales[i] = TE_MagnifyScale(dist, radius, max_scale, curve);
+        out_scales[i] = TE_MagnifyScale(icon_centers[i] - cursor_x, radius, max_scale, curve);
     }
 }
