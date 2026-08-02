@@ -20,8 +20,7 @@ typedef struct SubclassRefData {
 
 static SubclassRefData g_subclass_ref = { 0 };
 
-/* Forward declaration for core manager hot-reload callback */
-extern void TE_CoreManagerOnConfigChanged(void* core_state_ptr);
+/* TE_CoreManagerOnConfigChanged declared in core/core_manager.h (included above) */
 
 static LRESULT CALLBACK TaskbarSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam,
                                            UINT_PTR uIdSubclass, DWORD_PTR dwRefData)
@@ -100,6 +99,17 @@ static LRESULT CALLBACK TaskbarSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam,
                 }
             }
             return 0;
+        }
+
+        case WM_MOUSEMOVE: {
+            if (ref && ref->event_table && ref->sub_count) {
+                TE_TaskbarMouseEvent evt = { 0 };
+                evt.taskbar_hwnd = hWnd;
+                evt.x = (int)(short)LOWORD(lParam);
+                evt.y = (int)(short)HIWORD(lParam);
+                TE_EventDispatch(ref->event_table, *ref->sub_count, TE_EVENT_TASKBAR_MOUSE, &evt);
+            }
+            break;
         }
 
         case WM_NCDESTROY: {

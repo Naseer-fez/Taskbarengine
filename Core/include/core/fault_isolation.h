@@ -8,8 +8,9 @@
 extern "C" {
 #endif
 
-#define TE_MAX_FAULT_STRIKES     3
-#define TE_WATCHDOG_TIMEOUT_MS   100
+#define TE_MAX_FAULT_STRIKES        3
+#define TE_WATCHDOG_TIMEOUT_MS      100   /* For event callbacks */
+#define TE_WATCHDOG_INIT_TIMEOUT_MS 2000  /* For lifecycle calls (Init, Enable, Disable, Shutdown) */
 
 /**
  * @brief Invoke a plugin callback wrapped in SEH exception handling and 100ms watchdog timer.

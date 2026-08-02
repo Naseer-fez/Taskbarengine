@@ -27,3 +27,10 @@ target_link_libraries(IconHoverPlugin PRIVATE
     oleaut32
 )
 
+set_target_properties(IconHoverPlugin PROPERTIES
+    PREFIX ""
+    OUTPUT_NAME "icon_hover"
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/Modules"
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/Modules"
+    ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib/Modules"
+)

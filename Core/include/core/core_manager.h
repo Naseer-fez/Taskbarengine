@@ -62,6 +62,22 @@ uint32_t TE_CoreManagerGetCurrentPluginId(void);
  */
 void TE_CoreManagerSetCurrentPluginId(uint32_t plugin_id);
 
+/**
+ * @brief Serialize all loaded plugin settings schemas into a JSON string.
+ * @param buffer Output buffer for the JSON string.
+ * @param buffer_len Size of the output buffer.
+ * @return Number of bytes written (including null terminator), or 0 on failure.
+ */
+uint32_t TE_CoreManagerBuildSettingsSchema(char* buffer, size_t buffer_len);
+
+/**
+ * @brief Serialize current performance statistics into a JSON string.
+ * @param buffer Output buffer for the JSON string.
+ * @param buffer_len Size of the output buffer.
+ * @return Number of bytes written (including null terminator), or 0 on failure.
+ */
+uint32_t TE_CoreManagerBuildPerfStats(char* buffer, size_t buffer_len);
+
 #ifdef __cplusplus
 }
 #endif

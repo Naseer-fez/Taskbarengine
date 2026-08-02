@@ -14,6 +14,33 @@ static HANDLE g_stop_event = NULL;
 static volatile LONG g_running = 0;
 static volatile LONG g_timer_active = 0;
 
+/* Frame timing stats */
+static float g_frame_times_ms[120] = {0};
+static int g_frame_index = 0;
+static int g_frame_count_total = 0;
+static LARGE_INTEGER g_last_frame_qpc = {0};
+
+/**
+ * @brief Deactivates the frame loop timer from a non-callback context.
+ *
+ * Deletes the repeating timer so the callback no longer fires.
+ * Called when mouse leaves taskbar and settle animation completes.
+ * Thread-safe via InterlockedCompareExchange guard.
+ */
+static void FrameLoopDeactivateTimer(void)
+{
+    if (InterlockedCompareExchange(&g_timer_active, 0, 1) == 1) {
+        if (g_timer_queue && g_timer) {
+            /* WT_EXECUTEONLYONCE not needed — just delete the timer.
+             * Use NULL (non-blocking) since this may be called from the
+             * timer callback thread itself. */
+            DeleteTimerQueueTimer(g_timer_queue, g_timer, NULL);
+            g_timer = NULL;
+        }
+        g_last_frame_qpc.QuadPart = 0;
+    }
+}
+
 static void CALLBACK FrameLoopCallback(PVOID lpParam, BOOLEAN TimerOrWaitFired)
 {
     (void)lpParam;
@@ -25,23 +52,65 @@ static void CALLBACK FrameLoopCallback(PVOID lpParam, BOOLEAN TimerOrWaitFired)
         return;
     }
 
+    LARGE_INTEGER now_qpc, freq;
+    QueryPerformanceCounter(&now_qpc);
+    QueryPerformanceFrequency(&freq);
+
+    if (g_last_frame_qpc.QuadPart != 0) {
+        float ms = (float)(now_qpc.QuadPart - g_last_frame_qpc.QuadPart) * 1000.0f / (float)freq.QuadPart;
+        g_frame_times_ms[g_frame_index] = ms;
+        g_frame_index = (g_frame_index + 1) % 120;
+        if (g_frame_count_total < 120) g_frame_count_total++;
+
+        if (g_frame_count_total > 0 && (g_frame_index % 15 == 0)) {
+            float min_ms = g_frame_times_ms[0], max_ms = g_frame_times_ms[0], sum_ms = 0.0f;
+            for (int i = 0; i < g_frame_count_total; i++) {
+                float t = g_frame_times_ms[i];
+                if (t < min_ms) min_ms = t;
+                if (t > max_ms) max_ms = t;
+                sum_ms += t;
+            }
+            float avg_ms = sum_ms / g_frame_count_total;
+            float fps = (avg_ms > 0.0f) ? (1000.0f / avg_ms) : 0.0f;
+
+            if (g_state->ctx.publish_state) {
+                StateValue v_fps = { TE_STATE_TYPE_FLOAT, .value = { .f = fps } };
+                StateValue v_avg = { TE_STATE_TYPE_FLOAT, .value = { .f = avg_ms } };
+                StateValue v_min = { TE_STATE_TYPE_FLOAT, .value = { .f = min_ms } };
+                StateValue v_max = { TE_STATE_TYPE_FLOAT, .value = { .f = max_ms } };
+                g_state->ctx.publish_state("perf.fps", &v_fps);
+                g_state->ctx.publish_state("perf.avg_ms", &v_avg);
+                g_state->ctx.publish_state("perf.min_ms", &v_min);
+                g_state->ctx.publish_state("perf.max_ms", &v_max);
+            }
+        }
+    }
+    g_last_frame_qpc = now_qpc;
+
     POINT pt;
     if (!GetCursorPos(&pt)) return;
 
     bool in_taskbar = PtInRect(&g_state->taskbar_rect, pt);
     bool is_settling = (g_state->settling == 1);
 
-    // If mouse is outside taskbar and settle is complete, reset layout and exit (idle state - 0% CPU)
+    /* If mouse is outside taskbar and settle is complete, deactivate the timer.
+     * This achieves true 0% idle CPU when user is not interacting. */
     if (!in_taskbar && !is_settling) {
         if (g_state->was_in_taskbar) {
             g_state->was_in_taskbar = false;
         }
+        /* Self-deactivate: stop the repeating timer since there's no work to do */
+        FrameLoopDeactivateTimer();
         return;
     }
 
-    // Wait for vsync when active
+    /* Wait for vsync when active */
     DwmFlush();
 
+    /* Exclusive lock used intentionally: callback both reads icons[] (shared with
+     * shell hook) and writes per-frame arrays (scales, displaced_x/y). Splitting
+     * into shared reads + separate mutable state is a future optimization if
+     * profiling shows contention. See AGENTS.md §6. */
     AcquireSRWLockExclusive(&g_state->icon_lock);
 
     int count = g_state->icon_count;
@@ -50,13 +119,13 @@ static void CALLBACK FrameLoopCallback(PVOID lpParam, BOOLEAN TimerOrWaitFired)
         return;
     }
 
-    // Compute base icon center coordinates
+    /* Compute base icon center coordinates */
     for (int i = 0; i < count; i++) {
         g_state->base_centers_x[i] = (float)g_state->icons[i].bounds.left + 
             ((float)g_state->icons[i].bounds.right - (float)g_state->icons[i].bounds.left) / 2.0f;
     }
 
-    // Handle mouse leaving taskbar: trigger settle transition
+    /* Handle mouse leaving taskbar: trigger settle transition */
     if (g_state->was_in_taskbar && !in_taskbar && !is_settling) {
         g_state->settling = 1;
         is_settling = true;
@@ -89,14 +158,14 @@ static void CALLBACK FrameLoopCallback(PVOID lpParam, BOOLEAN TimerOrWaitFired)
         }
     }
 
-    // Compute layout positions
+    /* Compute layout positions */
     TE_LayoutComputePositions(g_state->scales, g_state->base_centers_x, 
                               g_state->displaced_x, g_state->displaced_y, 
                               count, g_state->icon_size, (float)g_state->taskbar_rect.bottom);
 
     ReleaseSRWLockExclusive(&g_state->icon_lock);
 
-    // Update DirectComposition visuals
+    /* Update DirectComposition visuals */
     TE_DcompUpdateVisuals(g_state);
 }
 
@@ -111,26 +180,32 @@ HRESULT TE_FrameLoopStart(TE_IconHoverState* state)
     if (!g_timer_queue) return HRESULT_FROM_WIN32(GetLastError());
 
     g_running = 1;
+    /* Timer is NOT started here — it will be activated on-demand when the
+     * mouse enters the taskbar region via TE_FrameLoopActivate(). This
+     * ensures 0% idle CPU per design_decisions.md. */
+    g_timer_active = 0;
 
-    if (!CreateTimerQueueTimer(&g_timer, g_timer_queue, FrameLoopCallback, NULL, 0, 16, WT_EXECUTEDEFAULT)) {
-        g_running = 0;
-        DeleteTimerQueueEx(g_timer_queue, NULL);
-        CloseHandle(g_stop_event);
-        return HRESULT_FROM_WIN32(GetLastError());
-    }
-
-    g_timer_active = 1;
     return S_OK;
 }
 
 void TE_FrameLoopActivate(void)
 {
-    InterlockedExchange(&g_timer_active, 1);
+    if (!g_running || !g_timer_queue) return;
+
+    /* Only create the timer if it's not already active */
+    if (InterlockedCompareExchange(&g_timer_active, 1, 0) == 0) {
+        if (!CreateTimerQueueTimer(&g_timer, g_timer_queue, FrameLoopCallback,
+                                   NULL, 0, 16, WT_EXECUTEDEFAULT)) {
+            InterlockedExchange(&g_timer_active, 0);
+            TE_LogWrite(TE_LOG_ERROR, "FrameLoopActivate: failed to create timer (err=%lu)",
+                        GetLastError());
+        }
+    }
 }
 
 void TE_FrameLoopDeactivate(void)
 {
-    InterlockedExchange(&g_timer_active, 0);
+    FrameLoopDeactivateTimer();
 }
 
 void TE_FrameLoopStop(void)
@@ -138,13 +213,13 @@ void TE_FrameLoopStop(void)
     if (!g_running) return;
     
     g_running = 0;
-    g_timer_active = 0;
     SetEvent(g_stop_event);
 
-    if (g_timer_queue && g_timer) {
-        DeleteTimerQueueTimer(g_timer_queue, g_timer, INVALID_HANDLE_VALUE);
-    }
+    /* Deactivate first (deletes the repeating timer) */
+    FrameLoopDeactivateTimer();
+
     if (g_timer_queue) {
+        /* INVALID_HANDLE_VALUE = wait for all callbacks to complete */
         DeleteTimerQueueEx(g_timer_queue, INVALID_HANDLE_VALUE);
     }
     

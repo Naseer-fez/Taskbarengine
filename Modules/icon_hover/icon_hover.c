@@ -6,9 +6,24 @@
 #include "dcomp_overlay.h"
 #include "icon_capture.h"
 #include "frame_loop.h"
+#include <stdio.h>
+#include <stdarg.h>
 #include <string.h>
 
 static TE_IconHoverState g_state = {0};
+
+static void PluginLog(TE_LogLevel level, const char* fmt, ...)
+{
+    if (g_state.ctx.log) {
+        va_list args;
+        va_start(args, fmt);
+        char buf[512];
+        vsnprintf(buf, sizeof(buf), fmt, args);
+        va_end(args);
+        g_state.ctx.log(level, "%s", buf);
+    }
+}
+#define TE_LogWrite PluginLog
 
 static const PluginMetadata g_metadata = {
     "icon_hover",
@@ -103,6 +118,17 @@ static BOOL CALLBACK EnumSecondaryTaskbars(HWND hwnd, LPARAM lParam)
     return TRUE;
 }
 
+static HRESULT OnTaskbarMouse(uint32_t event_type, const void* event_data, void* user_data)
+{
+    (void)event_type; (void)event_data; (void)user_data;
+    if (g_state.enabled) {
+        /* Activate the frame loop timer on-demand when mouse is over taskbar.
+         * TE_FrameLoopActivate is a no-op if the timer is already active. */
+        TE_FrameLoopActivate();
+    }
+    return S_OK;
+}
+
 static HRESULT IconHover_Init(const PluginContext* ctx) {
     if (!ctx) return E_POINTER;
     g_state.ctx = *ctx;
@@ -118,6 +144,7 @@ static HRESULT IconHover_Init(const PluginContext* ctx) {
         ctx->subscribe(TE_EVENT_CONFIG_CHANGED, OnConfigChanged, NULL);
         ctx->subscribe(TE_EVENT_SHELL_HOOK, OnShellHook, NULL);
         ctx->subscribe(TE_EVENT_DPI_CHANGED, OnDpiChanged, NULL);
+        ctx->subscribe(TE_EVENT_TASKBAR_MOUSE, OnTaskbarMouse, NULL);
     }
     
     InterlockedExchange(&g_state.initialized, 1);
@@ -126,23 +153,45 @@ static HRESULT IconHover_Init(const PluginContext* ctx) {
 }
 
 static HRESULT IconHover_Enable(void) {
-    if (!g_state.initialized) return E_FAIL;
+    if (!g_state.initialized) {
+        TE_LogWrite(TE_LOG_ERROR, "IconHover_Enable failed: plugin not initialized");
+        return E_FAIL;
+    }
     
-    HWND taskbar_hwnd = FindWindowW(L"Shell_TrayWnd", NULL);
-    if (!taskbar_hwnd) return E_FAIL;
+    HWND taskbar_hwnd = g_state.ctx.taskbar_hwnd;
+    if (!taskbar_hwnd) {
+        taskbar_hwnd = FindWindowW(L"Shell_TrayWnd", NULL);
+    }
+    if (!taskbar_hwnd) {
+        taskbar_hwnd = FindWindowExW(NULL, NULL, L"Shell_TrayWnd", NULL);
+    }
+    if (!taskbar_hwnd) {
+        TE_LogWrite(TE_LOG_WARN, "IconHover_Enable: Shell_TrayWnd not currently present, enabled in standby mode");
+        InterlockedExchange(&g_state.enabled, 1);
+        return S_OK;
+    }
 
     g_state.secondary_count = 0;
     EnumWindows(EnumSecondaryTaskbars, (LPARAM)&g_state);
 
     TE_IconCaptureInit();
 
+    HRESULT uia_hr = TE_UiaInit();
+    if (FAILED(uia_hr)) {
+        TE_LogWrite(TE_LOG_ERROR, "IconHover UIA init failed: 0x%08X", (unsigned int)uia_hr);
+        return uia_hr;
+    }
+
     AcquireSRWLockExclusive(&g_state.icon_lock);
-    TE_UiaDiscoverIcons(taskbar_hwnd, g_state.icons, TE_MAX_TASKBAR_ICONS, &g_state.icon_count);
+    HRESULT uia_disc_hr = TE_UiaDiscoverIcons(taskbar_hwnd, g_state.icons, TE_MAX_TASKBAR_ICONS, &g_state.icon_count);
     ReleaseSRWLockExclusive(&g_state.icon_lock);
+    if (FAILED(uia_disc_hr)) {
+        TE_LogWrite(TE_LOG_WARN, "IconHover UIA discover returned 0x%08X (icons=%d)", (unsigned int)uia_disc_hr, g_state.icon_count);
+    }
 
     HRESULT hr = TE_DcompInit(taskbar_hwnd);
     if (FAILED(hr)) {
-        TE_LogWrite(TE_LOG_ERROR, "IconHover DComp Init failed: 0x%08X", hr);
+        TE_LogWrite(TE_LOG_ERROR, "IconHover DComp Init failed: 0x%08X", (unsigned int)hr);
         return hr;
     }
 

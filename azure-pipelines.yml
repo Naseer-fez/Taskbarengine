@@ -1,0 +1,46 @@
+trigger:
+  - main
+
+pool:
+  vmImage: 'windows-latest'
+
+jobs:
+- job: BuildRelease
+  displayName: 'Build and Test (MSVC Release)'
+  steps:
+  - task: CMake@1
+    displayName: 'Configure CMake'
+    inputs:
+      workingDirectory: '$(Build.SourcesDirectory)/build'
+      cmakeArgs: '-G Ninja -DCMAKE_BUILD_TYPE=Release ..'
+
+  - task: CMake@1
+    displayName: 'Build Release'
+    inputs:
+      workingDirectory: '$(Build.SourcesDirectory)/build'
+      cmakeArgs: '--build . --config Release'
+
+  - script: |
+      cd build
+      ctest -C Release --output-on-failure
+    displayName: 'Run Tests'
+
+  - task: PublishPipelineArtifact@1
+    inputs:
+      targetPath: '$(Build.SourcesDirectory)/build/bin'
+      artifactName: 'TaskbarEngine-Binaries'
+
+- job: BuildDebugASan
+  displayName: 'Build (Clang-cl Debug ASan)'
+  steps:
+  - task: CMake@1
+    displayName: 'Configure CMake (Clang-cl ASan)'
+    inputs:
+      workingDirectory: '$(Build.SourcesDirectory)/build_asan'
+      cmakeArgs: '-G Ninja -T clangcl -DCMAKE_BUILD_TYPE=Debug -DTE_ENABLE_ASAN=ON ..'
+
+  - task: CMake@1
+    displayName: 'Build ASan'
+    inputs:
+      workingDirectory: '$(Build.SourcesDirectory)/build_asan'
+      cmakeArgs: '--build . --config Debug'

@@ -20,12 +20,14 @@ add_executable(te_benchmarks
     bench_state_store.cpp
     bench_icon_layout.cpp
     bench_easing.cpp
+    bench_config_parse.cpp
     ${CMAKE_SOURCE_DIR}/Core/src/event_dispatch.c
     ${CMAKE_SOURCE_DIR}/Core/src/fault_isolation.c
     ${CMAKE_SOURCE_DIR}/Core/src/state_store.c
     ${CMAKE_SOURCE_DIR}/Modules/icon_hover/magnification.c
     ${CMAKE_SOURCE_DIR}/Modules/icon_hover/icon_layout.c
     ${CMAKE_SOURCE_DIR}/SDK/src/te_easing.c
+    ${CMAKE_SOURCE_DIR}/SDK/src/te_jsonc.c
 )
 
 target_include_directories(te_benchmarks PRIVATE
@@ -40,3 +42,6 @@ target_link_libraries(te_benchmarks PRIVATE
     te_sdk
     ole32
 )
+
+add_executable(bench_system bench_system.cpp)
+target_link_libraries(bench_system user32)

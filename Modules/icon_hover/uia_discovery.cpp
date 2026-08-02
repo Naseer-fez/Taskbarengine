@@ -6,23 +6,31 @@
 using Microsoft::WRL::ComPtr;
 
 static ComPtr<IUIAutomation> g_uia;
+static bool g_uia_com_initialized = false;
+
+HRESULT TE_UiaInit(void)
+{
+    HRESULT hr_com = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+    if (SUCCEEDED(hr_com) || hr_com == RPC_E_CHANGED_MODE) {
+        g_uia_com_initialized = SUCCEEDED(hr_com);
+    } else {
+        return hr_com;
+    }
+    return S_OK;
+}
 
 HRESULT TE_UiaDiscoverIcons(HWND taskbar_hwnd, TE_TaskbarIcon* out_icons, int max_count, int* out_count)
 {
     if (!out_icons || !out_count) return E_POINTER;
     *out_count = 0;
 
-    HRESULT hr_com = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
-
     if (!g_uia) {
         HRESULT hr = CoCreateInstance(CLSID_CUIAutomation8, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&g_uia));
         if (FAILED(hr)) {
-            // Fallback to CLSID_CUIAutomation if CLSID_CUIAutomation8 fails
             hr = CoCreateInstance(CLSID_CUIAutomation, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&g_uia));
         }
         if (FAILED(hr)) {
             TE_LogWrite(TE_LOG_ERROR, "Failed to create IUIAutomation (hr=0x%08X)", hr);
-            if (SUCCEEDED(hr_com)) CoUninitialize();
             return hr;
         }
     }
@@ -31,7 +39,6 @@ HRESULT TE_UiaDiscoverIcons(HWND taskbar_hwnd, TE_TaskbarIcon* out_icons, int ma
     HRESULT hr = g_uia->ElementFromHandle(taskbar_hwnd, &taskbar_el);
     if (FAILED(hr) || !taskbar_el) {
         TE_LogWrite(TE_LOG_ERROR, "UIA failed to get taskbar element");
-        if (SUCCEEDED(hr_com)) CoUninitialize();
         return hr;
     }
 
@@ -41,7 +48,6 @@ HRESULT TE_UiaDiscoverIcons(HWND taskbar_hwnd, TE_TaskbarIcon* out_icons, int ma
     var.lVal = UIA_ButtonControlTypeId;
     hr = g_uia->CreatePropertyCondition(UIA_ControlTypePropertyId, var, &condition);
     if (FAILED(hr)) {
-        if (SUCCEEDED(hr_com)) CoUninitialize();
         return hr;
     }
 
@@ -49,7 +55,6 @@ HRESULT TE_UiaDiscoverIcons(HWND taskbar_hwnd, TE_TaskbarIcon* out_icons, int ma
     hr = taskbar_el->FindAll(TreeScope_Descendants, condition.Get(), &array);
     if (FAILED(hr) || !array) {
         TE_LogWrite(TE_LOG_WARN, "UIA found no buttons");
-        if (SUCCEEDED(hr_com)) CoUninitialize();
         return hr;
     }
 
@@ -90,11 +95,14 @@ HRESULT TE_UiaDiscoverIcons(HWND taskbar_hwnd, TE_TaskbarIcon* out_icons, int ma
     }
 
     *out_count = count;
-    if (SUCCEEDED(hr_com)) CoUninitialize();
     return S_OK;
 }
 
 void TE_UiaCleanup(void)
 {
     g_uia.Reset();
+    if (g_uia_com_initialized) {
+        CoUninitialize();
+        g_uia_com_initialized = false;
+    }
 }

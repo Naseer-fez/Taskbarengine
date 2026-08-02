@@ -18,7 +18,8 @@ typedef enum TE_EventType {
     TE_EVENT_SHELL_HOOK,
     TE_EVENT_POWER,
     TE_EVENT_DEVICE,
-    TE_EVENT_VDESKTOP
+    TE_EVENT_VDESKTOP,
+    TE_EVENT_TASKBAR_MOUSE
 } TE_EventType;
 
 /**
@@ -80,6 +81,18 @@ typedef struct TE_DeviceEvent {
 typedef struct TE_VDesktopEvent {
     GUID desktop_id;
 } TE_VDesktopEvent;
+
+/**
+ * @brief Payload for TE_EVENT_TASKBAR_MOUSE.
+ *
+ * Dispatched when the mouse moves over the taskbar window.
+ * Plugins use this to activate on-demand processing (e.g., frame loops).
+ */
+typedef struct TE_TaskbarMouseEvent {
+    HWND taskbar_hwnd;
+    int x;
+    int y;
+} TE_TaskbarMouseEvent;
 
 #ifdef __cplusplus
 }

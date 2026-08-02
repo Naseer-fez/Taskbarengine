@@ -45,8 +45,11 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
             break;
 
         case DLL_PROCESS_DETACH:
-            TE_IpcServerStop();
-            TE_CoreManagerShutdown();
+            /* No-op: Cleanup is handled by the IPC SHUTDOWN command sequence.
+             * Calling TE_IpcServerStop / TE_CoreManagerShutdown here risks
+             * deadlock under the loader lock (WaitForSingleObject on threads,
+             * FreeLibrary on plugin DLLs, etc.).
+             * See docs/design_decisions.md §Injection & Initialization. */
             break;
     }
     return TRUE;

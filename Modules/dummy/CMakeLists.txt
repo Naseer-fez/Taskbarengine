@@ -8,7 +8,8 @@ target_include_directories(DummyPlugin PRIVATE
 target_link_libraries(DummyPlugin PRIVATE te_sdk)
 
 set_target_properties(DummyPlugin PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/Modules"
-    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/Modules"
-    ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/Modules"
+    PREFIX ""
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/Modules"
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/Modules"
+    ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib/Modules"
 )

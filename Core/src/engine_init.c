@@ -3,7 +3,7 @@
 #include <sdk/te_log.h>
 #include <wchar.h>
 
-static bool g_engine_initialized = false;
+static volatile LONG g_engine_initialized = 0;
 static HINSTANCE g_hinstance = NULL;
 
 void TE_SetEngineInstance(HINSTANCE hinstance)
@@ -13,10 +13,9 @@ void TE_SetEngineInstance(HINSTANCE hinstance)
 
 HRESULT TE_EngineInitialize(void)
 {
-    if (g_engine_initialized) {
+    if (InterlockedCompareExchange(&g_engine_initialized, 1, 0) != 0) {
         return S_OK;
     }
 
-    g_engine_initialized = true;
     return TE_CoreManagerInit(g_hinstance);
 }

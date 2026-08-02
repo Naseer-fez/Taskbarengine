@@ -23,6 +23,8 @@ add_executable(te_tests
     test_magnification.cpp
     test_icon_scales.cpp
     test_icon_layout.cpp
+    test_settings_generation.cpp
+    test_config_roundtrip.cpp
     ${CMAKE_SOURCE_DIR}/Core/src/config.c
     ${CMAKE_SOURCE_DIR}/Core/src/event_dispatch.c
     ${CMAKE_SOURCE_DIR}/Core/src/plugin_loader.c

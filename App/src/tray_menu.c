@@ -24,19 +24,16 @@ bool TE_TrayMenuHandleCommand(HWND hwnd, WPARAM wparam)
 {
     switch (LOWORD(wparam)) {
         case TE_TRAY_MENU_SETTINGS:
-            MessageBoxW(hwnd, L"Settings UI is planned for Phase 5.", L"TaskbarEngine", MB_OK | MB_ICONINFORMATION);
+        case TE_TRAY_MENU_ABOUT:
+            ShellExecuteW(NULL, L"open", L"TaskbarEngineSettings.exe", NULL, NULL, SW_SHOWNORMAL);
             return true;
 
         case TE_TRAY_MENU_ENABLE_ALL:
-            MessageBoxW(hwnd, L"Enable/Disable All will be backed by config writes in the GUI phase.", L"TaskbarEngine", MB_OK | MB_ICONINFORMATION);
+            MessageBoxW(hwnd, L"Enable/Disable All is managed in the Settings UI.", L"TaskbarEngine", MB_OK | MB_ICONINFORMATION);
             return true;
 
         case TE_TRAY_MENU_RELOAD_CONFIG:
             TE_IpcClientReloadConfig();
-            return true;
-
-        case TE_TRAY_MENU_ABOUT:
-            MessageBoxW(hwnd, L"TaskbarEngine", L"About", MB_OK | MB_ICONINFORMATION);
             return true;
 
         case TE_TRAY_MENU_EXIT:

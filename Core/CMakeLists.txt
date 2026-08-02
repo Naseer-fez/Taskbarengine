@@ -31,5 +31,6 @@ target_link_libraries(EngineDLL PRIVATE
 )
 
 set_target_properties(EngineDLL PROPERTIES
+    PREFIX ""
     OUTPUT_NAME "EngineDLL"
 )

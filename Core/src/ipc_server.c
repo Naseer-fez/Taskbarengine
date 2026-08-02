@@ -125,6 +125,26 @@ static void IpcHandleMessage(HANDLE pipe, const TE_IpcHeader* header, const uint
             break;
         }
 
+        case TE_IPC_MSG_GET_SETTINGS: {
+            char* schema = (char*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, TE_IPC_MAX_PAYLOAD);
+            if (schema) {
+                uint32_t len = TE_CoreManagerBuildSettingsSchema(schema, TE_IPC_MAX_PAYLOAD);
+                IpcWriteMessage(pipe, TE_IPC_MSG_SETTINGS_RESPONSE, schema, len);
+                HeapFree(GetProcessHeap(), 0, schema);
+            }
+            break;
+        }
+
+        case TE_IPC_MSG_GET_PERF_STATS: {
+            char* stats = (char*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 4096);
+            if (stats) {
+                uint32_t len = TE_CoreManagerBuildPerfStats(stats, 4096);
+                IpcWriteMessage(pipe, TE_IPC_MSG_PERF_STATS_RESPONSE, stats, len);
+                HeapFree(GetProcessHeap(), 0, stats);
+            }
+            break;
+        }
+
         default:
             IpcWriteMessage(pipe, TE_IPC_MSG_STATUS, "UNSUPPORTED", 12);
             break;
@@ -177,13 +197,18 @@ static DWORD WINAPI IpcServerThreadProc(LPVOID param)
                 HRESULT hr = IpcReadExact(g_ipc_pipe, &header, sizeof(header));
                 if (FAILED(hr) || FAILED(TE_IpcValidateHeader(&header))) break;
 
-                uint8_t payload[TE_IPC_MAX_PAYLOAD + 1];
+                uint8_t* payload = (uint8_t*)HeapAlloc(GetProcessHeap(), 0, (size_t)header.payload_length + 1);
+                if (!payload) break;
                 if (header.payload_length > 0) {
                     hr = IpcReadExact(g_ipc_pipe, payload, header.payload_length);
-                    if (FAILED(hr)) break;
+                    if (FAILED(hr)) {
+                        HeapFree(GetProcessHeap(), 0, payload);
+                        break;
+                    }
                 }
                 payload[header.payload_length] = '\0';
                 IpcHandleMessage(g_ipc_pipe, &header, payload);
+                HeapFree(GetProcessHeap(), 0, payload);
             }
         }
 

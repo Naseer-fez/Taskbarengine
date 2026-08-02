@@ -35,7 +35,7 @@ HRESULT TE_FaultIsolationCallPlugin(TE_PluginEntry* entry, HRESULT (*callback)(v
     WatchdogContext wd_ctx = { 0 };
     HANDLE htimer = NULL;
 
-    BOOL timer_created = CreateTimerQueueTimer(&htimer, NULL, WatchdogTimerCallback, &wd_ctx, TE_WATCHDOG_TIMEOUT_MS, 0, WT_EXECUTEONLYONCE);
+    BOOL timer_created = CreateTimerQueueTimer(&htimer, NULL, WatchdogTimerCallback, &wd_ctx, TE_WATCHDOG_INIT_TIMEOUT_MS, 0, WT_EXECUTEONLYONCE);
 
     HRESULT hr = E_FAIL;
     bool caught_exception = false;
@@ -67,7 +67,7 @@ HRESULT TE_FaultIsolationCallPlugin(TE_PluginEntry* entry, HRESULT (*callback)(v
         entry->fault_count++;
         if (wd_ctx.fired) {
             TE_LogWrite(TE_LOG_WARN, "Watchdog timeout (%dms) during %s in plugin '%s' (strike %u/%u)",
-                        TE_WATCHDOG_TIMEOUT_MS, callback_name ? callback_name : "callback",
+                        TE_WATCHDOG_INIT_TIMEOUT_MS, callback_name ? callback_name : "callback",
                         (entry->metadata && entry->metadata->name) ? entry->metadata->name : "unknown",
                         entry->fault_count, TE_MAX_FAULT_STRIKES);
         }
@@ -104,7 +104,7 @@ HRESULT TE_FaultIsolationCallPluginInit(TE_PluginEntry* entry, HRESULT (*callbac
     WatchdogContext wd_ctx = { 0 };
     HANDLE htimer = NULL;
 
-    BOOL timer_created = CreateTimerQueueTimer(&htimer, NULL, WatchdogTimerCallback, &wd_ctx, TE_WATCHDOG_TIMEOUT_MS, 0, WT_EXECUTEONLYONCE);
+    BOOL timer_created = CreateTimerQueueTimer(&htimer, NULL, WatchdogTimerCallback, &wd_ctx, TE_WATCHDOG_INIT_TIMEOUT_MS, 0, WT_EXECUTEONLYONCE);
 
     HRESULT hr = E_FAIL;
     bool caught_exception = false;
@@ -135,7 +135,7 @@ HRESULT TE_FaultIsolationCallPluginInit(TE_PluginEntry* entry, HRESULT (*callbac
         entry->fault_count++;
         if (wd_ctx.fired) {
             TE_LogWrite(TE_LOG_WARN, "Watchdog timeout (%dms) during Initialize in plugin '%s' (strike %u/%u)",
-                        TE_WATCHDOG_TIMEOUT_MS,
+                        TE_WATCHDOG_INIT_TIMEOUT_MS,
                         (entry->metadata && entry->metadata->name) ? entry->metadata->name : "unknown",
                         entry->fault_count, TE_MAX_FAULT_STRIKES);
         }
@@ -186,6 +186,8 @@ HRESULT TE_FaultIsolationCallEventCallback(TE_PluginEntry* entry, TE_EventCallba
                     (entry && entry->metadata && entry->metadata->name) ? entry->metadata->name : "unknown");
     }
 #else
+    /* MinGW/GCC: SEH not available. Callback faults will crash the process.
+     * This path is used only for test builds; production uses MSVC with SEH. */
     callback(type, event_data, user_data);
 #endif
 

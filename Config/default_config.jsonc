@@ -4,7 +4,7 @@
     // Core engine settings
     "core": {
         "log_level": "info",
-        "log_to_file": false
+        "log_to_file": true
     },
 
     // Plugin configurations

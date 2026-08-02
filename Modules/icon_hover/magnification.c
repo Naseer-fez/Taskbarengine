@@ -30,7 +30,7 @@ float TE_MagnifyScale(float distance, float radius, float max_scale, TE_MagnifyC
             influence = (cosf(t * (float)M_PI) + 1.0f) * 0.5f;
             break;
         case TE_CURVE_GAUSSIAN:
-            // Standard gaussian falloff approx
+            /* Standard gaussian falloff approximation */
             influence = expf(-4.6f * t * t);
             break;
         default:

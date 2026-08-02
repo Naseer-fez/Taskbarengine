@@ -1,6 +1,7 @@
 #include "app/tray.h"
 #include "app/tray_menu.h"
 #include "app/crash_recovery.h"
+#include "scheduler.h"
 #include <sdk/te_types.h>
 #include <sdk/te_log.h>
 #include <stdio.h>
@@ -76,7 +77,7 @@ static LRESULT CALLBACK HiddenWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
                 return 0;
             }
             if (lParam == WM_LBUTTONDBLCLK) {
-                MessageBoxW(hwnd, L"Settings UI is planned for Phase 5.", L"TaskbarEngine", MB_OK | MB_ICONINFORMATION);
+                ShellExecuteW(NULL, L"open", L"TaskbarEngineSettings.exe", NULL, NULL, SW_SHOWNORMAL);
                 return 0;
             }
             break;
@@ -119,8 +120,19 @@ static LRESULT CALLBACK HiddenWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine, int nCmdShow)
 {
     (void)hPrevInstance;
-    (void)pCmdLine;
     (void)nCmdShow;
+
+    if (pCmdLine) {
+        if (wcsstr(pCmdLine, L"--install")) {
+            wchar_t exe_path[MAX_PATH];
+            GetModuleFileNameW(NULL, exe_path, MAX_PATH);
+            TE_SchedulerRegisterTask(exe_path);
+        } else if (wcsstr(pCmdLine, L"--uninstall")) {
+            TE_SchedulerRemoveTask();
+            return 0;
+        }
+    }
+
     g_hinstance = hInstance;
     (void)g_hinstance;
     g_taskbar_created_msg = RegisterWindowMessageW(L"TaskbarCreated");

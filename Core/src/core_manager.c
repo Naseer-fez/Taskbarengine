@@ -12,6 +12,7 @@
 #include <sdk/te_log.h>
 #include <sdk/te_log_impl.h>
 #include <sdk/te_events.h>
+#include "core/state_store.h"
 #include <stdio.h>
 #include <wchar.h>
 
@@ -48,8 +49,6 @@ static HRESULT CoreUnsubscribeWrapper(uint32_t event_type, EventCallbackFunc cal
 
 static void CoreRequestRedrawNoop(void) {}
 
-#include "core/state_store.h"
-
 static HRESULT CorePublishState(const char* key, const StateValue* val)
 {
     return TE_StatePublish(key, val);
@@ -85,10 +84,10 @@ HRESULT TE_CoreManagerInit(HINSTANCE hinstance)
     wchar_t* last_slash = wcsrchr(log_dir, L'\\');
     if (last_slash) {
         wcsncpy(last_slash + 1, L"logs", MAX_PATH - (last_slash + 1 - log_dir) - 1);
+        TE_LogInit(log_dir, TE_LOG_DEBUG, true);
     } else {
-        wcsncpy(log_dir, L"logs", MAX_PATH - 1);
+        TE_LogInit(NULL, TE_LOG_DEBUG, true);
     }
-    TE_LogInit(log_dir, TE_LOG_DEBUG, true);
 
     TE_LogWrite(TE_LOG_INFO, "Core Manager initializing...");
 
@@ -139,8 +138,8 @@ HRESULT TE_CoreManagerInit(HINSTANCE hinstance)
     wchar_t config_dir[MAX_PATH];
     wcsncpy(config_dir, g_core_state->config_path, MAX_PATH - 1);
     config_dir[MAX_PATH - 1] = L'\0';
-    last_slash = wcsrchr(config_dir, L'\\');
-    if (last_slash) *last_slash = L'\0';
+    wchar_t* cfg_dir_slash = wcsrchr(config_dir, L'\\');
+    if (cfg_dir_slash) *cfg_dir_slash = L'\0';
     HRESULT watch_hr = TE_ConfigWatcherStart(config_dir, g_core_state->taskbar_hwnd);
     if (FAILED(watch_hr)) {
         TE_LogWrite(TE_LOG_WARN, "Failed to start config watcher (hr: 0x%08X)", (unsigned int)watch_hr);
@@ -349,4 +348,141 @@ void TE_CoreManagerSetCurrentPluginId(uint32_t plugin_id)
     if (g_core_state) {
         g_core_state->current_plugin_id = plugin_id;
     }
+}
+
+uint32_t TE_CoreManagerBuildSettingsSchema(char* buffer, size_t buffer_len)
+{
+    if (!buffer || buffer_len == 0) return 0;
+    buffer[0] = '\0';
+    if (!g_core_state) return 0;
+
+    cJSON* root = cJSON_CreateObject();
+    cJSON* plugins_array = cJSON_CreateArray();
+    cJSON_AddItemToObject(root, "plugins", plugins_array);
+
+    for (uint32_t i = 0; i < g_core_state->plugin_count; i++) {
+        TE_PluginEntry* plugin = &g_core_state->plugins[i];
+        if (!plugin->iface || !plugin->iface->GetMetadata || !plugin->iface->GetSettings) continue;
+
+        const PluginMetadata* meta = plugin->iface->GetMetadata();
+        const PluginSettings* settings = plugin->iface->GetSettings();
+        if (!meta || !settings) continue;
+
+        cJSON* plugin_obj = cJSON_CreateObject();
+        cJSON_AddStringToObject(plugin_obj, "name", meta->name ? meta->name : "unknown");
+        cJSON_AddStringToObject(plugin_obj, "version", meta->version ? meta->version : "0.0.0");
+        cJSON_AddStringToObject(plugin_obj, "description", meta->description ? meta->description : "");
+
+        cJSON* settings_array = cJSON_CreateArray();
+        cJSON_AddItemToObject(plugin_obj, "settings", settings_array);
+
+        for (size_t j = 0; j < settings->count; j++) {
+            const SettingDescriptor* desc = &settings->descriptors[j];
+            cJSON* setting_obj = cJSON_CreateObject();
+            cJSON_AddStringToObject(setting_obj, "key", desc->key ? desc->key : "");
+            cJSON_AddStringToObject(setting_obj, "label", desc->label ? desc->label : "");
+            cJSON_AddStringToObject(setting_obj, "tooltip", desc->tooltip ? desc->tooltip : "");
+            
+            switch (desc->type) {
+                case TE_SETTING_BOOL:
+                    cJSON_AddStringToObject(setting_obj, "type", "bool");
+                    cJSON_AddBoolToObject(setting_obj, "default", desc->value.b.default_val);
+                    break;
+                case TE_SETTING_INT:
+                    cJSON_AddStringToObject(setting_obj, "type", "int");
+                    cJSON_AddNumberToObject(setting_obj, "default", desc->value.i.default_val);
+                    cJSON_AddNumberToObject(setting_obj, "min", desc->value.i.min);
+                    cJSON_AddNumberToObject(setting_obj, "max", desc->value.i.max);
+                    cJSON_AddNumberToObject(setting_obj, "step", desc->value.i.step);
+                    break;
+                case TE_SETTING_FLOAT:
+                    cJSON_AddStringToObject(setting_obj, "type", "float");
+                    cJSON_AddNumberToObject(setting_obj, "default", desc->value.f.default_val);
+                    cJSON_AddNumberToObject(setting_obj, "min", desc->value.f.min);
+                    cJSON_AddNumberToObject(setting_obj, "max", desc->value.f.max);
+                    cJSON_AddNumberToObject(setting_obj, "step", desc->value.f.step);
+                    break;
+                case TE_SETTING_STRING:
+                    cJSON_AddStringToObject(setting_obj, "type", "string");
+                    cJSON_AddStringToObject(setting_obj, "default", desc->value.s.default_val ? desc->value.s.default_val : "");
+                    break;
+                case TE_SETTING_ENUM: {
+                    cJSON_AddStringToObject(setting_obj, "type", "enum");
+                    cJSON_AddStringToObject(setting_obj, "default", desc->value.e.default_val ? desc->value.e.default_val : "");
+                    cJSON* options_array = cJSON_CreateArray();
+                    for (int k = 0; k < desc->value.e.count; k++) {
+                        cJSON_AddItemToArray(options_array, cJSON_CreateString(desc->value.e.options[k]));
+                    }
+                    cJSON_AddItemToObject(setting_obj, "options", options_array);
+                    break;
+                }
+                case TE_SETTING_COLOR:
+                    cJSON_AddStringToObject(setting_obj, "type", "color");
+                    cJSON_AddNumberToObject(setting_obj, "default", desc->value.color.default_val);
+                    break;
+            }
+            cJSON_AddItemToArray(settings_array, setting_obj);
+        }
+        cJSON_AddItemToArray(plugins_array, plugin_obj);
+    }
+
+    char* json_str = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+
+    uint32_t len = 0;
+    if (json_str) {
+        size_t str_len = strlen(json_str);
+        if (str_len < buffer_len) {
+            strcpy(buffer, json_str);
+            len = (uint32_t)(str_len + 1);
+        }
+        cJSON_free(json_str);
+    }
+    return len;
+}
+
+uint32_t TE_CoreManagerBuildPerfStats(char* buffer, size_t buffer_len)
+{
+    if (!buffer || buffer_len == 0) return 0;
+    buffer[0] = '\0';
+    
+    StateValue fps, avg_ms, min_ms, max_ms;
+    
+    float f_fps = 0.0f;
+    float f_avg_ms = 0.0f;
+    float f_min_ms = 0.0f;
+    float f_max_ms = 0.0f;
+    
+    if (SUCCEEDED(TE_StateQuery("perf.fps", &fps)) && fps.type == TE_STATE_TYPE_FLOAT) {
+        f_fps = fps.value.f;
+    }
+    if (SUCCEEDED(TE_StateQuery("perf.avg_ms", &avg_ms)) && avg_ms.type == TE_STATE_TYPE_FLOAT) {
+        f_avg_ms = avg_ms.value.f;
+    }
+    if (SUCCEEDED(TE_StateQuery("perf.min_ms", &min_ms)) && min_ms.type == TE_STATE_TYPE_FLOAT) {
+        f_min_ms = min_ms.value.f;
+    }
+    if (SUCCEEDED(TE_StateQuery("perf.max_ms", &max_ms)) && max_ms.type == TE_STATE_TYPE_FLOAT) {
+        f_max_ms = max_ms.value.f;
+    }
+
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "fps", f_fps);
+    cJSON_AddNumberToObject(root, "avg_ms", f_avg_ms);
+    cJSON_AddNumberToObject(root, "min_ms", f_min_ms);
+    cJSON_AddNumberToObject(root, "max_ms", f_max_ms);
+
+    char* json_str = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+
+    uint32_t len = 0;
+    if (json_str) {
+        size_t str_len = strlen(json_str);
+        if (str_len < buffer_len) {
+            strcpy(buffer, json_str);
+            len = (uint32_t)(str_len + 1);
+        }
+        cJSON_free(json_str);
+    }
+    return len;
 }

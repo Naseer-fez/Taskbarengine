@@ -50,10 +50,12 @@ HRESULT TE_DcompInit(HWND parent_hwnd)
     }
     SetLayeredWindowAttributes(g_overlay_hwnd, 0, 255, LWA_ALPHA);
 
-    // D3D11 Init
+    // D3D11 Init with WARP fallback
     UINT flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
-    D3D_FEATURE_LEVEL featureLevels[] = { D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0 };
-    HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, flags, featureLevels, ARRAYSIZE(featureLevels), D3D11_SDK_VERSION, &g_d3dDevice, nullptr, nullptr);
+    HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, flags, nullptr, 0, D3D11_SDK_VERSION, &g_d3dDevice, nullptr, nullptr);
+    if (FAILED(hr)) {
+        hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, flags, nullptr, 0, D3D11_SDK_VERSION, &g_d3dDevice, nullptr, nullptr);
+    }
     if (FAILED(hr)) {
         TE_LogWrite(TE_LOG_ERROR, "D3D11CreateDevice failed with hr=0x%08X", hr);
         return hr;
@@ -124,6 +126,7 @@ HRESULT TE_DcompUpdateVisuals(TE_IconHoverState* state)
         float y = state->displaced_y[i];
         float scale = state->scales[i];
         
+        /* D2D1::Matrix3x2F is a C++ helper — intentional since DComp requires C++ per language rules */
         D2D1_MATRIX_3X2_F matrix = D2D1::Matrix3x2F::Scale(scale, scale) * D2D1::Matrix3x2F::Translation(x, y);
         g_dcompTransforms[i]->SetMatrix(matrix);
     }
