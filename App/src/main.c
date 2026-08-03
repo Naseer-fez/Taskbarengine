@@ -13,7 +13,6 @@ typedef LRESULT (CALLBACK *HOOKPROC_FUNC)(int nCode, WPARAM wParam, LPARAM lPara
 
 static HHOOK g_hook = NULL;
 static HMODULE g_engine_dll = NULL;
-static HINSTANCE g_hinstance = NULL;
 static UINT g_taskbar_created_msg = 0;
 
 static DWORD FindExplorerPid(void)
@@ -133,8 +132,6 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
         }
     }
 
-    g_hinstance = hInstance;
-    (void)g_hinstance;
     g_taskbar_created_msg = RegisterWindowMessageW(L"TaskbarCreated");
 
     WNDCLASSW wc = { 0 };

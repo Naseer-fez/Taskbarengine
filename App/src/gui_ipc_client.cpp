@@ -1,22 +1,6 @@
 #include "gui_ipc_client.h"
-#include <core/ipc_protocol.h>
+#include <sdk/te_ipc.h>
 #include <vector>
-
-#define TE_PIPE_NAME L"\\\\.\\pipe\\TaskbarEngine"
-
-static HRESULT ReadExact(HANDLE pipe, void* buffer, DWORD bytes)
-{
-    DWORD total = 0;
-    while (total < bytes) {
-        DWORD read_now = 0;
-        if (!ReadFile(pipe, (uint8_t*)buffer + total, bytes - total, &read_now, NULL)) {
-            return HRESULT_FROM_WIN32(GetLastError());
-        }
-        if (read_now == 0) return HRESULT_FROM_WIN32(ERROR_HANDLE_EOF);
-        total += read_now;
-    }
-    return S_OK;
-}
 
 static HRESULT SendIpcCommand(TE_IpcMsgType type, const void* payload, uint32_t payload_len, TE_IpcMsgType* out_response, std::string* out_data)
 {
@@ -43,7 +27,7 @@ static HRESULT SendIpcCommand(TE_IpcMsgType type, const void* payload, uint32_t 
 
     if (SUCCEEDED(hr) && out_response) {
         TE_IpcHeader response;
-        hr = ReadExact(pipe, &response, sizeof(response));
+        hr = TE_IpcReadExact(pipe, &response, sizeof(response));
         if (SUCCEEDED(hr)) {
             hr = TE_IpcValidateHeader(&response);
         }

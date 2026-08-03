@@ -5,13 +5,11 @@ add_executable(TaskbarEngine WIN32
     src/ipc_client.c
     src/crash_recovery.c
     src/scheduler.cpp
-    ${CMAKE_SOURCE_DIR}/Core/src/ipc_protocol.c
     res/app.rc
 )
 
 target_include_directories(TaskbarEngine PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-    ${CMAKE_SOURCE_DIR}/Core/include
 )
 
 target_link_libraries(TaskbarEngine PRIVATE
@@ -37,12 +35,10 @@ add_executable(TaskbarEngineSettings WIN32
     src/about_page.cpp
     src/gui_ipc_client.cpp
     src/config_io.cpp
-    ${CMAKE_SOURCE_DIR}/Core/src/ipc_protocol.c
     res/app.rc
 )
 
 target_include_directories(TaskbarEngineSettings PRIVATE
-    ${CMAKE_SOURCE_DIR}/Core/include
     ${CMAKE_SOURCE_DIR}/SDK/include
 )
 

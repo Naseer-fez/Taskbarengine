@@ -163,7 +163,7 @@ HRESULT TE_LogInit(const wchar_t* log_dir, TE_LogLevel min_level, bool to_file)
     } else {
         PWSTR local_appdata = NULL;
         HRESULT hr = SHGetKnownFolderPath(&FOLDERID_LocalAppData, 0, NULL, &local_appdata);
-        if (SUCCEEDED(hr)) {
+        if (TE_SUCCEEDED(hr)) {
             swprintf(g_log_dir_path, MAX_PATH, L"%s\\TaskbarEngine\\logs", local_appdata);
             CoTaskMemFree(local_appdata);
         } else {

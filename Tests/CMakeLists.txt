@@ -16,6 +16,9 @@ add_executable(te_tests
     test_ring_buffer.cpp
     test_dpi.cpp
     test_ipc_protocol.cpp
+    test_ipc_client.cpp
+    test_tray.cpp
+    test_tray_menu.cpp
     test_taskbar_resize.cpp
     test_crash_recovery.cpp
     test_state_store.cpp
@@ -29,12 +32,14 @@ add_executable(te_tests
     ${CMAKE_SOURCE_DIR}/Core/src/event_dispatch.c
     ${CMAKE_SOURCE_DIR}/Core/src/plugin_loader.c
     ${CMAKE_SOURCE_DIR}/Core/src/fault_isolation.c
-    ${CMAKE_SOURCE_DIR}/Core/src/ipc_protocol.c
     ${CMAKE_SOURCE_DIR}/Core/src/state_store.c
     ${CMAKE_SOURCE_DIR}/Modules/taskbar_resize/taskbar_resize.c
     ${CMAKE_SOURCE_DIR}/Modules/icon_hover/magnification.c
     ${CMAKE_SOURCE_DIR}/Modules/icon_hover/icon_layout.c
     ${CMAKE_SOURCE_DIR}/App/src/crash_recovery.c
+    ${CMAKE_SOURCE_DIR}/App/src/ipc_client.c
+    ${CMAKE_SOURCE_DIR}/App/src/tray.c
+    ${CMAKE_SOURCE_DIR}/App/src/tray_menu.c
 )
 
 target_include_directories(te_tests PRIVATE

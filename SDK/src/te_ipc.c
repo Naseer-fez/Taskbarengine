@@ -1,4 +1,4 @@
-#include "core/ipc_protocol.h"
+#include "sdk/te_ipc.h"
 #include <string.h>
 
 HRESULT TE_IpcBuildHeader(TE_IpcHeader* out_header, TE_IpcMsgType type, uint32_t payload_length)
@@ -52,4 +52,18 @@ HRESULT TE_IpcDeserializeHeader(const void* buffer, size_t buffer_size, TE_IpcHe
 
     memcpy(out_header, buffer, sizeof(TE_IpcHeader));
     return TE_IpcValidateHeader(out_header);
+}
+
+HRESULT TE_IpcReadExact(HANDLE pipe, void* buffer, DWORD bytes)
+{
+    DWORD total = 0;
+    while (total < bytes) {
+        DWORD read_now = 0;
+        if (!ReadFile(pipe, (uint8_t*)buffer + total, bytes - total, &read_now, NULL)) {
+            return HRESULT_FROM_WIN32(GetLastError());
+        }
+        if (read_now == 0) return HRESULT_FROM_WIN32(ERROR_HANDLE_EOF);
+        total += read_now;
+    }
+    return S_OK;
 }

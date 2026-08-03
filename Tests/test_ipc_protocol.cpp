@@ -1,5 +1,5 @@
 #include <catch2/catch_test_macros.hpp>
-#include <core/ipc_protocol.h>
+#include <sdk/te_ipc.h>
 #include <core/taskbar_subclass.h>
 
 TEST_CASE("IPC protocol serializes and validates messages", "[ipc]") {

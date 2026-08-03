@@ -17,5 +17,12 @@ HRESULT TE_EngineInitialize(void)
         return S_OK;
     }
 
+    /* Defense-in-depth: only initialize inside explorer.exe */
+    extern bool TE_IsExplorerProcess(void);
+    if (!TE_IsExplorerProcess()) {
+        InterlockedExchange(&g_engine_initialized, 0);
+        return S_FALSE;
+    }
+
     return TE_CoreManagerInit(g_hinstance);
 }

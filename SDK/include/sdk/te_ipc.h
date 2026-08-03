@@ -32,6 +32,15 @@ typedef struct TE_IpcHeader {
     uint32_t payload_length;
 } TE_IpcHeader;
 
+#define TE_PIPE_NAME L"\\\\.\\pipe\\TaskbarEngine"
+
+HRESULT TE_IpcBuildHeader(TE_IpcHeader* out_header, TE_IpcMsgType type, uint32_t payload_length);
+HRESULT TE_IpcValidateHeader(const TE_IpcHeader* header);
+HRESULT TE_IpcSerialize(void* buffer, size_t buffer_size, TE_IpcMsgType type, const void* payload, uint32_t payload_length, uint32_t* out_size);
+HRESULT TE_IpcDeserializeHeader(const void* buffer, size_t buffer_size, TE_IpcHeader* out_header);
+HRESULT TE_IpcReadExact(HANDLE pipe, void* buffer, DWORD bytes);
+
 #ifdef __cplusplus
 }
 #endif
+

@@ -1,11 +1,9 @@
 #include "core/ipc_server.h"
-#include "core/ipc_protocol.h"
+#include <sdk/te_ipc.h>
 #include "core/core_manager.h"
 #include "core/taskbar_subclass.h"
 #include <sdk/te_log.h>
 #include <sddl.h>
-
-#define TE_PIPE_NAME L"\\\\.\\pipe\\TaskbarEngine"
 
 static HANDLE g_ipc_thread = NULL;
 static HANDLE g_ipc_stop_event = NULL;
@@ -21,22 +19,6 @@ static HRESULT IpcWriteMessage(HANDLE pipe, TE_IpcMsgType type, const void* payl
     DWORD written = 0;
     if (!WriteFile(pipe, buffer, total, &written, NULL) || written != total) {
         return HRESULT_FROM_WIN32(GetLastError());
-    }
-    return S_OK;
-}
-
-static HRESULT IpcReadExact(HANDLE pipe, void* buffer, DWORD bytes)
-{
-    DWORD total = 0;
-    while (total < bytes) {
-        DWORD read_now = 0;
-        if (!ReadFile(pipe, (uint8_t*)buffer + total, bytes - total, &read_now, NULL)) {
-            DWORD err = GetLastError();
-            if (err == ERROR_BROKEN_PIPE) return HRESULT_FROM_WIN32(err);
-            return HRESULT_FROM_WIN32(err);
-        }
-        if (read_now == 0) return HRESULT_FROM_WIN32(ERROR_HANDLE_EOF);
-        total += read_now;
     }
     return S_OK;
 }
@@ -194,13 +176,13 @@ static DWORD WINAPI IpcServerThreadProc(LPVOID param)
             for (;;) {
                 if (WaitForSingleObject(g_ipc_stop_event, 0) == WAIT_OBJECT_0) break;
                 TE_IpcHeader header;
-                HRESULT hr = IpcReadExact(g_ipc_pipe, &header, sizeof(header));
+                HRESULT hr = TE_IpcReadExact(g_ipc_pipe, &header, sizeof(header));
                 if (FAILED(hr) || FAILED(TE_IpcValidateHeader(&header))) break;
 
                 uint8_t* payload = (uint8_t*)HeapAlloc(GetProcessHeap(), 0, (size_t)header.payload_length + 1);
                 if (!payload) break;
                 if (header.payload_length > 0) {
-                    hr = IpcReadExact(g_ipc_pipe, payload, header.payload_length);
+                    hr = TE_IpcReadExact(g_ipc_pipe, payload, header.payload_length);
                     if (FAILED(hr)) {
                         HeapFree(GetProcessHeap(), 0, payload);
                         break;

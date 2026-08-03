@@ -14,7 +14,7 @@
 
 static HINSTANCE g_hinst_dll = NULL;
 
-static bool TE_IsExplorerProcess(void)
+bool TE_IsExplorerProcess(void)
 {
     wchar_t path[MAX_PATH];
     DWORD ret = GetModuleFileNameW(NULL, path, MAX_PATH);
@@ -60,7 +60,7 @@ TE_API LRESULT CALLBACK TE_CbtHookProc(int nCode, WPARAM wParam, LPARAM lParam)
     (void)wParam;
     (void)lParam;
 
-    if (nCode >= 0) {
+    if (nCode >= 0 && TE_IsExplorerProcess()) {
         TE_EngineInitialize();
     }
 
