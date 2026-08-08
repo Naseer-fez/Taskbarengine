@@ -22,6 +22,11 @@ static wchar_t g_log_file_path[MAX_PATH] = {0};
 static TE_LogLevel g_min_level = TE_LOG_INFO;
 static bool g_log_to_file = false;
 
+static LONG AtomicReadLong(volatile LONG* value)
+{
+    return InterlockedCompareExchange(value, 0, 0);
+}
+
 static void TE_RotateLogs(const wchar_t* dir)
 {
     wchar_t search_pattern[MAX_PATH];
@@ -86,24 +91,24 @@ static DWORD WINAPI TE_LogFlushThreadProc(LPVOID param)
 
         if (!g_log_to_file || g_log_file_path[0] == L'\0') {
             /* If file logging is disabled, drain and clear unread entries */
-            LONG r = g_read_idx;
-            LONG w = g_write_idx;
+            LONG r = AtomicReadLong(&g_read_idx);
+            LONG w = AtomicReadLong(&g_write_idx);
             while (r != w) {
                 uint32_t idx = ((uint32_t)r) & (TE_LOG_RING_SIZE - 1);
                 TE_LogEntry* entry = &g_ring_buffer[idx];
                 if (InterlockedCompareExchange(&entry->state, TE_LOG_STATE_READING, TE_LOG_STATE_UNREAD) == TE_LOG_STATE_UNREAD) {
                     InterlockedExchange(&entry->state, TE_LOG_STATE_EMPTY);
-                    r++;
+                    r = (LONG)((ULONG)r + 1u);
                 } else {
                     break;
                 }
             }
-            g_read_idx = r;
+            InterlockedExchange(&g_read_idx, r);
             continue;
         }
 
-        LONG r = g_read_idx;
-        LONG w = g_write_idx;
+        LONG r = AtomicReadLong(&g_read_idx);
+        LONG w = AtomicReadLong(&g_write_idx);
 
         if (r == w) continue;
 
@@ -140,11 +145,11 @@ static DWORD WINAPI TE_LogFlushThreadProc(LPVOID param)
             }
 
             InterlockedExchange(&entry->state, TE_LOG_STATE_EMPTY);
-            r++;
+            r = (LONG)((ULONG)r + 1u);
         }
 
         CloseHandle(hfile);
-        g_read_idx = r;
+        InterlockedExchange(&g_read_idx, r);
     }
     return 0;
 }
@@ -160,6 +165,7 @@ HRESULT TE_LogInit(const wchar_t* log_dir, TE_LogLevel min_level, bool to_file)
 
     if (log_dir != NULL && log_dir[0] != L'\0') {
         wcsncpy(g_log_dir_path, log_dir, MAX_PATH - 1);
+        g_log_dir_path[MAX_PATH - 1] = L'\0';
     } else {
         PWSTR local_appdata = NULL;
         HRESULT hr = SHGetKnownFolderPath(&FOLDERID_LocalAppData, 0, NULL, &local_appdata);
@@ -194,6 +200,9 @@ HRESULT TE_LogInit(const wchar_t* log_dir, TE_LogLevel min_level, bool to_file)
     g_read_idx = 0;
     ZeroMemory(g_ring_buffer, sizeof(g_ring_buffer));
     g_flush_event = CreateEventW(NULL, FALSE, FALSE, NULL);
+    if (!g_flush_event) {
+        return HRESULT_FROM_WIN32(GetLastError());
+    }
     g_log_running = 1;
 
     g_flush_thread = CreateThread(NULL, 0, TE_LogFlushThreadProc, NULL, 0, NULL);
@@ -217,7 +226,7 @@ void TE_LogShutdown(void)
     }
 
     if (g_flush_thread) {
-        WaitForSingleObject(g_flush_thread, 1000);
+        WaitForSingleObject(g_flush_thread, 2000);
         CloseHandle(g_flush_thread);
         g_flush_thread = NULL;
     }
@@ -230,14 +239,32 @@ void TE_LogShutdown(void)
 
 void TE_LogWriteV(TE_LogLevel level, const char* fmt, va_list args)
 {
-    if (level < g_min_level) return;
+    if (!g_log_running || level < g_min_level || !fmt) return;
 
-    LONG w = InterlockedIncrement(&g_write_idx) - 1;
+    LONG w = 0;
+    for (;;) {
+        LONG read_idx = AtomicReadLong(&g_read_idx);
+        LONG write_idx = AtomicReadLong(&g_write_idx);
+        if ((uint32_t)((ULONG)write_idx - (ULONG)read_idx) >= TE_LOG_RING_SIZE) {
+            return;
+        }
+        LONG next_write_idx = (LONG)((ULONG)write_idx + 1u);
+        if (InterlockedCompareExchange(&g_write_idx, next_write_idx, write_idx) == write_idx) {
+            w = write_idx;
+            break;
+        }
+    }
+
     uint32_t idx = ((uint32_t)w) & (TE_LOG_RING_SIZE - 1);
     TE_LogEntry* entry = &g_ring_buffer[idx];
 
-    /* Atomically claim slot from EMPTY to WRITING. If not EMPTY, slot is busy/full, drop log */
+    /* A reservation is never abandoned; otherwise the consumer would stall at
+     * the resulting gap in the ordered ring. */
     if (InterlockedCompareExchange(&entry->state, TE_LOG_STATE_WRITING, TE_LOG_STATE_EMPTY) != TE_LOG_STATE_EMPTY) {
+        entry->level = (uint32_t)TE_LOG_WARN;
+        entry->timestamp_ms = (uint32_t)GetTickCount64();
+        strcpy_s(entry->message, sizeof(entry->message), "Log entry dropped because its ring slot was unavailable.");
+        InterlockedExchange(&entry->state, TE_LOG_STATE_UNREAD);
         return;
     }
 

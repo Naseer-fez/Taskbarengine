@@ -21,7 +21,8 @@ HRESULT TE_UiaInit(void)
 
 HRESULT TE_UiaDiscoverIcons(HWND taskbar_hwnd, TE_TaskbarIcon* out_icons, int max_count, int* out_count)
 {
-    if (!out_icons || !out_count) return E_POINTER;
+    if (!taskbar_hwnd || !IsWindow(taskbar_hwnd) || !out_icons || !out_count) return E_INVALIDARG;
+    if (max_count <= 0) return E_INVALIDARG;
     *out_count = 0;
 
     if (!g_uia) {

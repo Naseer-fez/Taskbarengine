@@ -30,7 +30,7 @@ static const PluginMetadata g_metadata = {
     "0.4.0",
     "TaskbarEngine",
     "Magnifies taskbar icons on hover using DirectComposition and smooth animation curves.",
-    5
+    100
 };
 
 static const char* g_curve_options[] = { "gaussian", "cubic", "linear", "cosine" };
@@ -50,17 +50,24 @@ static const PluginSettings g_settings_schema = {
 static void ParseConfig(const cJSON* config)
 {
     if (!config) return;
+    AcquireSRWLockExclusive(&g_state.icon_lock);
     const cJSON* scale = cJSON_GetObjectItemCaseSensitive(config, "scale");
     if (scale && cJSON_IsNumber(scale)) {
         g_state.max_scale = (float)scale->valuedouble;
+        if (g_state.max_scale < 1.0f) g_state.max_scale = 1.0f;
+        if (g_state.max_scale > 2.0f) g_state.max_scale = 2.0f;
     }
     const cJSON* radius = cJSON_GetObjectItemCaseSensitive(config, "radius");
     if (radius && cJSON_IsNumber(radius)) {
         g_state.radius = radius->valueint;
+        if (g_state.radius < 40) g_state.radius = 40;
+        if (g_state.radius > 300) g_state.radius = 300;
     }
     const cJSON* speed = cJSON_GetObjectItemCaseSensitive(config, "speed_ms");
     if (speed && cJSON_IsNumber(speed)) {
         g_state.speed_ms = speed->valueint;
+        if (g_state.speed_ms < 50) g_state.speed_ms = 50;
+        if (g_state.speed_ms > 500) g_state.speed_ms = 500;
     }
     const cJSON* curve = cJSON_GetObjectItemCaseSensitive(config, "curve");
     if (curve && cJSON_IsString(curve) && curve->valuestring) {
@@ -69,6 +76,7 @@ static void ParseConfig(const cJSON* config)
         else if (strcmp(curve->valuestring, "linear") == 0) g_state.curve = TE_CURVE_LINEAR;
         else if (strcmp(curve->valuestring, "cosine") == 0) g_state.curve = TE_CURVE_COSINE;
     }
+    ReleaseSRWLockExclusive(&g_state.icon_lock);
 }
 
 static HRESULT OnConfigChanged(uint32_t event_type, const void* event_data, void* user_data)
@@ -76,6 +84,9 @@ static HRESULT OnConfigChanged(uint32_t event_type, const void* event_data, void
     (void)event_type; (void)user_data;
     if (event_data) {
         const TE_ConfigChangedEvent* evt = (const TE_ConfigChangedEvent*)event_data;
+        AcquireSRWLockExclusive(&g_state.icon_lock);
+        g_state.ctx.config = evt->new_config;
+        ReleaseSRWLockExclusive(&g_state.icon_lock);
         ParseConfig(evt->new_config);
     }
     return S_OK;
@@ -131,13 +142,13 @@ static HRESULT OnTaskbarMouse(uint32_t event_type, const void* event_data, void*
 
 static HRESULT IconHover_Init(const PluginContext* ctx) {
     if (!ctx) return E_POINTER;
+    ZeroMemory(&g_state, sizeof(g_state));
+    InitializeSRWLock(&g_state.icon_lock);
     g_state.ctx = *ctx;
     g_state.max_scale = 1.3f;
     g_state.radius = 120;
     g_state.speed_ms = 150;
     g_state.curve = TE_CURVE_GAUSSIAN;
-    InitializeSRWLock(&g_state.icon_lock);
-
     ParseConfig(ctx->config);
 
     if (ctx->subscribe) {
@@ -174,11 +185,15 @@ static HRESULT IconHover_Enable(void) {
     g_state.secondary_count = 0;
     EnumWindows(EnumSecondaryTaskbars, (LPARAM)&g_state);
 
-    TE_IconCaptureInit();
+    HRESULT capture_hr = TE_IconCaptureInit();
+    if (FAILED(capture_hr)) {
+        return capture_hr;
+    }
 
     HRESULT uia_hr = TE_UiaInit();
     if (FAILED(uia_hr)) {
         TE_LogWrite(TE_LOG_ERROR, "IconHover UIA init failed: 0x%08X", (unsigned int)uia_hr);
+        TE_IconCaptureShutdown();
         return uia_hr;
     }
 
@@ -192,6 +207,8 @@ static HRESULT IconHover_Enable(void) {
     HRESULT hr = TE_DcompInit(taskbar_hwnd);
     if (FAILED(hr)) {
         TE_LogWrite(TE_LOG_ERROR, "IconHover DComp Init failed: 0x%08X", (unsigned int)hr);
+        TE_UiaCleanup();
+        TE_IconCaptureShutdown();
         return hr;
     }
 
@@ -213,6 +230,8 @@ static HRESULT IconHover_Enable(void) {
     if (FAILED(hr)) {
         TE_LogWrite(TE_LOG_ERROR, "IconHover FrameLoopStart failed: 0x%08X", hr);
         TE_DcompShutdown();
+        TE_UiaCleanup();
+        TE_IconCaptureShutdown();
         return hr;
     }
 
@@ -250,6 +269,7 @@ static HRESULT IconHover_Shutdown(void) {
         g_state.ctx.unsubscribe(TE_EVENT_CONFIG_CHANGED, OnConfigChanged);
         g_state.ctx.unsubscribe(TE_EVENT_SHELL_HOOK, OnShellHook);
         g_state.ctx.unsubscribe(TE_EVENT_DPI_CHANGED, OnDpiChanged);
+        g_state.ctx.unsubscribe(TE_EVENT_TASKBAR_MOUSE, OnTaskbarMouse);
     }
     InterlockedExchange(&g_state.initialized, 0);
     return S_OK;

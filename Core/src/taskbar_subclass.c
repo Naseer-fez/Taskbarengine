@@ -81,11 +81,12 @@ static LRESULT CALLBACK TaskbarSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam,
             if (wParam == TE_IPC_CMD_RELOAD_CONFIG) {
                 TE_CoreManagerReloadConfig();
             } else if (wParam == TE_IPC_CMD_ENABLE_PLUGIN || wParam == TE_IPC_CMD_DISABLE_PLUGIN) {
-                char* name = (char*)lParam;
+                const char* name = (const char*)lParam;
                 if (name) {
-                    TE_CoreManagerSetPluginEnabledByName(name, wParam == TE_IPC_CMD_ENABLE_PLUGIN);
-                    HeapFree(GetProcessHeap(), 0, name);
+                    return (LRESULT)(LONG)TE_CoreManagerSetPluginEnabledByName(
+                        name, wParam == TE_IPC_CMD_ENABLE_PLUGIN);
                 }
+                return (LRESULT)(LONG)E_INVALIDARG;
             } else if (wParam == TE_IPC_CMD_SHUTDOWN) {
                 TE_LogWrite(TE_LOG_INFO, "Taskbar subclass executing TE_IPC_CMD_SHUTDOWN on UI thread");
                 TE_CoreManagerShutdownFromIpc();
@@ -93,6 +94,22 @@ static LRESULT CALLBACK TaskbarSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam,
                 TE_IpcSyncPayload* sync = (TE_IpcSyncPayload*)lParam;
                 if (sync) {
                     sync->result_code = TE_CoreManagerBuildPluginList((char*)sync->buffer, sync->buffer_len);
+                    if (sync->completion_event) {
+                        SetEvent(sync->completion_event);
+                    }
+                }
+            } else if (wParam == TE_IPC_CMD_GET_SETTINGS) {
+                TE_IpcSyncPayload* sync = (TE_IpcSyncPayload*)lParam;
+                if (sync) {
+                    sync->result_code = TE_CoreManagerBuildSettingsSchema((char*)sync->buffer, sync->buffer_len);
+                    if (sync->completion_event) {
+                        SetEvent(sync->completion_event);
+                    }
+                }
+            } else if (wParam == TE_IPC_CMD_GET_PERF_STATS) {
+                TE_IpcSyncPayload* sync = (TE_IpcSyncPayload*)lParam;
+                if (sync) {
+                    sync->result_code = TE_CoreManagerBuildPerfStats((char*)sync->buffer, sync->buffer_len);
                     if (sync->completion_event) {
                         SetEvent(sync->completion_event);
                     }

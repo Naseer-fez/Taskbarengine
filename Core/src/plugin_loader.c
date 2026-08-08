@@ -67,6 +67,11 @@ HRESULT TE_PluginLoaderScan(const wchar_t* modules_dir, TE_PluginEntry* registry
         entry.iface = iface;
         entry.metadata = meta;
         entry.context = (PluginContext*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(PluginContext));
+        if (!entry.context) {
+            TE_LogWrite(TE_LOG_ERROR, "Failed to allocate context for plugin '%s'", meta->name);
+            FreeLibrary(hdll);
+            continue;
+        }
         entry.enabled = false;
         entry.fault_count = 0;
         entry.disabled_by_fault = false;
@@ -87,7 +92,8 @@ HRESULT TE_PluginLoaderScan(const wchar_t* modules_dir, TE_PluginEntry* registry
         registry[insert_idx] = entry;
         (*count)++;
 
-        TE_LogWrite(TE_LOG_INFO, "Discovered plugin '%s' (v%s) with priority %u", meta->name, meta->version, meta->priority);
+        TE_LogWrite(TE_LOG_INFO, "Discovered plugin '%s' (v%s) with priority %u",
+                    meta->name, meta->version ? meta->version : "unknown", meta->priority);
 
     } while (FindNextFileW(hfind, &find_data));
 
@@ -153,6 +159,10 @@ HRESULT TE_PluginLoaderShutdown(TE_PluginEntry* entry)
         FreeLibrary(entry->dll_handle);
         entry->dll_handle = NULL;
     }
+
+    entry->iface = NULL;
+    entry->metadata = NULL;
+    entry->enabled = false;
 
     return S_OK;
 }

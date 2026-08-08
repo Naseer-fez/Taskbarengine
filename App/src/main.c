@@ -76,7 +76,7 @@ static LRESULT CALLBACK HiddenWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
                 return 0;
             }
             if (lParam == WM_LBUTTONDBLCLK) {
-                ShellExecuteW(NULL, L"open", L"TaskbarEngineSettings.exe", NULL, NULL, SW_SHOWNORMAL);
+                TE_TrayMenuOpenSettings();
                 return 0;
             }
             break;

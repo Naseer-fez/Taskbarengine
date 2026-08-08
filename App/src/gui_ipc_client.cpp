@@ -21,7 +21,8 @@ static HRESULT SendIpcCommand(TE_IpcMsgType type, const void* payload, uint32_t 
     if (SUCCEEDED(hr)) {
         DWORD written = 0;
         if (!WriteFile(pipe, buffer, total, &written, NULL) || written != total) {
-            hr = HRESULT_FROM_WIN32(GetLastError());
+            DWORD error = GetLastError();
+            hr = HRESULT_FROM_WIN32(error != ERROR_SUCCESS ? error : ERROR_WRITE_FAULT);
         }
     }
 

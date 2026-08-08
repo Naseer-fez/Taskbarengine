@@ -59,6 +59,12 @@ static HRESULT CoreQueryState(const char* key, StateValue* out_val)
     return TE_StateQuery(key, out_val);
 }
 
+static bool IsPluginEnabledInConfig(const cJSON* config)
+{
+    const cJSON* item = config ? cJSON_GetObjectItemCaseSensitive(config, "enabled") : NULL;
+    return !item || !cJSON_IsBool(item) || cJSON_IsTrue(item);
+}
+
 HRESULT TE_CoreManagerInit(HINSTANCE hinstance)
 {
     if (g_core_state) return S_OK;
@@ -139,7 +145,11 @@ HRESULT TE_CoreManagerInit(HINSTANCE hinstance)
     wcsncpy(config_dir, g_core_state->config_path, MAX_PATH - 1);
     config_dir[MAX_PATH - 1] = L'\0';
     wchar_t* cfg_dir_slash = wcsrchr(config_dir, L'\\');
-    if (cfg_dir_slash) *cfg_dir_slash = L'\0';
+    if (cfg_dir_slash) {
+        *cfg_dir_slash = L'\0';
+    } else {
+        wcscpy_s(config_dir, MAX_PATH, L".");
+    }
     HRESULT watch_hr = TE_ConfigWatcherStart(config_dir, g_core_state->taskbar_hwnd);
     if (FAILED(watch_hr)) {
         TE_LogWrite(TE_LOG_WARN, "Failed to start config watcher (hr: 0x%08X)", (unsigned int)watch_hr);
@@ -147,6 +157,7 @@ HRESULT TE_CoreManagerInit(HINSTANCE hinstance)
 
     /* Discover & Load Plugins */
     TE_PluginLoaderScan(g_core_state->modules_dir, g_core_state->plugins, &g_core_state->plugin_count);
+
 
     /* Initialize and Enable Plugins */
     for (uint32_t i = 0; i < g_core_state->plugin_count; i++) {
@@ -158,7 +169,8 @@ HRESULT TE_CoreManagerInit(HINSTANCE hinstance)
         plugin->context->api_version = TE_API_VERSION;
         plugin->context->taskbar_hwnd = g_core_state->taskbar_hwnd;
         plugin->context->monitor = g_core_state->taskbar_hwnd ? MonitorFromWindow(g_core_state->taskbar_hwnd, MONITOR_DEFAULTTONEAREST) : NULL;
-        plugin->context->dpi = 96; /* Default DPI */
+        plugin->context->dpi = g_core_state->taskbar_hwnd ? GetDpiForWindow(g_core_state->taskbar_hwnd) : 96;
+        if (plugin->context->dpi == 0) plugin->context->dpi = 96;
         plugin->context->config = TE_ConfigGetPluginSection(g_core_state->config_root, plugin->metadata->name);
         plugin->context->log = TE_LogWrite;
         plugin->context->subscribe = CoreSubscribeWrapper;
@@ -173,16 +185,7 @@ HRESULT TE_CoreManagerInit(HINSTANCE hinstance)
         }
 
         /* Check enabled setting in config */
-        bool enabled = true; /* Default enabled */
-        const cJSON* pcfg = plugin->context->config;
-        if (pcfg) {
-            const cJSON* item = cJSON_GetObjectItemCaseSensitive(pcfg, "enabled");
-            if (item && cJSON_IsBool(item)) {
-                enabled = cJSON_IsTrue(item);
-            }
-        }
-
-        if (enabled) {
+        if (IsPluginEnabledInConfig(plugin->context->config)) {
             TE_PluginLoaderEnable(plugin);
         }
     }
@@ -259,6 +262,7 @@ void TE_CoreManagerOnConfigChanged(void* core_state_ptr)
     /* Diff per plugin */
     for (uint32_t i = 0; i < state->plugin_count; i++) {
         TE_PluginEntry* plugin = &state->plugins[i];
+        if (!plugin->metadata || !plugin->metadata->name) continue;
         const char* name = plugin->metadata->name;
 
         const cJSON* old_sec = TE_ConfigGetPluginSection(state->config_root, name);
@@ -275,18 +279,29 @@ void TE_CoreManagerOnConfigChanged(void* core_state_ptr)
         if (old_str) cJSON_free(old_str);
         if (new_str) cJSON_free(new_str);
 
-        if (changed) {
-            TE_LogWrite(TE_LOG_INFO, "Config section for plugin '%s' changed", name);
-            if (plugin->context) {
-                plugin->context->config = new_sec;
-            }
+        /* Every context points into the active configuration tree. Refresh even
+         * unchanged sections before the previous tree is released below. */
+        if (plugin->context) {
+            plugin->context->config = new_sec;
+        }
 
+        const bool should_enable = IsPluginEnabledInConfig(new_sec);
+        if (should_enable && !plugin->enabled) {
+            TE_PluginLoaderEnable(plugin);
+        } else if (!should_enable && plugin->enabled) {
+            TE_PluginLoaderDisable(plugin);
+        }
+
+        if (changed && plugin->enabled) {
+            TE_LogWrite(TE_LOG_INFO, "Config section for plugin '%s' changed", name);
             /* Dispatch CONFIG_CHANGED targeted specifically to this plugin (plugin_id = i + 1) */
             TE_ConfigChangedEvent evt = { .new_config = new_sec };
-            TE_EventDispatchTargeted(state->subscriptions, state->subscription_count, TE_EVENT_CONFIG_CHANGED, &evt, i + 1);
+            TE_EventDispatchTargeted(state->subscriptions, state->subscription_count,
+                                     TE_EVENT_CONFIG_CHANGED, &evt, i + 1);
         }
     }
 
+    /* Replace old root */
     if (state->config_root) {
         cJSON_Delete(state->config_root);
     }
@@ -303,12 +318,17 @@ void TE_CoreManagerReloadConfig(void)
 
 HRESULT TE_CoreManagerSetPluginEnabledByName(const char* plugin_name, bool enabled)
 {
-    if (!g_core_state || !plugin_name) return E_POINTER;
 
     for (uint32_t i = 0; i < g_core_state->plugin_count; i++) {
         TE_PluginEntry* plugin = &g_core_state->plugins[i];
         if (plugin->metadata && plugin->metadata->name && strcmp(plugin->metadata->name, plugin_name) == 0) {
-            return enabled ? TE_PluginLoaderEnable(plugin) : TE_PluginLoaderDisable(plugin);
+            HRESULT hr = enabled ? TE_PluginLoaderEnable(plugin) : TE_PluginLoaderDisable(plugin);
+            if (SUCCEEDED(hr) && enabled && plugin->enabled && plugin->context) {
+                TE_ConfigChangedEvent evt = { .new_config = plugin->context->config };
+                TE_EventDispatchTargeted(g_core_state->subscriptions, g_core_state->subscription_count,
+                                         TE_EVENT_CONFIG_CHANGED, &evt, i + 1);
+            }
+            return hr;
         }
     }
 

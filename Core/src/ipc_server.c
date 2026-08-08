@@ -18,20 +18,36 @@ static HRESULT IpcWriteMessage(HANDLE pipe, TE_IpcMsgType type, const void* payl
 
     DWORD written = 0;
     if (!WriteFile(pipe, buffer, total, &written, NULL) || written != total) {
-        return HRESULT_FROM_WIN32(GetLastError());
+        DWORD error = GetLastError();
+        return HRESULT_FROM_WIN32(error != ERROR_SUCCESS ? error : ERROR_WRITE_FAULT);
     }
     return S_OK;
+}
+
+static bool IpcSendUiCommand(HWND taskbar_hwnd, WPARAM command, LPARAM parameter, DWORD_PTR* result)
+{
+    DWORD_PTR local_result = 0;
+    if (!taskbar_hwnd || !IsWindow(taskbar_hwnd)) return false;
+
+    BOOL sent = SendMessageTimeoutW(taskbar_hwnd, WM_TE_IPC_COMMAND, command, parameter,
+                                    SMTO_ABORTIFHUNG | SMTO_BLOCK, 2000, &local_result);
+    if (result) *result = local_result;
+    return sent != 0;
 }
 
 static void IpcHandleMessage(HANDLE pipe, const TE_IpcHeader* header, const uint8_t* payload)
 {
     HWND taskbar_hwnd = FindWindowW(L"Shell_TrayWnd", NULL);
+    DWORD_PTR command_result = 0;
 
     switch ((TE_IpcMsgType)header->type) {
         case TE_IPC_MSG_SHUTDOWN: {
             TE_LogWrite(TE_LOG_INFO, "IPC shutdown requested");
             if (taskbar_hwnd && IsWindow(taskbar_hwnd)) {
-                PostMessageW(taskbar_hwnd, WM_TE_IPC_COMMAND, TE_IPC_CMD_SHUTDOWN, 0);
+                if (!IpcSendUiCommand(taskbar_hwnd, TE_IPC_CMD_SHUTDOWN, 0, NULL)) {
+                    IpcWriteMessage(pipe, TE_IPC_MSG_STATUS, "TIMEOUT", 7);
+                    break;
+                }
             } else {
                 TE_CoreManagerShutdownFromIpc();
             }
@@ -42,88 +58,106 @@ static void IpcHandleMessage(HANDLE pipe, const TE_IpcHeader* header, const uint
 
         case TE_IPC_MSG_RELOAD_CONFIG:
             if (taskbar_hwnd && IsWindow(taskbar_hwnd)) {
-                PostMessageW(taskbar_hwnd, WM_TE_IPC_COMMAND, TE_IPC_CMD_RELOAD_CONFIG, 0);
+                if (!IpcSendUiCommand(taskbar_hwnd, TE_IPC_CMD_RELOAD_CONFIG, 0, NULL)) {
+                    IpcWriteMessage(pipe, TE_IPC_MSG_STATUS, "TIMEOUT", 7);
+                    break;
+                }
+            } else {
+                TE_CoreManagerReloadConfig();
             }
             IpcWriteMessage(pipe, TE_IPC_MSG_STATUS, "OK", 3);
             break;
 
         case TE_IPC_MSG_ENABLE_PLUGIN:
         case TE_IPC_MSG_DISABLE_PLUGIN: {
-            char* name_dup = NULL;
-            if (payload && payload[0] != '\0') {
-                size_t len = strlen((const char*)payload) + 1;
-                name_dup = (char*)HeapAlloc(GetProcessHeap(), 0, len);
-                if (name_dup) {
-                    memcpy(name_dup, payload, len);
-                }
+            if (!payload || header->payload_length == 0 || payload[0] == '\0') {
+                IpcWriteMessage(pipe, TE_IPC_MSG_STATUS, "INVALID", 8);
+                break;
             }
-            if (taskbar_hwnd && IsWindow(taskbar_hwnd) && name_dup) {
+
+            HRESULT hr;
+            if (taskbar_hwnd && IsWindow(taskbar_hwnd)) {
                 WPARAM cmd = (header->type == TE_IPC_MSG_ENABLE_PLUGIN) ? TE_IPC_CMD_ENABLE_PLUGIN : TE_IPC_CMD_DISABLE_PLUGIN;
-                if (!PostMessageW(taskbar_hwnd, WM_TE_IPC_COMMAND, cmd, (LPARAM)name_dup)) {
-                    HeapFree(GetProcessHeap(), 0, name_dup);
+                if (!IpcSendUiCommand(taskbar_hwnd, cmd, (LPARAM)payload, &command_result)) {
+                    IpcWriteMessage(pipe, TE_IPC_MSG_STATUS, "TIMEOUT", 7);
+                    break;
                 }
-            } else if (name_dup) {
-                HeapFree(GetProcessHeap(), 0, name_dup);
+                hr = (HRESULT)(LONG)command_result;
+            } else {
+                hr = TE_CoreManagerSetPluginEnabledByName((const char*)payload,
+                                                          header->type == TE_IPC_MSG_ENABLE_PLUGIN);
             }
-            IpcWriteMessage(pipe, TE_IPC_MSG_STATUS, "OK", 3);
+            IpcWriteMessage(pipe, TE_IPC_MSG_STATUS, SUCCEEDED(hr) ? "OK" : "ERROR", SUCCEEDED(hr) ? 3 : 6);
             break;
         }
 
         case TE_IPC_MSG_GET_PLUGIN_LIST: {
             char* list = (char*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 2048);
-            uint32_t len = 0;
-            if (taskbar_hwnd && IsWindow(taskbar_hwnd) && list) {
-                TE_IpcSyncPayload* sync_payload = (TE_IpcSyncPayload*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(TE_IpcSyncPayload));
-                if (sync_payload) {
-                    sync_payload->buffer = list;
-                    sync_payload->buffer_len = 2048;
-                    sync_payload->completion_event = CreateEventW(NULL, TRUE, FALSE, NULL);
-                    
-                    if (PostMessageW(taskbar_hwnd, WM_TE_IPC_COMMAND, TE_IPC_CMD_GET_PLUGIN_LIST, (LPARAM)sync_payload)) {
-                        if (WaitForSingleObject(sync_payload->completion_event, 2000) == WAIT_OBJECT_0) {
-                            len = sync_payload->result_code;
-                            IpcWriteMessage(pipe, TE_IPC_MSG_PLUGIN_LIST, list, len);
-                            CloseHandle(sync_payload->completion_event);
-                            HeapFree(GetProcessHeap(), 0, sync_payload);
-                            HeapFree(GetProcessHeap(), 0, list);
-                        } else {
-                            /* Timeout: leak heap allocations to prevent use-after-free on UI thread */
-                            IpcWriteMessage(pipe, TE_IPC_MSG_STATUS, "TIMEOUT", 7);
-                            CloseHandle(sync_payload->completion_event);
-                        }
-                    } else {
-                        len = TE_CoreManagerBuildPluginList(list, 2048);
-                        IpcWriteMessage(pipe, TE_IPC_MSG_PLUGIN_LIST, list, len);
-                        CloseHandle(sync_payload->completion_event);
-                        HeapFree(GetProcessHeap(), 0, sync_payload);
-                        HeapFree(GetProcessHeap(), 0, list);
-                    }
-                }
-            } else if (list) {
-                len = TE_CoreManagerBuildPluginList(list, 2048);
-                IpcWriteMessage(pipe, TE_IPC_MSG_PLUGIN_LIST, list, len);
-                HeapFree(GetProcessHeap(), 0, list);
+            if (!list) {
+                IpcWriteMessage(pipe, TE_IPC_MSG_STATUS, "ERROR", 6);
+                break;
             }
+
+            TE_IpcSyncPayload sync_payload = { 0 };
+            sync_payload.buffer = list;
+            sync_payload.buffer_len = 2048;
+            if (taskbar_hwnd && IsWindow(taskbar_hwnd)) {
+                if (!IpcSendUiCommand(taskbar_hwnd, TE_IPC_CMD_GET_PLUGIN_LIST, (LPARAM)&sync_payload, NULL)) {
+                    IpcWriteMessage(pipe, TE_IPC_MSG_STATUS, "TIMEOUT", 7);
+                    HeapFree(GetProcessHeap(), 0, list);
+                    break;
+                }
+            } else {
+                sync_payload.result_code = TE_CoreManagerBuildPluginList(list, sync_payload.buffer_len);
+            }
+            IpcWriteMessage(pipe, TE_IPC_MSG_PLUGIN_LIST, list, sync_payload.result_code);
+            HeapFree(GetProcessHeap(), 0, list);
             break;
         }
 
         case TE_IPC_MSG_GET_SETTINGS: {
             char* schema = (char*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, TE_IPC_MAX_PAYLOAD);
-            if (schema) {
-                uint32_t len = TE_CoreManagerBuildSettingsSchema(schema, TE_IPC_MAX_PAYLOAD);
-                IpcWriteMessage(pipe, TE_IPC_MSG_SETTINGS_RESPONSE, schema, len);
-                HeapFree(GetProcessHeap(), 0, schema);
+            if (!schema) {
+                IpcWriteMessage(pipe, TE_IPC_MSG_STATUS, "ERROR", 6);
+                break;
             }
+            TE_IpcSyncPayload sync_payload = { 0 };
+            sync_payload.buffer = schema;
+            sync_payload.buffer_len = TE_IPC_MAX_PAYLOAD;
+            if (taskbar_hwnd && IsWindow(taskbar_hwnd)) {
+                if (!IpcSendUiCommand(taskbar_hwnd, TE_IPC_CMD_GET_SETTINGS, (LPARAM)&sync_payload, NULL)) {
+                    IpcWriteMessage(pipe, TE_IPC_MSG_STATUS, "TIMEOUT", 7);
+                    HeapFree(GetProcessHeap(), 0, schema);
+                    break;
+                }
+            } else {
+                sync_payload.result_code = TE_CoreManagerBuildSettingsSchema(schema, sync_payload.buffer_len);
+            }
+            IpcWriteMessage(pipe, TE_IPC_MSG_SETTINGS_RESPONSE, schema, sync_payload.result_code);
+            HeapFree(GetProcessHeap(), 0, schema);
             break;
         }
 
         case TE_IPC_MSG_GET_PERF_STATS: {
             char* stats = (char*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 4096);
-            if (stats) {
-                uint32_t len = TE_CoreManagerBuildPerfStats(stats, 4096);
-                IpcWriteMessage(pipe, TE_IPC_MSG_PERF_STATS_RESPONSE, stats, len);
-                HeapFree(GetProcessHeap(), 0, stats);
+            if (!stats) {
+                IpcWriteMessage(pipe, TE_IPC_MSG_STATUS, "ERROR", 6);
+                break;
             }
+            TE_IpcSyncPayload sync_payload = { 0 };
+            sync_payload.buffer = stats;
+            sync_payload.buffer_len = 4096;
+            if (taskbar_hwnd && IsWindow(taskbar_hwnd)) {
+                if (!IpcSendUiCommand(taskbar_hwnd, TE_IPC_CMD_GET_PERF_STATS, (LPARAM)&sync_payload, NULL)) {
+                    IpcWriteMessage(pipe, TE_IPC_MSG_STATUS, "TIMEOUT", 7);
+                    HeapFree(GetProcessHeap(), 0, stats);
+                    break;
+                }
+            } else {
+                sync_payload.result_code = TE_CoreManagerBuildPerfStats(stats, sync_payload.buffer_len);
+            }
+            IpcWriteMessage(pipe, TE_IPC_MSG_PERF_STATS_RESPONSE, stats, sync_payload.result_code);
+            HeapFree(GetProcessHeap(), 0, stats);
             break;
         }
 
@@ -144,18 +178,20 @@ static DWORD WINAPI IpcServerThreadProc(LPVOID param)
         PSECURITY_DESCRIPTOR sd = NULL;
         ZeroMemory(&sa, sizeof(sa));
         sa.nLength = sizeof(sa);
-        if (ConvertStringSecurityDescriptorToSecurityDescriptorW(
+        if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
                 L"D:P(A;;GA;;;OW)(A;;GA;;;SY)",
                 SDDL_REVISION_1,
                 &sd,
                 NULL)) {
-            sa.lpSecurityDescriptor = sd;
+            TE_LogWrite(TE_LOG_ERROR, "Failed to create IPC security descriptor (%lu)", GetLastError());
+            break;
         }
+        sa.lpSecurityDescriptor = sd;
 
         g_ipc_pipe = CreateNamedPipeW(
             TE_PIPE_NAME,
             PIPE_ACCESS_DUPLEX,
-            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
             1,
             sizeof(TE_IpcHeader) + TE_IPC_MAX_PAYLOAD,
             sizeof(TE_IpcHeader) + TE_IPC_MAX_PAYLOAD,
@@ -232,9 +268,16 @@ void TE_IpcServerStop(void)
 
     if (g_ipc_thread) {
         if (GetThreadId(g_ipc_thread) == GetCurrentThreadId()) {
+            CloseHandle(g_ipc_thread);
+            g_ipc_thread = NULL;
+            if (g_ipc_stop_event) {
+                CloseHandle(g_ipc_stop_event);
+                g_ipc_stop_event = NULL;
+            }
             return;
         }
-        WaitForSingleObject(g_ipc_thread, 1000);
+        CancelSynchronousIo(g_ipc_thread);
+        WaitForSingleObject(g_ipc_thread, INFINITE);
         CloseHandle(g_ipc_thread);
         g_ipc_thread = NULL;
     }

@@ -6,6 +6,7 @@
 #include <MddBootstrap.h>
 #include <WindowsAppSDK-VersionInfo.h>
 #include <string>
+#include <cJSON.h>
 #include "settings_page.h"
 #include "about_page.h"
 #include "gui_ipc_client.h"

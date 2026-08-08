@@ -43,6 +43,7 @@ HRESULT TE_StatePublish(const char* key, const StateValue* val)
 {
     if (!key || !val) return E_POINTER;
     if (key[0] == '\0') return E_INVALIDARG;
+    if (strnlen_s(key, TE_STATE_KEY_MAX_LEN) == TE_STATE_KEY_MAX_LEN) return HRESULT_FROM_WIN32(ERROR_BUFFER_OVERFLOW);
 
     AcquireSRWLockExclusive(&g_lock);
     if (!g_initialized) {
@@ -85,6 +86,7 @@ HRESULT TE_StateQuery(const char* key, StateValue* out_val)
 {
     if (!key || !out_val) return E_POINTER;
     if (key[0] == '\0') return E_INVALIDARG;
+    if (strnlen_s(key, TE_STATE_KEY_MAX_LEN) == TE_STATE_KEY_MAX_LEN) return HRESULT_FROM_WIN32(ERROR_BUFFER_OVERFLOW);
 
     AcquireSRWLockShared(&g_lock);
     if (!g_initialized) {

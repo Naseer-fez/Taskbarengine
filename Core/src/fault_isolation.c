@@ -16,6 +16,24 @@ static VOID CALLBACK WatchdogTimerCallback(PVOID lpParameter, BOOLEAN TimerOrWai
     }
 }
 
+static void DisableFaultedPlugin(TE_PluginEntry* entry, bool invoke_disable)
+{
+    if (!entry || entry->fault_count < TE_MAX_FAULT_STRIKES) return;
+
+    TE_LogWrite(TE_LOG_ERROR, "Plugin '%s' exceeded max fault strikes (%u). Disabling plugin.",
+                (entry->metadata && entry->metadata->name) ? entry->metadata->name : "unknown",
+                TE_MAX_FAULT_STRIKES);
+
+    const bool needs_cleanup = !entry->disabled_by_fault;
+    entry->disabled_by_fault = true;
+    if (needs_cleanup && invoke_disable && entry->iface && entry->iface->Disable) {
+        /* Run Disable once to revert any partial visual or behavioral changes.
+         * A failing Disable cannot recurse because disabled_by_fault is set first. */
+        TE_FaultIsolationCallPlugin(entry, entry->iface->Disable, "Disable");
+    }
+    entry->enabled = false;
+}
+
 HRESULT TE_FaultIsolationCallPlugin(TE_PluginEntry* entry, HRESULT (*callback)(void), const char* callback_name)
 {
     if (!entry || !callback) return E_POINTER;
@@ -72,13 +90,7 @@ HRESULT TE_FaultIsolationCallPlugin(TE_PluginEntry* entry, HRESULT (*callback)(v
                         entry->fault_count, TE_MAX_FAULT_STRIKES);
         }
 
-        if (entry->fault_count >= TE_MAX_FAULT_STRIKES) {
-            TE_LogWrite(TE_LOG_ERROR, "Plugin '%s' exceeded max fault strikes (%u). Disabling plugin.",
-                        (entry->metadata && entry->metadata->name) ? entry->metadata->name : "unknown",
-                        TE_MAX_FAULT_STRIKES);
-            entry->disabled_by_fault = true;
-            TE_PluginLoaderDisable(entry);
-        }
+        DisableFaultedPlugin(entry, callback != entry->iface->Disable && callback != entry->iface->Shutdown);
 
         return caught_exception ? E_FAIL : E_ABORT;
     }
@@ -140,13 +152,7 @@ HRESULT TE_FaultIsolationCallPluginInit(TE_PluginEntry* entry, HRESULT (*callbac
                         entry->fault_count, TE_MAX_FAULT_STRIKES);
         }
 
-        if (entry->fault_count >= TE_MAX_FAULT_STRIKES) {
-            TE_LogWrite(TE_LOG_ERROR, "Plugin '%s' exceeded max fault strikes (%u). Disabling plugin.",
-                        (entry->metadata && entry->metadata->name) ? entry->metadata->name : "unknown",
-                        TE_MAX_FAULT_STRIKES);
-            entry->disabled_by_fault = true;
-            TE_PluginLoaderDisable(entry);
-        }
+        DisableFaultedPlugin(entry, true);
 
         return caught_exception ? E_FAIL : E_ABORT;
     }
@@ -209,13 +215,7 @@ HRESULT TE_FaultIsolationCallEventCallback(TE_PluginEntry* entry, TE_EventCallba
                             entry->fault_count, TE_MAX_FAULT_STRIKES);
             }
 
-            if (entry->fault_count >= TE_MAX_FAULT_STRIKES) {
-                TE_LogWrite(TE_LOG_ERROR, "Plugin '%s' exceeded max fault strikes (%u). Disabling plugin.",
-                            (entry->metadata && entry->metadata->name) ? entry->metadata->name : "unknown",
-                            TE_MAX_FAULT_STRIKES);
-                entry->disabled_by_fault = true;
-                TE_PluginLoaderDisable(entry);
-            }
+            DisableFaultedPlugin(entry, true);
 
             return caught_exception ? E_FAIL : E_ABORT;
         }

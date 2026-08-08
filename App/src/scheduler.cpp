@@ -24,6 +24,7 @@ HRESULT TE_SchedulerRegisterTask(const wchar_t* exe_path)
 
     HRESULT hr = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
     bool co_init = SUCCEEDED(hr);
+    if (FAILED(hr) && hr != RPC_E_CHANGED_MODE) return hr;
     
     hr = CoCreateInstance(CLSID_TaskScheduler, NULL, CLSCTX_INPROC_SERVER, IID_ITaskService, (void**)&pService);
     if (FAILED(hr)) goto cleanup;
@@ -56,7 +57,10 @@ HRESULT TE_SchedulerRegisterTask(const wchar_t* exe_path)
     if (SUCCEEDED(hr) && pPrincipal) {
         pPrincipal->put_Id(_bstr_t(L"Author"));
         pPrincipal->put_LogonType(TASK_LOGON_INTERACTIVE_TOKEN);
-        pPrincipal->put_RunLevel(TASK_RUNLEVEL_HIGHEST);
+        /* The tray app should stay at the interactive user's integrity level;
+         * elevating it would prevent reliable same-desktop hook injection and
+         * grants unnecessary privileges at logon. */
+        pPrincipal->put_RunLevel(TASK_RUNLEVEL_LUA);
         pPrincipal->Release();
         pPrincipal = NULL;
     }
@@ -118,6 +122,18 @@ HRESULT TE_SchedulerRegisterTask(const wchar_t* exe_path)
     if (pRootFolder) { pRootFolder->Release(); pRootFolder = NULL; }
 
 cleanup:
+    if (pRegisteredTask) pRegisteredTask->Release();
+    if (pExecAction) pExecAction->Release();
+    if (pAction) pAction->Release();
+    if (pActionCollection) pActionCollection->Release();
+    if (pLogonTrigger) pLogonTrigger->Release();
+    if (pTrigger) pTrigger->Release();
+    if (pTriggerCollection) pTriggerCollection->Release();
+    if (pSettings) pSettings->Release();
+    if (pPrincipal) pPrincipal->Release();
+    if (pRegInfo) pRegInfo->Release();
+    if (pTask) pTask->Release();
+    if (pRootFolder) pRootFolder->Release();
     if (pService) pService->Release();
     if (co_init) CoUninitialize();
     
@@ -131,6 +147,7 @@ HRESULT TE_SchedulerRemoveTask(void)
 
     HRESULT hr = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
     bool co_init = SUCCEEDED(hr);
+    if (FAILED(hr) && hr != RPC_E_CHANGED_MODE) return hr;
     
     hr = CoCreateInstance(CLSID_TaskScheduler, NULL, CLSCTX_INPROC_SERVER, IID_ITaskService, (void**)&pService);
     if (FAILED(hr)) goto cleanup;

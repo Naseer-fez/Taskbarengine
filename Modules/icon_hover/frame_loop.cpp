@@ -31,10 +31,7 @@ static void FrameLoopDeactivateTimer(void)
 {
     if (InterlockedCompareExchange(&g_timer_active, 0, 1) == 1) {
         if (g_timer_queue && g_timer) {
-            /* WT_EXECUTEONLYONCE not needed — just delete the timer.
-             * Use NULL (non-blocking) since this may be called from the
-             * timer callback thread itself. */
-            DeleteTimerQueueTimer(g_timer_queue, g_timer, NULL);
+            DeleteTimerQueueTimer(g_timer_queue, g_timer, INVALID_HANDLE_VALUE);
             g_timer = NULL;
         }
         g_last_frame_qpc.QuadPart = 0;
@@ -95,11 +92,10 @@ static void CALLBACK FrameLoopCallback(PVOID lpParam, BOOLEAN TimerOrWaitFired)
 
     /* If mouse is outside taskbar and settle is complete, deactivate the timer.
      * This achieves true 0% idle CPU when user is not interacting. */
-    if (!in_taskbar && !is_settling) {
-        if (g_state->was_in_taskbar) {
-            g_state->was_in_taskbar = false;
-        }
-        /* Self-deactivate: stop the repeating timer since there's no work to do */
+    if (!in_taskbar && !g_state->was_in_taskbar && !is_settling) {
+        /* The settle animation already completed, so the timer can return to
+         * its true-idle state.  A transition from inside to outside must run
+         * the settle path below first. */
         FrameLoopDeactivateTimer();
         return;
     }
@@ -175,9 +171,19 @@ HRESULT TE_FrameLoopStart(TE_IconHoverState* state)
 
     g_state = state;
     g_stop_event = CreateEventW(NULL, TRUE, FALSE, NULL);
+    if (!g_stop_event) {
+        g_state = nullptr;
+        return HRESULT_FROM_WIN32(GetLastError());
+    }
     
     g_timer_queue = CreateTimerQueue();
-    if (!g_timer_queue) return HRESULT_FROM_WIN32(GetLastError());
+    if (!g_timer_queue) {
+        HRESULT hr = HRESULT_FROM_WIN32(GetLastError());
+        CloseHandle(g_stop_event);
+        g_stop_event = NULL;
+        g_state = nullptr;
+        return hr;
+    }
 
     g_running = 1;
     /* Timer is NOT started here — it will be activated on-demand when the

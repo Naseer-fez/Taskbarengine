@@ -75,32 +75,46 @@ HRESULT TE_JsoncParse(const wchar_t* path, cJSON** out_root)
 
     *out_root = NULL;
 
-    HANDLE file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    HANDLE file = CreateFileW(path, GENERIC_READ,
+                              FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                              NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     if (file == INVALID_HANDLE_VALUE) {
         return HRESULT_FROM_WIN32(GetLastError());
     }
 
-    DWORD file_size = GetFileSize(file, NULL);
-    if (file_size == INVALID_FILE_SIZE) {
+    LARGE_INTEGER file_size_large;
+    if (!GetFileSizeEx(file, &file_size_large) || file_size_large.QuadPart < 0 ||
+        (unsigned long long)file_size_large.QuadPart > (unsigned long long)(SIZE_MAX - 1)) {
         CloseHandle(file);
         return HRESULT_FROM_WIN32(GetLastError());
     }
 
+    size_t file_size = (size_t)file_size_large.QuadPart;
     char* buffer = (char*)malloc(file_size + 1);
     if (!buffer) {
         CloseHandle(file);
         return E_OUTOFMEMORY;
     }
 
-    DWORD bytes_read = 0;
-    if (!ReadFile(file, buffer, file_size, &bytes_read, NULL)) {
-        free(buffer);
-        CloseHandle(file);
-        return HRESULT_FROM_WIN32(GetLastError());
+    size_t total_read = 0;
+    while (total_read < file_size) {
+        DWORD request = (DWORD)((file_size - total_read) > MAXDWORD ? MAXDWORD : (file_size - total_read));
+        DWORD bytes_read = 0;
+        if (!ReadFile(file, buffer + total_read, request, &bytes_read, NULL)) {
+            free(buffer);
+            CloseHandle(file);
+            return HRESULT_FROM_WIN32(GetLastError());
+        }
+        if (bytes_read == 0) {
+            free(buffer);
+            CloseHandle(file);
+            return HRESULT_FROM_WIN32(ERROR_HANDLE_EOF);
+        }
+        total_read += bytes_read;
     }
     CloseHandle(file);
 
-    buffer[bytes_read] = '\0';
+    buffer[total_read] = '\0';
 
     HRESULT hr = TE_JsoncParseString(buffer, out_root);
     free(buffer);

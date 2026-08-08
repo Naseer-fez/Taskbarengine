@@ -4,6 +4,8 @@
 #include <cJSON.h>
 #include <winrt/Microsoft.UI.Xaml.Controls.Primitives.h>
 #include <winrt/Windows.UI.Text.h>
+#include <cmath>
+#include <vector>
 
 using namespace winrt;
 using namespace winrt::Microsoft::UI::Xaml;

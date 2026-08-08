@@ -20,7 +20,8 @@ HRESULT TE_IpcClientSendCommand(TE_IpcMsgType type, const void* payload, uint32_
     if (SUCCEEDED(hr)) {
         DWORD written = 0;
         if (!WriteFile(pipe, buffer, total, &written, NULL) || written != total) {
-            hr = HRESULT_FROM_WIN32(GetLastError());
+            DWORD error = GetLastError();
+            hr = HRESULT_FROM_WIN32(error != ERROR_SUCCESS ? error : ERROR_WRITE_FAULT);
         }
     }
 
@@ -32,19 +33,7 @@ HRESULT TE_IpcClientSendCommand(TE_IpcMsgType type, const void* payload, uint32_
         }
         if (SUCCEEDED(hr)) {
             if (response.payload_length > 0) {
-                DWORD to_read = response.payload_length;
-                while (to_read > 0) {
-                    DWORD chunk = 0;
-                    if (!ReadFile(pipe, buffer, min((DWORD)sizeof(buffer), to_read), &chunk, NULL)) {
-                        hr = HRESULT_FROM_WIN32(GetLastError());
-                        break;
-                    }
-                    if (chunk == 0) {
-                        hr = HRESULT_FROM_WIN32(ERROR_HANDLE_EOF);
-                        break;
-                    }
-                    to_read -= chunk;
-                }
+                hr = TE_IpcReadExact(pipe, buffer, response.payload_length);
             }
             if (SUCCEEDED(hr)) {
                 *out_response = (TE_IpcMsgType)response.type;

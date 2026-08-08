@@ -17,6 +17,7 @@ HRESULT TE_IconCaptureInit(void)
 
 static int FindCacheSlot(const wchar_t* app_id)
 {
+    if (!app_id) return -1;
     for (int i = 0; i < TE_MAX_TASKBAR_ICONS; i++) {
         if (g_cache[i].valid && wcscmp(g_cache[i].app_id, app_id) == 0) {
             return i;
@@ -35,11 +36,21 @@ static int FindFreeSlot(void)
 
 static HBITMAP CreateBitmapFromIcon(HICON hIcon, int width, int height)
 {
-    if (!hIcon) return NULL;
+    if (!hIcon || width <= 0 || height <= 0) return NULL;
 
     HDC hdc = GetDC(NULL);
+    if (!hdc) return NULL;
     HDC memDC = CreateCompatibleDC(hdc);
+    if (!memDC) {
+        ReleaseDC(NULL, hdc);
+        return NULL;
+    }
     HBITMAP hbm = CreateCompatibleBitmap(hdc, width, height);
+    if (!hbm) {
+        DeleteDC(memDC);
+        ReleaseDC(NULL, hdc);
+        return NULL;
+    }
     
     HBITMAP oldBmp = (HBITMAP)SelectObject(memDC, hbm);
     
@@ -58,7 +69,7 @@ static HBITMAP CreateBitmapFromIcon(HICON hIcon, int width, int height)
 
 HRESULT TE_IconCaptureGet(const wchar_t* app_id, TE_IconEntry* out_entry)
 {
-    if (!out_entry) return E_POINTER;
+    if (!app_id || !out_entry) return E_POINTER;
     out_entry->valid = false;
 
     int slot = FindCacheSlot(app_id);
@@ -96,6 +107,12 @@ HRESULT TE_IconCaptureGet(const wchar_t* app_id, TE_IconEntry* out_entry)
         HDC hdc = GetDC(NULL);
         HDC memDC = CreateCompatibleDC(hdc);
         hbm = CreateCompatibleBitmap(hdc, 256, 256);
+        if (!hdc || !memDC || !hbm) {
+            if (hbm) DeleteObject(hbm);
+            if (memDC) DeleteDC(memDC);
+            if (hdc) ReleaseDC(NULL, hdc);
+            return E_OUTOFMEMORY;
+        }
         HBITMAP oldBmp = (HBITMAP)SelectObject(memDC, hbm);
         
         int hash = 0;
@@ -110,6 +127,8 @@ HRESULT TE_IconCaptureGet(const wchar_t* app_id, TE_IconEntry* out_entry)
         ReleaseDC(NULL, hdc);
     }
 
+    if (!hbm) return E_OUTOFMEMORY;
+
     g_cache[slot].bitmap = hbm;
     g_cache[slot].width = 256;
     g_cache[slot].height = 256;
@@ -123,6 +142,7 @@ HRESULT TE_IconCaptureGet(const wchar_t* app_id, TE_IconEntry* out_entry)
 
 void TE_IconCaptureInvalidate(const wchar_t* app_id)
 {
+    if (!app_id) return;
     int slot = FindCacheSlot(app_id);
     if (slot >= 0) {
         if (g_cache[slot].bitmap) DeleteObject(g_cache[slot].bitmap);

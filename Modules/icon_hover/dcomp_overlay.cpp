@@ -58,6 +58,7 @@ HRESULT TE_DcompInit(HWND parent_hwnd)
     }
     if (FAILED(hr)) {
         TE_LogWrite(TE_LOG_ERROR, "D3D11CreateDevice failed with hr=0x%08X", hr);
+        TE_DcompShutdown();
         return hr;
     }
 
@@ -65,6 +66,7 @@ HRESULT TE_DcompInit(HWND parent_hwnd)
     hr = g_d3dDevice.As(&dxgiDevice);
     if (FAILED(hr)) {
         TE_LogWrite(TE_LOG_ERROR, "Query IDXGIDevice failed with hr=0x%08X", hr);
+        TE_DcompShutdown();
         return hr;
     }
 
@@ -72,18 +74,21 @@ HRESULT TE_DcompInit(HWND parent_hwnd)
     hr = DCompositionCreateDevice(dxgiDevice.Get(), IID_PPV_ARGS(&g_dcompDevice));
     if (FAILED(hr)) {
         TE_LogWrite(TE_LOG_ERROR, "DCompositionCreateDevice failed with hr=0x%08X", hr);
+        TE_DcompShutdown();
         return hr;
     }
 
     hr = g_dcompDevice->CreateTargetForHwnd(g_overlay_hwnd, TRUE, &g_dcompTarget);
     if (FAILED(hr)) {
         TE_LogWrite(TE_LOG_ERROR, "CreateTargetForHwnd failed with hr=0x%08X", hr);
+        TE_DcompShutdown();
         return hr;
     }
 
     hr = g_dcompDevice->CreateVisual(&g_dcompRoot);
     if (FAILED(hr)) {
         TE_LogWrite(TE_LOG_ERROR, "CreateVisual for root failed with hr=0x%08X", hr);
+        TE_DcompShutdown();
         return hr;
     }
 
@@ -94,12 +99,14 @@ HRESULT TE_DcompInit(HWND parent_hwnd)
         hr = g_dcompDevice->CreateVisual(&g_dcompIcons[i]);
         if (FAILED(hr)) {
             TE_LogWrite(TE_LOG_ERROR, "CreateVisual[%d] failed with hr=0x%08X", i, hr);
+            TE_DcompShutdown();
             return hr;
         }
 
         hr = g_dcompDevice->CreateMatrixTransform(&g_dcompTransforms[i]);
         if (FAILED(hr)) {
             TE_LogWrite(TE_LOG_ERROR, "CreateMatrixTransform[%d] failed with hr=0x%08X", i, hr);
+            TE_DcompShutdown();
             return hr;
         }
         g_dcompIcons[i]->SetTransform(g_dcompTransforms[i].Get());
@@ -137,7 +144,7 @@ HRESULT TE_DcompUpdateVisuals(TE_IconHoverState* state)
 
 void TE_DcompShutdown(void)
 {
-    if (g_dcompDevice) {
+    if (g_dcompDevice && g_dcompTarget) {
         g_dcompTarget->SetRoot(nullptr);
         g_dcompDevice->Commit();
     }

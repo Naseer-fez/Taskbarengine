@@ -1,5 +1,6 @@
 #pragma once
 
+#include <string>
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Microsoft.UI.Xaml.Controls.h>
 #include <winrt/Microsoft.UI.Xaml.h>

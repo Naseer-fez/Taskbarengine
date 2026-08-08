@@ -4,7 +4,8 @@
 #include <winrt/Microsoft.UI.Xaml.Documents.h>
 #include <winrt/Windows.UI.Text.h>
 #include <cJSON.h>
-#include <format>
+#include <cstdio>
+#include <string>
 
 #ifndef TE_VERSION_STRING
 #define TE_VERSION_STRING "1.0.0"
@@ -58,7 +59,11 @@ Page CreateAboutPage()
             if (cJSON* max_node = cJSON_GetObjectItem(root, "max_ms")) { if (cJSON_IsNumber(max_node)) max_ms = max_node->valuedouble; }
             
             TextBlock perfText;
-            std::string perfStr = std::format("FPS: {:.1f}\nAvg Frame Time: {:.2f} ms\nMin Frame Time: {:.2f} ms\nMax Frame Time: {:.2f} ms", fps, avg_ms, min_ms, max_ms);
+            char perf_buffer[256];
+            std::snprintf(perf_buffer, sizeof(perf_buffer),
+                          "FPS: %.1f\nAvg Frame Time: %.2f ms\nMin Frame Time: %.2f ms\nMax Frame Time: %.2f ms",
+                          fps, avg_ms, min_ms, max_ms);
+            std::string perfStr(perf_buffer);
             perfText.Text(to_hstring(perfStr));
             perfText.FontFamily(winrt::Microsoft::UI::Xaml::Media::FontFamily(L"Consolas"));
             panel.Children().Append(perfText);

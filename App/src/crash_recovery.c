@@ -25,7 +25,12 @@ static DWORD WINAPI RecoveryThreadProc(LPVOID param)
     DWORD wait = WaitForMultipleObjects(2, waits, FALSE, INFINITE);
     if (wait == WAIT_OBJECT_0 + 1) {
         InterlockedExchange(&g_state, TE_CRASH_RECOVERY_WAITING_TASKBAR_CREATED);
-        PostMessageW(g_hwnd, WM_NULL, 0, 0);
+        /* Message-only windows do not receive broadcast TaskbarCreated
+         * notifications.  Explicitly notify the tray host after Explorer
+         * exits so it can reinstall the hook for the replacement process. */
+        if (g_hwnd && g_taskbar_created_msg) {
+            PostMessageW(g_hwnd, g_taskbar_created_msg, 0, 0);
+        }
     }
 
     CloseHandle(explorer);

@@ -5,6 +5,9 @@ HRESULT TE_IpcBuildHeader(TE_IpcHeader* out_header, TE_IpcMsgType type, uint32_t
 {
     if (!out_header) return E_POINTER;
     if (payload_length > TE_IPC_MAX_PAYLOAD) return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
+    if (type < TE_IPC_MSG_SHUTDOWN || type > TE_IPC_MSG_PERF_STATS_RESPONSE) {
+        return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
+    }
 
     out_header->magic = TE_IPC_MAGIC;
     out_header->version = TE_IPC_VERSION;
@@ -18,7 +21,9 @@ HRESULT TE_IpcValidateHeader(const TE_IpcHeader* header)
     if (!header) return E_POINTER;
     if (header->magic != TE_IPC_MAGIC) return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
     if (header->version != TE_IPC_VERSION) return HRESULT_FROM_WIN32(ERROR_REVISION_MISMATCH);
-    if (header->type == 0) return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
+    if (header->type < TE_IPC_MSG_SHUTDOWN || header->type > TE_IPC_MSG_PERF_STATS_RESPONSE) {
+        return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
+    }
     if (header->payload_length > TE_IPC_MAX_PAYLOAD) return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
     return S_OK;
 }
@@ -56,6 +61,8 @@ HRESULT TE_IpcDeserializeHeader(const void* buffer, size_t buffer_size, TE_IpcHe
 
 HRESULT TE_IpcReadExact(HANDLE pipe, void* buffer, DWORD bytes)
 {
+    if (pipe == INVALID_HANDLE_VALUE || (bytes > 0 && !buffer)) return E_INVALIDARG;
+
     DWORD total = 0;
     while (total < bytes) {
         DWORD read_now = 0;

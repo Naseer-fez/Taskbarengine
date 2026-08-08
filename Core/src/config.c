@@ -25,13 +25,16 @@ HRESULT TE_ConfigResolvePath(wchar_t* buf, size_t buf_len)
     PWSTR local_appdata = NULL;
     HRESULT hr = SHGetKnownFolderPath(&FOLDERID_LocalAppData, 0, NULL, &local_appdata);
     if (SUCCEEDED(hr)) {
-        swprintf(buf, buf_len, L"%s\\TaskbarEngine\\config.jsonc", local_appdata);
+        int written = swprintf(buf, buf_len, L"%s\\TaskbarEngine\\config.jsonc", local_appdata);
         CoTaskMemFree(local_appdata);
+        if (written < 0 || (size_t)written >= buf_len) {
+            buf[0] = L'\0';
+            return HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER);
+        }
         return S_OK;
     }
 
-    wcscpy(buf, L"config.jsonc");
-    return S_OK;
+    return wcscpy_s(buf, buf_len, L"config.jsonc") == 0 ? S_OK : E_FAIL;
 }
 
 HRESULT TE_ConfigLoad(const wchar_t* path, cJSON** out_root)
@@ -48,7 +51,8 @@ HRESULT TE_ConfigLoad(const wchar_t* path, cJSON** out_root)
     if (attribs == INVALID_FILE_ATTRIBUTES) {
         /* File does not exist, create directory and default file */
         wchar_t dir_path[MAX_PATH];
-        wcscpy(dir_path, path);
+        wcsncpy(dir_path, path, MAX_PATH - 1);
+        dir_path[MAX_PATH - 1] = L'\0';
         wchar_t* last_slash = wcsrchr(dir_path, L'\\');
         if (last_slash) {
             *last_slash = L'\0';

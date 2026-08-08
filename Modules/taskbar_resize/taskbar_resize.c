@@ -15,6 +15,7 @@ typedef struct TE_TaskbarBarState {
     RECT original_rect;
     RECT original_work_area;
     bool saved_original;
+    bool updates_work_area;
 } TE_TaskbarBarState;
 
 typedef struct TE_TaskbarResizeState {
@@ -73,14 +74,20 @@ static int ConfigReadInt(const cJSON* config, const char* key, int fallback)
 static void LoadSettings(const cJSON* config)
 {
     g_state.settings.height = TE_TaskbarResizeClampHeight(ConfigReadInt(config, "height", TE_TASKBAR_RESIZE_DEFAULT_HEIGHT));
-    g_state.settings.padding = ConfigReadInt(config, "padding", 4);
-    g_state.settings.margins = ConfigReadInt(config, "margins", 0);
-    g_state.settings.icon_spacing = ConfigReadInt(config, "icon_spacing", 8);
+    g_state.settings.padding = max(0, min(20, ConfigReadInt(config, "padding", 4)));
+    g_state.settings.margins = max(0, min(20, ConfigReadInt(config, "margins", 0)));
+    g_state.settings.icon_spacing = max(0, min(32, ConfigReadInt(config, "icon_spacing", 8)));
 }
 
 static uint32_t CurrentDpi(void)
 {
     return g_state.ctx.dpi ? g_state.ctx.dpi : 96;
+}
+
+static uint32_t WindowDpi(HWND hwnd)
+{
+    uint32_t dpi = hwnd ? GetDpiForWindow(hwnd) : 0;
+    return dpi ? dpi : CurrentDpi();
 }
 
 static TE_TaskbarBarState* FindOrAddBar(HWND hwnd)
@@ -136,33 +143,36 @@ static void ApplyWorkArea(TE_TaskbarBarState* bar, const RECT* taskbar_rect)
     SystemParametersInfoW(SPI_SETWORKAREA, 0, &work, SPIF_SENDCHANGE);
 }
 
-static void ApplyHeightToWindow(HWND hwnd)
+static void ApplyHeightToWindow(HWND hwnd, bool update_work_area)
 {
     if (!g_state.enabled || !hwnd || !IsWindow(hwnd)) return;
 
     TE_TaskbarBarState* bar = FindOrAddBar(hwnd);
     SaveOriginalGeometry(bar);
+    if (bar) bar->updates_work_area = update_work_area;
 
     RECT rc;
     GetWindowRect(hwnd, &rc);
 
-    int target_height = TE_TaskbarResizeScaleForDpi(g_state.settings.height, CurrentDpi());
+    int target_height = TE_TaskbarResizeScaleForDpi(g_state.settings.height, WindowDpi(hwnd));
     int width = rc.right - rc.left;
     rc.top = rc.bottom - target_height;
 
     SetWindowPos(hwnd, NULL, rc.left, rc.top, width, target_height,
                  SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
-    ApplyWorkArea(bar, &rc);
+    if (bar && bar->updates_work_area) {
+        ApplyWorkArea(bar, &rc);
+    }
 }
 
 static void ApplyHeight(void)
 {
     HWND primary = FindWindowW(L"Shell_TrayWnd", NULL);
-    ApplyHeightToWindow(primary ? primary : g_state.taskbar_hwnd);
+    ApplyHeightToWindow(primary ? primary : g_state.taskbar_hwnd, true);
 
     HWND secondary = NULL;
     while ((secondary = FindWindowExW(NULL, secondary, L"Shell_SecondaryTrayWnd", NULL)) != NULL) {
-        ApplyHeightToWindow(secondary);
+        ApplyHeightToWindow(secondary, false);
     }
 
     if (g_state.ctx.publish_state) {
@@ -184,7 +194,7 @@ static void RestoreGeometry(void)
         SetWindowPos(bar->hwnd, NULL, bar->original_rect.left, bar->original_rect.top,
                      width, height, SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
 
-        if (!IsRectEmpty(&bar->original_work_area)) {
+        if (bar->updates_work_area && !IsRectEmpty(&bar->original_work_area)) {
             SystemParametersInfoW(SPI_SETWORKAREA, 0, &bar->original_work_area, SPIF_SENDCHANGE);
         }
     }
@@ -217,6 +227,7 @@ static HRESULT OnEvent(uint32_t type, const void* event_data, void* user_data)
 
         case TE_EVENT_CONFIG_CHANGED: {
             const TE_ConfigChangedEvent* evt = (const TE_ConfigChangedEvent*)event_data;
+            if (evt) g_state.ctx.config = evt->new_config;
             LoadSettings(evt ? evt->new_config : g_state.ctx.config);
             ApplyHeight();
             break;

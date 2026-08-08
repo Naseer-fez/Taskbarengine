@@ -33,18 +33,37 @@ HRESULT ConfigIO_Save(const std::wstring& path, cJSON* root)
     char* json_str = cJSON_Print(root);
     if (!json_str) return E_FAIL;
 
-    std::wstring dir = path.substr(0, path.find_last_of(L"\\/"));
-    SHCreateDirectoryExW(NULL, dir.c_str(), NULL);
+    const std::wstring::size_type separator = path.find_last_of(L"\\/");
+    std::wstring dir = separator == std::wstring::npos ? std::wstring() : path.substr(0, separator);
+    if (!dir.empty()) {
+        int create_result = SHCreateDirectoryExW(NULL, dir.c_str(), NULL);
+        if (create_result != ERROR_SUCCESS && create_result != ERROR_ALREADY_EXISTS) {
+            cJSON_free(json_str);
+            return HRESULT_FROM_WIN32((DWORD)create_result);
+        }
+    }
 
-    std::ofstream out(path.c_str(), std::ios::binary);
+    std::wstring temp_path = path + L".tmp." + std::to_wstring(GetCurrentProcessId());
+    std::ofstream out(temp_path.c_str(), std::ios::binary | std::ios::trunc);
     if (!out) {
         cJSON_free(json_str);
         return E_FAIL;
     }
 
     out.write(json_str, strlen(json_str));
+    if (!out.good()) {
+        cJSON_free(json_str);
+        DeleteFileW(temp_path.c_str());
+        return E_FAIL;
+    }
     out.close();
     cJSON_free(json_str);
+
+    if (!MoveFileExW(temp_path.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        DWORD error = GetLastError();
+        DeleteFileW(temp_path.c_str());
+        return HRESULT_FROM_WIN32(error);
+    }
     return S_OK;
 }
 
@@ -53,10 +72,10 @@ cJSON* ConfigIO_GetPluginValue(cJSON* root, const char* plugin_name, const char*
     if (!root || !plugin_name || !key) return nullptr;
 
     cJSON* plugin_section = cJSON_GetObjectItemCaseSensitive(root, "plugin");
-    if (!plugin_section) return nullptr;
+    if (!plugin_section || !cJSON_IsObject(plugin_section)) return nullptr;
 
     cJSON* specific_plugin = cJSON_GetObjectItemCaseSensitive(plugin_section, plugin_name);
-    if (!specific_plugin) return nullptr;
+    if (!specific_plugin || !cJSON_IsObject(specific_plugin)) return nullptr;
 
     return cJSON_GetObjectItemCaseSensitive(specific_plugin, key);
 }
@@ -68,28 +87,61 @@ HRESULT ConfigIO_SetPluginValue(cJSON* root, const char* plugin_name, const char
         return E_POINTER;
     }
 
+    if (!cJSON_IsObject(root)) {
+        cJSON_Delete(value);
+        return E_INVALIDARG;
+    }
+
     cJSON* plugin_section = cJSON_GetObjectItemCaseSensitive(root, "plugin");
+    if (plugin_section && !cJSON_IsObject(plugin_section)) {
+        cJSON_Delete(value);
+        return E_INVALIDARG;
+    }
     if (!plugin_section) {
         plugin_section = cJSON_CreateObject();
-        if (plugin_section) cJSON_AddItemToObject(root, "plugin", plugin_section);
+        if (plugin_section && !cJSON_AddItemToObject(root, "plugin", plugin_section)) {
+            cJSON_Delete(plugin_section);
+            cJSON_Delete(value);
+            return E_OUTOFMEMORY;
+        }
     }
 
-    if (!plugin_section) return E_OUTOFMEMORY;
+    if (!plugin_section) {
+        cJSON_Delete(value);
+        return E_OUTOFMEMORY;
+    }
 
     cJSON* specific_plugin = cJSON_GetObjectItemCaseSensitive(plugin_section, plugin_name);
+    if (specific_plugin && !cJSON_IsObject(specific_plugin)) {
+        cJSON_Delete(value);
+        return E_INVALIDARG;
+    }
     if (!specific_plugin) {
         specific_plugin = cJSON_CreateObject();
-        if (specific_plugin) cJSON_AddItemToObject(plugin_section, plugin_name, specific_plugin);
+        if (specific_plugin && !cJSON_AddItemToObject(plugin_section, plugin_name, specific_plugin)) {
+            cJSON_Delete(specific_plugin);
+            cJSON_Delete(value);
+            return E_OUTOFMEMORY;
+        }
     }
 
-    if (!specific_plugin) return E_OUTOFMEMORY;
+    if (!specific_plugin) {
+        cJSON_Delete(value);
+        return E_OUTOFMEMORY;
+    }
 
     // Replace if exists, add if not
     cJSON* existing = cJSON_GetObjectItemCaseSensitive(specific_plugin, key);
     if (existing) {
-        cJSON_ReplaceItemInObjectCaseSensitive(specific_plugin, key, value);
+        if (!cJSON_ReplaceItemInObjectCaseSensitive(specific_plugin, key, value)) {
+            cJSON_Delete(value);
+            return E_OUTOFMEMORY;
+        }
     } else {
-        cJSON_AddItemToObject(specific_plugin, key, value);
+        if (!cJSON_AddItemToObject(specific_plugin, key, value)) {
+            cJSON_Delete(value);
+            return E_OUTOFMEMORY;
+        }
     }
 
     return S_OK;

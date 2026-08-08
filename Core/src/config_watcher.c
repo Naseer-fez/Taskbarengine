@@ -34,6 +34,12 @@ static DWORD WINAPI WatcherThreadProc(LPVOID param)
     BYTE buffer[1024];
     OVERLAPPED ov = { 0 };
     ov.hEvent = CreateEventW(NULL, FALSE, FALSE, NULL);
+    if (!ov.hEvent) {
+        TE_LogWrite(TE_LOG_ERROR, "Failed to create config watcher event (error %lu)", GetLastError());
+        CloseHandle(hdir);
+        return 1;
+    }
+
 
     HANDLE handles[2] = { g_stop_event, ov.hEvent };
 
@@ -44,7 +50,7 @@ static DWORD WINAPI WatcherThreadProc(LPVOID param)
         BOOL ok = ReadDirectoryChangesW(hdir, buffer, sizeof(buffer), FALSE,
                                         FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_SIZE | FILE_NOTIFY_CHANGE_FILE_NAME,
                                         &bytes_returned, &ov, NULL);
-        if (!ok) {
+        if (!ok && GetLastError() != ERROR_IO_PENDING) {
             TE_LogWrite(TE_LOG_WARN, "ReadDirectoryChangesW failed with error %lu", GetLastError());
             break;
         }
@@ -56,11 +62,14 @@ static DWORD WINAPI WatcherThreadProc(LPVOID param)
             break;
         } else if (wait_res == WAIT_OBJECT_0 + 1) {
             /* Directory change signaled */
-            if (g_timer_handle) {
-                DeleteTimerQueueTimer(NULL, g_timer_handle, INVALID_HANDLE_VALUE);
-                g_timer_handle = NULL;
+            HANDLE old_timer = (HANDLE)InterlockedExchangePointer((PVOID volatile*)&g_timer_handle, NULL);
+            if (old_timer) {
+                DeleteTimerQueueTimer(NULL, old_timer, NULL);
             }
-            CreateTimerQueueTimer(&g_timer_handle, NULL, DebounceTimerCallback, NULL, 100, 0, WT_EXECUTEONLYONCE);
+            HANDLE new_timer = NULL;
+            if (CreateTimerQueueTimer(&new_timer, NULL, DebounceTimerCallback, NULL, 100, 0, WT_EXECUTEONLYONCE)) {
+                InterlockedExchangePointer((PVOID volatile*)&g_timer_handle, new_timer);
+            }
         } else {
             break;
         }
@@ -77,17 +86,20 @@ HRESULT TE_ConfigWatcherStart(const wchar_t* config_dir, HWND notify_hwnd)
     if (g_watcher_running) return S_OK;
 
     wcsncpy(g_watch_dir, config_dir, MAX_PATH - 1);
+    g_watch_dir[MAX_PATH - 1] = L'\0';
     g_notify_hwnd = notify_hwnd;
 
     g_stop_event = CreateEventW(NULL, TRUE, FALSE, NULL);
+    if (!g_stop_event) return HRESULT_FROM_WIN32(GetLastError());
     g_watcher_running = 1;
 
     g_thread_handle = CreateThread(NULL, 0, WatcherThreadProc, NULL, 0, NULL);
     if (!g_thread_handle) {
+        HRESULT hr = HRESULT_FROM_WIN32(GetLastError());
         g_watcher_running = 0;
         CloseHandle(g_stop_event);
         g_stop_event = NULL;
-        return E_FAIL;
+        return hr;
     }
 
     TE_LogWrite(TE_LOG_INFO, "Started config watcher on directory: %ls", g_watch_dir);
@@ -114,8 +126,8 @@ void TE_ConfigWatcherStop(void)
         g_stop_event = NULL;
     }
 
-    if (g_timer_handle) {
-        DeleteTimerQueueTimer(NULL, g_timer_handle, INVALID_HANDLE_VALUE);
-        g_timer_handle = NULL;
+    HANDLE old_timer = (HANDLE)InterlockedExchangePointer((PVOID volatile*)&g_timer_handle, NULL);
+    if (old_timer) {
+        DeleteTimerQueueTimer(NULL, old_timer, INVALID_HANDLE_VALUE);
     }
 }

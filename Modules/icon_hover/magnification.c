@@ -43,6 +43,7 @@ float TE_MagnifyScale(float distance, float radius, float max_scale, TE_MagnifyC
 
 void TE_MagnifyComputeScales(float cursor_x, const float icon_centers[], float out_scales[], int count, float radius, float max_scale, TE_MagnifyCurveType curve)
 {
+    if (!icon_centers || !out_scales || count <= 0) return;
     for (int i = 0; i < count; i++) {
         out_scales[i] = TE_MagnifyScale(icon_centers[i] - cursor_x, radius, max_scale, curve);
     }

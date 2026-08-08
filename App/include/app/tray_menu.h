@@ -15,6 +15,7 @@ extern "C" {
 
 void TE_TrayMenuShow(HWND hwnd);
 bool TE_TrayMenuHandleCommand(HWND hwnd, WPARAM wparam);
+bool TE_TrayMenuOpenSettings(void);
 
 #ifdef __cplusplus
 }

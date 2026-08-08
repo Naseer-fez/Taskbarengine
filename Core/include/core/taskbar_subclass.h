@@ -37,6 +37,12 @@ extern "C" {
  */
 #define TE_IPC_CMD_GET_PLUGIN_LIST 5
 
+/** @brief IPC command to query the generated settings schema. */
+#define TE_IPC_CMD_GET_SETTINGS 6
+
+/** @brief IPC command to query the latest performance statistics. */
+#define TE_IPC_CMD_GET_PERF_STATS 7
+
 /**
  * @brief Payload structure for synchronous IPC requests marshaled to UI thread.
  */
