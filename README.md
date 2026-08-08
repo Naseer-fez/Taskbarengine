@@ -2,6 +2,12 @@
 
 TaskbarEngine is a high-performance C-based engine for modifying the Windows 11 Taskbar. It uses DirectComposition for 0-latency rendering and runs entirely in the Explorer process space to ensure maximum performance.
 
+## Features
+
+- **High Performance:** 0-latency rendering via DirectComposition.
+- **Dynamic Configuration:** Hot-reload settings without restarting Explorer.
+- **Customizable:** Easily extendable plugin system for modifying the taskbar.
+
 ## Installation
 
 Download the `TaskbarEngine-v1.0.0.zip` release and extract it to a directory of your choice.
