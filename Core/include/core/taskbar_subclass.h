@@ -8,6 +8,11 @@ extern "C" {
 #endif
 
 /**
+ * @brief Window message sent to taskbar subclass for deferred initialization.
+ */
+#define WM_TE_INIT (WM_APP + 100)
+
+/**
  * @brief Window message sent to taskbar subclass for IPC commands.
  */
 #define WM_TE_IPC_COMMAND (WM_APP + 102)

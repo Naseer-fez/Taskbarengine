@@ -65,7 +65,7 @@ static bool IsPluginEnabledInConfig(const cJSON* config)
     return !item || !cJSON_IsBool(item) || cJSON_IsTrue(item);
 }
 
-HRESULT TE_CoreManagerInit(HINSTANCE hinstance)
+HRESULT TE_CoreManagerInitPhaseA(HINSTANCE hinstance)
 {
     if (g_core_state) return S_OK;
 
@@ -74,6 +74,25 @@ HRESULT TE_CoreManagerInit(HINSTANCE hinstance)
 
     g_core_state->hinstance = hinstance;
     g_core_state->taskbar_hwnd = FindWindowW(L"Shell_TrayWnd", NULL);
+
+    /* Initialize Event Dispatch Table */
+    TE_EventDispatchInit(g_core_state->subscriptions, &g_core_state->subscription_count);
+
+    /* Install Taskbar Subclass */
+    if (g_core_state->taskbar_hwnd) {
+        HRESULT sub_hr = TE_TaskbarSubclassInstall(g_core_state->taskbar_hwnd, g_core_state->subscriptions,
+                                                  &g_core_state->subscription_count, g_core_state);
+        if (SUCCEEDED(sub_hr)) {
+            PostMessageW(g_core_state->taskbar_hwnd, WM_APP + 100 /* WM_TE_INIT */, 0, 0);
+        }
+    }
+
+    return S_OK;
+}
+
+HRESULT TE_CoreManagerInitPhaseB(void)
+{
+    if (!g_core_state) return E_POINTER;
 
     HRESULT path_hr = TE_ConfigResolvePath(g_core_state->config_path, MAX_PATH);
     if (FAILED(path_hr)) {
@@ -95,7 +114,14 @@ HRESULT TE_CoreManagerInit(HINSTANCE hinstance)
         TE_LogInit(NULL, TE_LOG_DEBUG, true);
     }
 
-    TE_LogWrite(TE_LOG_INFO, "Core Manager initializing...");
+    TE_LogWrite(TE_LOG_INFO, "Core Manager initializing Phase B...");
+
+    /* Start other hooks now that we are outside CBT hook */
+    if (g_core_state->taskbar_hwnd) {
+        TE_ShellHookStart(g_core_state->taskbar_hwnd, g_core_state->subscriptions, &g_core_state->subscription_count);
+        TE_PowerDeviceStart(g_core_state->taskbar_hwnd, g_core_state->subscriptions, &g_core_state->subscription_count);
+        TE_VDesktopNotifyStart(g_core_state->subscriptions, &g_core_state->subscription_count);
+    }
 
     /* Load Configuration */
     HRESULT hr = TE_ConfigLoad(g_core_state->config_path, &g_core_state->config_root);
@@ -104,7 +130,7 @@ HRESULT TE_CoreManagerInit(HINSTANCE hinstance)
     }
 
     /* Resolve Modules Directory */
-    HINSTANCE mod_inst = hinstance ? hinstance : GetModuleHandleW(NULL);
+    HINSTANCE mod_inst = g_core_state->hinstance ? g_core_state->hinstance : GetModuleHandleW(NULL);
     wchar_t dll_path[MAX_PATH];
     DWORD len = GetModuleFileNameW(mod_inst, dll_path, MAX_PATH);
     if (len > 0 && len < MAX_PATH) {
@@ -125,21 +151,6 @@ HRESULT TE_CoreManagerInit(HINSTANCE hinstance)
         }
     }
 
-    /* Initialize Event Dispatch Table */
-    TE_EventDispatchInit(g_core_state->subscriptions, &g_core_state->subscription_count);
-
-    /* Install Taskbar Subclass */
-    if (g_core_state->taskbar_hwnd) {
-        HRESULT sub_hr = TE_TaskbarSubclassInstall(g_core_state->taskbar_hwnd, g_core_state->subscriptions,
-                                                  &g_core_state->subscription_count, g_core_state);
-        if (FAILED(sub_hr)) {
-            TE_LogWrite(TE_LOG_WARN, "Failed to subclass Shell_TrayWnd (hr: 0x%08X)", (unsigned int)sub_hr);
-        }
-        TE_ShellHookStart(g_core_state->taskbar_hwnd, g_core_state->subscriptions, &g_core_state->subscription_count);
-        TE_PowerDeviceStart(g_core_state->taskbar_hwnd, g_core_state->subscriptions, &g_core_state->subscription_count);
-        TE_VDesktopNotifyStart(g_core_state->subscriptions, &g_core_state->subscription_count);
-    }
-
     /* Start Config Directory Watcher */
     wchar_t config_dir[MAX_PATH];
     wcsncpy(config_dir, g_core_state->config_path, MAX_PATH - 1);
@@ -157,7 +168,6 @@ HRESULT TE_CoreManagerInit(HINSTANCE hinstance)
 
     /* Discover & Load Plugins */
     TE_PluginLoaderScan(g_core_state->modules_dir, g_core_state->plugins, &g_core_state->plugin_count);
-
 
     /* Initialize and Enable Plugins */
     for (uint32_t i = 0; i < g_core_state->plugin_count; i++) {
@@ -197,7 +207,7 @@ HRESULT TE_CoreManagerInit(HINSTANCE hinstance)
         TE_LogWrite(TE_LOG_WARN, "Failed to start IPC server (hr: 0x%08X)", (unsigned int)ipc_hr);
     }
 
-    TE_LogWrite(TE_LOG_INFO, "Core Manager initialization complete with %u plugins loaded", g_core_state->plugin_count);
+    TE_LogWrite(TE_LOG_INFO, "Core Manager initialization Phase B complete with %u plugins loaded", g_core_state->plugin_count);
     return S_OK;
 }
 
@@ -318,6 +328,7 @@ void TE_CoreManagerReloadConfig(void)
 
 HRESULT TE_CoreManagerSetPluginEnabledByName(const char* plugin_name, bool enabled)
 {
+    if (!g_core_state) return E_POINTER;
 
     for (uint32_t i = 0; i < g_core_state->plugin_count; i++) {
         TE_PluginEntry* plugin = &g_core_state->plugins[i];

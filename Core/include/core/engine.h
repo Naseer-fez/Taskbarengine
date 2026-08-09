@@ -12,11 +12,17 @@ extern "C" {
 void TE_SetEngineInstance(HINSTANCE hinstance);
 
 /**
- * @brief Initializes the Core Engine after being deferred outside loader lock.
+ * @brief Initializes the Core Engine Phase A (lightweight, runs in hook).
  * @return S_OK on success.
  * @note Thread safety: Thread-safe, idempotent initialization.
  */
 HRESULT TE_EngineInitialize(void);
+
+/**
+ * @brief Initializes the Core Engine Phase B (heavy, runs deferred).
+ * @return S_OK on success.
+ */
+HRESULT TE_EngineInitializeDeferred(void);
 
 /**
  * @brief CBT Hook Procedure exported for SetWindowsHookEx.

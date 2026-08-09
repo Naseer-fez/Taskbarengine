@@ -24,9 +24,14 @@ HRESULT TE_EngineInitialize(void)
         return S_FALSE;
     }
 
-    HRESULT hr = TE_CoreManagerInit(g_hinstance);
+    HRESULT hr = TE_CoreManagerInitPhaseA(g_hinstance);
     if (FAILED(hr)) {
         InterlockedExchange(&g_engine_initialized, 0);
     }
     return hr;
+}
+
+HRESULT TE_EngineInitializeDeferred(void)
+{
+    return TE_CoreManagerInitPhaseB();
 }

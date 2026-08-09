@@ -163,11 +163,14 @@ static HRESULT IconHover_Init(const PluginContext* ctx) {
     return S_OK;
 }
 
-static HRESULT IconHover_Enable(void) {
-    if (!g_state.initialized) {
-        TE_LogWrite(TE_LOG_ERROR, "IconHover_Enable failed: plugin not initialized");
-        return E_FAIL;
-    }
+static HANDLE g_deferred_init_timer = NULL;
+
+static VOID CALLBACK DeferredInitTimerCallback(PVOID lpParam, BOOLEAN TimerOrWaitFired)
+{
+    (void)lpParam;
+    (void)TimerOrWaitFired;
+    
+    TE_LogWrite(TE_LOG_INFO, "IconHover running deferred initialization...");
     
     HWND taskbar_hwnd = g_state.ctx.taskbar_hwnd;
     if (!taskbar_hwnd) {
@@ -177,39 +180,31 @@ static HRESULT IconHover_Enable(void) {
         taskbar_hwnd = FindWindowExW(NULL, NULL, L"Shell_TrayWnd", NULL);
     }
     if (!taskbar_hwnd) {
-        TE_LogWrite(TE_LOG_WARN, "IconHover_Enable: Shell_TrayWnd not currently present, enabled in standby mode");
-        InterlockedExchange(&g_state.enabled, 1);
-        return S_OK;
+        TE_LogWrite(TE_LOG_WARN, "IconHover deferred init: Shell_TrayWnd not currently present");
+        return;
     }
 
     g_state.secondary_count = 0;
     EnumWindows(EnumSecondaryTaskbars, (LPARAM)&g_state);
 
     HRESULT capture_hr = TE_IconCaptureInit();
-    if (FAILED(capture_hr)) {
-        return capture_hr;
-    }
+    if (FAILED(capture_hr)) return;
 
     HRESULT uia_hr = TE_UiaInit();
     if (FAILED(uia_hr)) {
-        TE_LogWrite(TE_LOG_ERROR, "IconHover UIA init failed: 0x%08X", (unsigned int)uia_hr);
         TE_IconCaptureShutdown();
-        return uia_hr;
+        return;
     }
 
     AcquireSRWLockExclusive(&g_state.icon_lock);
-    HRESULT uia_disc_hr = TE_UiaDiscoverIcons(taskbar_hwnd, g_state.icons, TE_MAX_TASKBAR_ICONS, &g_state.icon_count);
+    TE_UiaDiscoverIcons(taskbar_hwnd, g_state.icons, TE_MAX_TASKBAR_ICONS, &g_state.icon_count);
     ReleaseSRWLockExclusive(&g_state.icon_lock);
-    if (FAILED(uia_disc_hr)) {
-        TE_LogWrite(TE_LOG_WARN, "IconHover UIA discover returned 0x%08X (icons=%d)", (unsigned int)uia_disc_hr, g_state.icon_count);
-    }
 
     HRESULT hr = TE_DcompInit(taskbar_hwnd);
     if (FAILED(hr)) {
-        TE_LogWrite(TE_LOG_ERROR, "IconHover DComp Init failed: 0x%08X", (unsigned int)hr);
         TE_UiaCleanup();
         TE_IconCaptureShutdown();
-        return hr;
+        return;
     }
 
     RECT tb_rect;
@@ -232,11 +227,26 @@ static HRESULT IconHover_Enable(void) {
         TE_DcompShutdown();
         TE_UiaCleanup();
         TE_IconCaptureShutdown();
-        return hr;
+        return;
     }
 
     InterlockedExchange(&g_state.enabled, 1);
-    TE_LogWrite(TE_LOG_INFO, "IconHover plugin enabled");
+    TE_LogWrite(TE_LOG_INFO, "IconHover plugin fully enabled after deferred init");
+    
+    if (g_deferred_init_timer) {
+        DeleteTimerQueueTimer(NULL, g_deferred_init_timer, NULL);
+        g_deferred_init_timer = NULL;
+    }
+}
+
+static HRESULT IconHover_Enable(void) {
+    if (!g_state.initialized) {
+        TE_LogWrite(TE_LOG_ERROR, "IconHover_Enable failed: plugin not initialized");
+        return E_FAIL;
+    }
+    
+    TE_LogWrite(TE_LOG_INFO, "IconHover deferring enable to background timer");
+    CreateTimerQueueTimer(&g_deferred_init_timer, NULL, DeferredInitTimerCallback, NULL, 50, 0, WT_EXECUTEINTIMERTHREAD | WT_EXECUTEONLYONCE);
     return S_OK;
 }
 

@@ -35,13 +35,6 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
             g_hinst_dll = hinstDLL;
             TE_SetEngineInstance(hinstDLL);
             DisableThreadLibraryCalls(hinstDLL);
-
-            if (TE_IsExplorerProcess()) {
-                HWND tray_hwnd = FindWindowW(L"Shell_TrayWnd", NULL);
-                if (tray_hwnd != NULL) {
-                    PostMessageW(tray_hwnd, WM_TE_INIT, 0, 0);
-                }
-            }
             break;
 
         case DLL_PROCESS_DETACH:

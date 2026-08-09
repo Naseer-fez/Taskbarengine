@@ -68,6 +68,14 @@ static LRESULT CALLBACK TaskbarSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam,
             break;
         }
 
+        case WM_TE_INIT: {
+            if (ref && ref->core_state_ptr) {
+                TE_LogWrite(TE_LOG_INFO, "Taskbar subclass received WM_TE_INIT, executing deferred init");
+                TE_CoreManagerInitPhaseB();
+            }
+            return 0;
+        }
+
         case WM_TE_CONFIG_CHANGED: {
             TE_LogWrite(TE_LOG_INFO, "Taskbar subclass received WM_TE_CONFIG_CHANGED");
             if (ref && ref->core_state_ptr) {

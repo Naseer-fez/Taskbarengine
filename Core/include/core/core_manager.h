@@ -12,11 +12,17 @@ extern "C" {
 typedef struct TE_CoreState TE_CoreState;
 
 /**
- * @brief Initialize the Core Manager, load config, start watcher, and discover plugins.
+ * @brief Initialize the Core Manager Phase A: allocate state, subclass taskbar.
  * @param hinstance Engine DLL module instance handle.
  * @return S_OK on success, or failure HRESULT.
  */
-HRESULT TE_CoreManagerInit(HINSTANCE hinstance);
+HRESULT TE_CoreManagerInitPhaseA(HINSTANCE hinstance);
+
+/**
+ * @brief Initialize the Core Manager Phase B: config, watcher, plugins, IPC.
+ * @return S_OK on success, or failure HRESULT.
+ */
+HRESULT TE_CoreManagerInitPhaseB(void);
 
 /**
  * @brief Shutdown the Core Manager, stop watcher, disable plugins, and free state.
