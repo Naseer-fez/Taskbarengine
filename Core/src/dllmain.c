@@ -48,13 +48,17 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
     return TRUE;
 }
 
+static volatile LONG g_hook_fired = 0;
+
 TE_API LRESULT CALLBACK TE_CbtHookProc(int nCode, WPARAM wParam, LPARAM lParam)
 {
     (void)wParam;
     (void)lParam;
 
     if (nCode >= 0 && TE_IsExplorerProcess()) {
-        TE_EngineInitialize();
+        if (InterlockedCompareExchange(&g_hook_fired, 1, 0) == 0) {
+            TE_EngineInitialize();
+        }
     }
 
     return CallNextHookEx(NULL, nCode, wParam, lParam);

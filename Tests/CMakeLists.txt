@@ -52,7 +52,7 @@ target_include_directories(te_tests PRIVATE
 )
 
 target_compile_definitions(te_tests PRIVATE
-    TE_TEST_MODULES_DIR=L"${CMAKE_BINARY_DIR}/Modules"
+    TE_TEST_MODULES_DIR=L"${CMAKE_BINARY_DIR}/bin/Tests/Modules"
 )
 
 target_link_libraries(te_tests PRIVATE

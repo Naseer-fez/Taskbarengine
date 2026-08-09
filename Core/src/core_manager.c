@@ -69,22 +69,33 @@ HRESULT TE_CoreManagerInitPhaseA(HINSTANCE hinstance)
 {
     if (g_core_state) return S_OK;
 
+    HWND taskbar_hwnd = FindWindowW(L"Shell_TrayWnd", NULL);
+    if (!taskbar_hwnd) return E_PENDING;
+
+    DWORD taskbar_tid = GetWindowThreadProcessId(taskbar_hwnd, NULL);
+    if (GetCurrentThreadId() != taskbar_tid) {
+        /* SetWindowSubclass must be called from the thread that owns the window */
+        return E_PENDING;
+    }
+
     g_core_state = (TE_CoreState*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(TE_CoreState));
     if (!g_core_state) return E_OUTOFMEMORY;
 
     g_core_state->hinstance = hinstance;
-    g_core_state->taskbar_hwnd = FindWindowW(L"Shell_TrayWnd", NULL);
+    g_core_state->taskbar_hwnd = taskbar_hwnd;
 
     /* Initialize Event Dispatch Table */
     TE_EventDispatchInit(g_core_state->subscriptions, &g_core_state->subscription_count);
 
     /* Install Taskbar Subclass */
-    if (g_core_state->taskbar_hwnd) {
-        HRESULT sub_hr = TE_TaskbarSubclassInstall(g_core_state->taskbar_hwnd, g_core_state->subscriptions,
-                                                  &g_core_state->subscription_count, g_core_state);
-        if (SUCCEEDED(sub_hr)) {
-            PostMessageW(g_core_state->taskbar_hwnd, WM_APP + 100 /* WM_TE_INIT */, 0, 0);
-        }
+    HRESULT sub_hr = TE_TaskbarSubclassInstall(g_core_state->taskbar_hwnd, g_core_state->subscriptions,
+                                              &g_core_state->subscription_count, g_core_state);
+    if (SUCCEEDED(sub_hr)) {
+        PostMessageW(g_core_state->taskbar_hwnd, WM_APP + 100 /* WM_TE_INIT */, 0, 0);
+    } else {
+        HeapFree(GetProcessHeap(), 0, g_core_state);
+        g_core_state = NULL;
+        return E_FAIL;
     }
 
     return S_OK;

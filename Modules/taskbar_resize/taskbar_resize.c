@@ -130,6 +130,9 @@ static void ApplyWorkArea(TE_TaskbarBarState* bar, const RECT* taskbar_rect)
 {
     if (!taskbar_rect) return;
 
+    /* Validate: reject obviously invalid rects (e.g. during XAML partial layout) */
+    if (taskbar_rect->top <= 0 || taskbar_rect->bottom <= taskbar_rect->top) return;
+
     RECT work;
     ZeroMemory(&work, sizeof(work));
     if (bar) {
@@ -140,8 +143,10 @@ static void ApplyWorkArea(TE_TaskbarBarState* bar, const RECT* taskbar_rect)
     }
 
     work.bottom = taskbar_rect->top;
-    SystemParametersInfoW(SPI_SETWORKAREA, 0, &work, SPIF_UPDATEINIFILE);
-    PostMessageW(HWND_BROADCAST, WM_SETTINGCHANGE, SPI_SETWORKAREA, 0);
+    /* SPIF_SENDCHANGE replaces SPIF_UPDATEINIFILE + manual broadcast.
+     * This avoids contending with Explorer's own registry writes during
+     * startup and lets Windows handle the WM_SETTINGCHANGE broadcast. */
+    SystemParametersInfoW(SPI_SETWORKAREA, 0, &work, SPIF_SENDCHANGE);
 }
 
 static void ApplyHeightToWindow(HWND hwnd, bool update_work_area)
@@ -159,8 +164,11 @@ static void ApplyHeightToWindow(HWND hwnd, bool update_work_area)
     int width = rc.right - rc.left;
     rc.top = rc.bottom - target_height;
 
+    /* SWP_FRAMECHANGED removed: it triggers WM_NCCALCSIZE which causes the
+     * XAML layout engine to fight our height override via re-entrant
+     * WM_WINDOWPOSCHANGING messages, creating a feedback loop. */
     SetWindowPos(hwnd, NULL, rc.left, rc.top, width, target_height,
-                 SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+                 SWP_NOZORDER | SWP_NOACTIVATE);
     if (bar && bar->updates_work_area) {
         ApplyWorkArea(bar, &rc);
     }
@@ -193,11 +201,10 @@ static void RestoreGeometry(void)
         int width = bar->original_rect.right - bar->original_rect.left;
         int height = bar->original_rect.bottom - bar->original_rect.top;
         SetWindowPos(bar->hwnd, NULL, bar->original_rect.left, bar->original_rect.top,
-                     width, height, SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+                     width, height, SWP_NOZORDER | SWP_NOACTIVATE);
 
         if (bar->updates_work_area && !IsRectEmpty(&bar->original_work_area)) {
-            SystemParametersInfoW(SPI_SETWORKAREA, 0, &bar->original_work_area, SPIF_UPDATEINIFILE);
-            PostMessageW(HWND_BROADCAST, WM_SETTINGCHANGE, SPI_SETWORKAREA, 0);
+            SystemParametersInfoW(SPI_SETWORKAREA, 0, &bar->original_work_area, SPIF_SENDCHANGE);
         }
     }
 }

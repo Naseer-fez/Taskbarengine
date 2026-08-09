@@ -163,12 +163,16 @@ static HRESULT IconHover_Init(const PluginContext* ctx) {
     return S_OK;
 }
 
-static HANDLE g_deferred_init_timer = NULL;
+#define ICON_HOVER_INIT_TIMER_ID 0x54454948 /* 'TEIH' */
+static UINT_PTR g_deferred_init_timer_id = 0;
 
-static VOID CALLBACK DeferredInitTimerCallback(PVOID lpParam, BOOLEAN TimerOrWaitFired)
+static void CALLBACK DeferredInitTimerProc(HWND hwnd, UINT uMsg, UINT_PTR idEvent, DWORD dwTime)
 {
-    (void)lpParam;
-    (void)TimerOrWaitFired;
+    (void)uMsg;
+    (void)dwTime;
+    /* Kill the timer first to prevent re-entrancy */
+    KillTimer(hwnd, idEvent);
+    g_deferred_init_timer_id = 0;
     
     TE_LogWrite(TE_LOG_INFO, "IconHover running deferred initialization...");
     
@@ -232,11 +236,6 @@ static VOID CALLBACK DeferredInitTimerCallback(PVOID lpParam, BOOLEAN TimerOrWai
 
     InterlockedExchange(&g_state.enabled, 1);
     TE_LogWrite(TE_LOG_INFO, "IconHover plugin fully enabled after deferred init");
-    
-    if (g_deferred_init_timer) {
-        DeleteTimerQueueTimer(NULL, g_deferred_init_timer, NULL);
-        g_deferred_init_timer = NULL;
-    }
 }
 
 static HRESULT IconHover_Enable(void) {
@@ -245,14 +244,34 @@ static HRESULT IconHover_Enable(void) {
         return E_FAIL;
     }
     
-    TE_LogWrite(TE_LOG_INFO, "IconHover deferring enable to background timer");
-    CreateTimerQueueTimer(&g_deferred_init_timer, NULL, DeferredInitTimerCallback, NULL, 50, 0, WT_EXECUTEINTIMERTHREAD | WT_EXECUTEONLYONCE);
+    HWND taskbar = g_state.ctx.taskbar_hwnd;
+    if (!taskbar || !IsWindow(taskbar)) {
+        TE_LogWrite(TE_LOG_ERROR, "IconHover_Enable: no valid taskbar HWND");
+        return E_HANDLE;
+    }
+
+    /* Use SetTimer instead of CreateTimerQueueTimer so the callback runs on
+     * the thread that owns taskbar_hwnd (Explorer's UI thread).  The previous
+     * WT_EXECUTEINTIMERTHREAD approach ran COM init, UIA discovery, DComp
+     * window creation, and EnumWindows on a thread-pool thread, corrupting
+     * Explorer's COM apartments and creating cross-thread window ownership. */
+    TE_LogWrite(TE_LOG_INFO, "IconHover deferring enable to UI-thread timer");
+    g_deferred_init_timer_id = SetTimer(taskbar, ICON_HOVER_INIT_TIMER_ID, 50, DeferredInitTimerProc);
+    if (!g_deferred_init_timer_id) {
+        TE_LogWrite(TE_LOG_ERROR, "IconHover SetTimer failed (err=%lu)", GetLastError());
+        return HRESULT_FROM_WIN32(GetLastError());
+    }
     return S_OK;
 }
 
 static HRESULT IconHover_Disable(void) {
     InterlockedExchange(&g_state.enabled, 0);
     
+    if (g_deferred_init_timer_id && g_state.ctx.taskbar_hwnd) {
+        KillTimer(g_state.ctx.taskbar_hwnd, ICON_HOVER_INIT_TIMER_ID);
+        g_deferred_init_timer_id = 0;
+    }
+
     TE_FrameLoopStop();
     TE_DcompShutdown();
     TE_IconCaptureShutdown();

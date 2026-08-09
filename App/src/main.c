@@ -15,6 +15,8 @@ static HHOOK g_hook = NULL;
 static HMODULE g_engine_dll = NULL;
 static UINT g_taskbar_created_msg = 0;
 
+#define REHOOK_TIMER_ID 1
+
 static DWORD FindExplorerPid(void)
 {
     HWND taskbar = FindWindowW(L"Shell_TrayWnd", NULL);
@@ -60,7 +62,13 @@ static HRESULT InstallEngineHook(void* context)
         return HRESULT_FROM_WIN32(GetLastError());
     }
 
-    g_hook = SetWindowsHookExW(WH_CBT, hook_proc, g_engine_dll, 0);
+    DWORD tid = 0;
+    HWND taskbar = FindWindowW(L"Shell_TrayWnd", NULL);
+    if (taskbar) {
+        tid = GetWindowThreadProcessId(taskbar, NULL);
+    }
+
+    g_hook = SetWindowsHookExW(WH_CBT, hook_proc, g_engine_dll, tid);
     return g_hook ? S_OK : HRESULT_FROM_WIN32(GetLastError());
 }
 
@@ -101,14 +109,24 @@ static LRESULT CALLBACK HiddenWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
             PostQuitMessage(0);
             return 0;
 
-        default:
-            if (msg == g_taskbar_created_msg) {
+        case WM_TIMER:
+            if (wParam == REHOOK_TIMER_ID) {
+                KillTimer(hwnd, REHOOK_TIMER_ID);
                 InstallEngineHook(NULL);
                 DWORD pid = FindExplorerPid();
                 if (pid != 0) {
                     TE_CrashRecoveryStop();
                     TE_CrashRecoveryStart(hwnd, pid, InstallEngineHook, NULL);
                 }
+                return 0;
+            }
+            break;
+
+        default:
+            if (msg == g_taskbar_created_msg) {
+                /* Delay re-hooking by 500ms to let Explorer's XAML taskbar
+                 * complete its startup layout before we subclass it. */
+                SetTimer(hwnd, REHOOK_TIMER_ID, 500, NULL);
                 return 0;
             }
             break;
@@ -142,6 +160,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
 
     HWND hwnd = CreateWindowExW(0, L"TaskbarEngine_HiddenWnd", L"TaskbarEngine Tray Host", 0, 0, 0, 0, 0, HWND_MESSAGE, NULL, hInstance, NULL);
     if (hwnd == NULL) {
+        OutputDebugStringA("[TaskbarEngine Tray] FATAL: CreateWindowExW for hidden window returned NULL\n");
         return 1;
     }
 

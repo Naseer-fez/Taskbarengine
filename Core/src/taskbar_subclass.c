@@ -19,6 +19,7 @@ typedef struct SubclassRefData {
 } SubclassRefData;
 
 static SubclassRefData g_subclass_ref = { 0 };
+static volatile LONG g_in_geometry_dispatch = 0;
 
 /* TE_CoreManagerOnConfigChanged declared in core/core_manager.h (included above) */
 
@@ -28,22 +29,29 @@ static LRESULT CALLBACK TaskbarSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam,
     (void)uIdSubclass;
     SubclassRefData* ref = (SubclassRefData*)dwRefData;
 
-    if (TE_ShellHookHandleMessage(uMsg, wParam, lParam) ||
-        TE_PowerDeviceHandleMessage(uMsg, wParam, lParam)) {
-        return 0;
-    }
+    /* Process shell hook and power/device messages but let them pass through
+     * to DefSubclassProc so Explorer's own handlers still see them.  Swallowing
+     * these previously broke Explorer's internal task-list state management. */
+    TE_ShellHookHandleMessage(uMsg, wParam, lParam);
+    TE_PowerDeviceHandleMessage(uMsg, wParam, lParam);
 
     switch (uMsg) {
         case WM_SIZE:
         case WM_WINDOWPOSCHANGING: {
-            if (ref && ref->event_table && ref->sub_count) {
-                RECT rc;
-                GetWindowRect(hWnd, &rc);
-                TE_TaskbarGeometryEvent evt = { 0 };
-                evt.taskbar_hwnd = hWnd;
-                evt.taskbar_rect = rc;
-                evt.window_pos = (uMsg == WM_WINDOWPOSCHANGING) ? (WINDOWPOS*)lParam : NULL;
-                TE_EventDispatch(ref->event_table, *ref->sub_count, TE_EVENT_TASKBAR_GEOMETRY, &evt);
+            /* Re-entrancy guard: SetWindowPos(SWP_FRAMECHANGED) from plugins
+             * generates another WM_WINDOWPOSCHANGING, creating a feedback loop
+             * with XAML's own layout engine.  Skip dispatch if already inside. */
+            if (InterlockedCompareExchange(&g_in_geometry_dispatch, 1, 0) == 0) {
+                if (ref && ref->event_table && ref->sub_count) {
+                    RECT rc;
+                    GetWindowRect(hWnd, &rc);
+                    TE_TaskbarGeometryEvent evt = { 0 };
+                    evt.taskbar_hwnd = hWnd;
+                    evt.taskbar_rect = rc;
+                    evt.window_pos = (uMsg == WM_WINDOWPOSCHANGING) ? (WINDOWPOS*)lParam : NULL;
+                    TE_EventDispatch(ref->event_table, *ref->sub_count, TE_EVENT_TASKBAR_GEOMETRY, &evt);
+                }
+                InterlockedExchange(&g_in_geometry_dispatch, 0);
             }
             break;
         }

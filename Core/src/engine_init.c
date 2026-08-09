@@ -25,9 +25,11 @@ HRESULT TE_EngineInitialize(void)
     }
 
     HRESULT hr = TE_CoreManagerInitPhaseA(g_hinstance);
-    if (FAILED(hr)) {
-        InterlockedExchange(&g_engine_initialized, 0);
-    }
+    /* Never reset g_engine_initialized on failure — the thread-targeted
+     * CBT hook ensures we are on the correct thread.  Resetting the flag
+     * previously caused an unbounded retry storm that starved Explorer's
+     * XAML island startup.  Explorer-restart recovery will re-install the
+     * hook via TE_CrashRecoveryStart which handles the retry externally. */
     return hr;
 }
 
