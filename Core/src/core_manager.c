@@ -13,6 +13,7 @@
 #include <sdk/te_log_impl.h>
 #include <sdk/te_events.h>
 #include "core/state_store.h"
+#include <sdk/te_debug_trace.h>
 #include <stdio.h>
 #include <wchar.h>
 
@@ -67,19 +68,26 @@ static bool IsPluginEnabledInConfig(const cJSON* config)
 
 HRESULT TE_CoreManagerInitPhaseA(HINSTANCE hinstance)
 {
-    if (g_core_state) return S_OK;
+    TE_DebugTrace("[TE-DBG] PhaseA: Entering TE_CoreManagerInitPhaseA\n");
+    if (g_core_state) {
+        TE_DebugTrace("[TE-DBG] PhaseA: Already initialized\n");
+        return S_OK;
+    }
 
     HWND taskbar_hwnd = FindWindowW(L"Shell_TrayWnd", NULL);
+    TE_DebugTraceFmt("[TE-DBG] PhaseA: FindWindowW returned HWND=0x%p\n", (void*)taskbar_hwnd);
     if (!taskbar_hwnd) return E_PENDING;
 
     DWORD taskbar_tid = GetWindowThreadProcessId(taskbar_hwnd, NULL);
     if (GetCurrentThreadId() != taskbar_tid) {
+        TE_DebugTrace("[TE-DBG] PhaseA: Wrong thread, returning E_PENDING\n");
         /* SetWindowSubclass must be called from the thread that owns the window */
         return E_PENDING;
     }
 
     g_core_state = (TE_CoreState*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(TE_CoreState));
     if (!g_core_state) return E_OUTOFMEMORY;
+    TE_DebugTrace("[TE-DBG] PhaseA: g_core_state allocated\n");
 
     g_core_state->hinstance = hinstance;
     g_core_state->taskbar_hwnd = taskbar_hwnd;
@@ -90,8 +98,10 @@ HRESULT TE_CoreManagerInitPhaseA(HINSTANCE hinstance)
     /* Install Taskbar Subclass */
     HRESULT sub_hr = TE_TaskbarSubclassInstall(g_core_state->taskbar_hwnd, g_core_state->subscriptions,
                                               &g_core_state->subscription_count, g_core_state);
+    TE_DebugTraceFmt("[TE-DBG] PhaseA: SubclassInstall returned hr=0x%08X\n", (unsigned int)sub_hr);
     if (SUCCEEDED(sub_hr)) {
         PostMessageW(g_core_state->taskbar_hwnd, WM_APP + 100 /* WM_TE_INIT */, 0, 0);
+        TE_DebugTrace("[TE-DBG] PhaseA: Posted WM_TE_INIT to taskbar\n");
     } else {
         HeapFree(GetProcessHeap(), 0, g_core_state);
         g_core_state = NULL;
@@ -103,6 +113,7 @@ HRESULT TE_CoreManagerInitPhaseA(HINSTANCE hinstance)
 
 HRESULT TE_CoreManagerInitPhaseB(void)
 {
+    TE_DebugTrace("[TE-DBG] PhaseB: Entering TE_CoreManagerInitPhaseB\n");
     if (!g_core_state) return E_POINTER;
 
     HRESULT path_hr = TE_ConfigResolvePath(g_core_state->config_path, MAX_PATH);
@@ -127,15 +138,21 @@ HRESULT TE_CoreManagerInitPhaseB(void)
 
     TE_LogWrite(TE_LOG_INFO, "Core Manager initializing Phase B...");
 
-    /* Start other hooks now that we are outside CBT hook */
+    /* Start other event sources now that we are outside CBT hook.
+     * Keep RegisterShellHookWindow disabled for now: even with a helper HWND,
+     * registering it from inside Explorer produced delayed Shell_TrayWnd loss
+     * without a crash on Win11 XAML taskbar builds. */
     if (g_core_state->taskbar_hwnd) {
-        TE_ShellHookStart(g_core_state->taskbar_hwnd, g_core_state->subscriptions, &g_core_state->subscription_count);
+        TE_DebugTrace("[TE-DBG] PhaseB: ShellHookStart skipped for taskbar stability\n");
         TE_PowerDeviceStart(g_core_state->taskbar_hwnd, g_core_state->subscriptions, &g_core_state->subscription_count);
+        TE_DebugTrace("[TE-DBG] PhaseB: PowerDeviceStart completed\n");
         TE_VDesktopNotifyStart(g_core_state->subscriptions, &g_core_state->subscription_count);
+        TE_DebugTrace("[TE-DBG] PhaseB: VDesktopNotifyStart completed\n");
     }
 
     /* Load Configuration */
     HRESULT hr = TE_ConfigLoad(g_core_state->config_path, &g_core_state->config_root);
+    TE_DebugTraceFmt("[TE-DBG] PhaseB: ConfigLoad returned hr=0x%08X\n", (unsigned int)hr);
     if (FAILED(hr)) {
         TE_LogWrite(TE_LOG_WARN, "Failed to load config, starting with empty config");
     }
@@ -179,10 +196,12 @@ HRESULT TE_CoreManagerInitPhaseB(void)
 
     /* Discover & Load Plugins */
     TE_PluginLoaderScan(g_core_state->modules_dir, g_core_state->plugins, &g_core_state->plugin_count);
+    TE_DebugTraceFmt("[TE-DBG] PhaseB: PluginLoaderScan found %u plugins\n", g_core_state->plugin_count);
 
     /* Initialize and Enable Plugins */
     for (uint32_t i = 0; i < g_core_state->plugin_count; i++) {
         TE_PluginEntry* plugin = &g_core_state->plugins[i];
+        TE_DebugTraceFmt("[TE-DBG] PhaseB: Processing plugin[%u] name='%s'\n", i, (plugin->metadata && plugin->metadata->name) ? plugin->metadata->name : "NULL");
         if (!plugin->context) continue;
 
         g_core_state->current_plugin_id = i + 1;
@@ -202,23 +221,29 @@ HRESULT TE_CoreManagerInitPhaseB(void)
         plugin->context->core_opaque = (void*)(uintptr_t)i;
 
         if (plugin->iface->Initialize) {
+            TE_DebugTraceFmt("[TE-DBG] PhaseB: Calling Initialize for '%s'\n", plugin->metadata->name);
             TE_FaultIsolationCallPluginInit(plugin, plugin->iface->Initialize, plugin->context);
+            TE_DebugTraceFmt("[TE-DBG] PhaseB: Initialize returned for '%s'\n", plugin->metadata->name);
         }
 
         /* Check enabled setting in config */
         if (IsPluginEnabledInConfig(plugin->context->config)) {
+            TE_DebugTraceFmt("[TE-DBG] PhaseB: Enabling plugin '%s'\n", plugin->metadata->name);
             TE_PluginLoaderEnable(plugin);
+            TE_DebugTraceFmt("[TE-DBG] PhaseB: Plugin '%s' Enable returned\n", plugin->metadata->name);
         }
     }
 
     g_core_state->current_plugin_id = 0;
 
     HRESULT ipc_hr = TE_IpcServerStart();
+    TE_DebugTraceFmt("[TE-DBG] PhaseB: IpcServerStart returned hr=0x%08X\n", (unsigned int)ipc_hr);
     if (FAILED(ipc_hr)) {
         TE_LogWrite(TE_LOG_WARN, "Failed to start IPC server (hr: 0x%08X)", (unsigned int)ipc_hr);
     }
 
     TE_LogWrite(TE_LOG_INFO, "Core Manager initialization Phase B complete with %u plugins loaded", g_core_state->plugin_count);
+    TE_DebugTrace("[TE-DBG] PhaseB: COMPLETE - All initialization done\n");
     return S_OK;
 }
 

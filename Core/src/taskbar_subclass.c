@@ -5,6 +5,8 @@
 #include "core/power_device.h"
 #include <commctrl.h>
 #include <sdk/te_log.h>
+#include <sdk/te_debug_trace.h>
+#include <stdio.h>
 
 #ifdef _MSC_VER
 #pragma comment(lib, "Comctl32.lib")
@@ -27,6 +29,10 @@ static LRESULT CALLBACK TaskbarSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam,
                                            UINT_PTR uIdSubclass, DWORD_PTR dwRefData)
 {
     (void)uIdSubclass;
+    /* Only log specific messages to avoid flooding */
+    if (uMsg == WM_NCDESTROY || uMsg == (WM_APP + 100) || uMsg == (WM_APP + 102) || uMsg == WM_CLOSE || uMsg == WM_DESTROY) {
+        char dbg[128]; sprintf(dbg, "[TE-DBG] SubclassProc: msg=0x%04X wp=0x%llX\n", uMsg, (unsigned long long)wParam); TE_DebugTrace(dbg);
+    }
     SubclassRefData* ref = (SubclassRefData*)dwRefData;
 
     /* Process shell hook and power/device messages but let them pass through
@@ -79,6 +85,7 @@ static LRESULT CALLBACK TaskbarSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam,
         case WM_TE_INIT: {
             if (ref && ref->core_state_ptr) {
                 TE_LogWrite(TE_LOG_INFO, "Taskbar subclass received WM_TE_INIT, executing deferred init");
+                TE_DebugTrace("[TE-DBG] SubclassProc: WM_TE_INIT received, calling PhaseB\n");
                 TE_CoreManagerInitPhaseB();
             }
             return 0;
@@ -146,6 +153,7 @@ static LRESULT CALLBACK TaskbarSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam,
         }
 
         case WM_NCDESTROY: {
+            TE_DebugTrace("[TE-DBG] SubclassProc: WM_NCDESTROY - Shell_TrayWnd is being DESTROYED!\n");
             RemoveWindowSubclass(hWnd, TaskbarSubclassProc, TASKBAR_SUBCLASS_ID);
             TE_LogWrite(TE_LOG_INFO, "Subclass automatically removed on WM_NCDESTROY");
             break;
@@ -168,6 +176,7 @@ HRESULT TE_TaskbarSubclassInstall(HWND taskbar_hwnd, TE_EventEntry* event_table,
         TE_LogWrite(TE_LOG_ERROR, "SetWindowSubclass failed on Shell_TrayWnd");
         return E_FAIL;
     }
+    TE_DebugTrace("[TE-DBG] SubclassInstall: SetWindowSubclass succeeded\n");
 
     TE_LogWrite(TE_LOG_INFO, "Subclassed Shell_TrayWnd successfully");
     return S_OK;

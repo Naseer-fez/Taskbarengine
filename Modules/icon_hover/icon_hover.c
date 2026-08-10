@@ -1,6 +1,7 @@
 #include <sdk/te_plugin.h>
 #include <sdk/te_log.h>
 #include <sdk/te_events.h>
+#include <sdk/te_debug_trace.h>
 #include "icon_hover_internal.h"
 #include "uia_discovery.h"
 #include "dcomp_overlay.h"
@@ -95,14 +96,11 @@ static HRESULT OnConfigChanged(uint32_t event_type, const void* event_data, void
 static HRESULT OnShellHook(uint32_t event_type, const void* event_data, void* user_data)
 {
     (void)event_type; (void)event_data; (void)user_data;
-    if (g_state.enabled) {
-        HWND taskbar_hwnd = FindWindowW(L"Shell_TrayWnd", NULL);
-        if (taskbar_hwnd) {
-            AcquireSRWLockExclusive(&g_state.icon_lock);
-            TE_UiaDiscoverIcons(taskbar_hwnd, g_state.icons, TE_MAX_TASKBAR_ICONS, &g_state.icon_count);
-            ReleaseSRWLockExclusive(&g_state.icon_lock);
-        }
-    }
+    /* Do not refresh UIA from shell hook notifications for now. Explorer sends
+     * bursts of shell hook messages while its XAML taskbar tree is mutating;
+     * repeated UIA descendant walks from inside that stream make Shell_TrayWnd
+     * silently disappear. Initial discovery remains enabled at startup. */
+    TE_DebugTrace("[TE-DBG] IconHover: ShellHook ignored for stability\n");
     return S_OK;
 }
 
@@ -141,6 +139,8 @@ static HRESULT OnTaskbarMouse(uint32_t event_type, const void* event_data, void*
 }
 
 static HRESULT IconHover_Init(const PluginContext* ctx) {
+    TE_DebugTraceFmt("[TE-DBG] IconHover: Init entering ctx=0x%p taskbar=0x%p\n",
+                     (void*)ctx, ctx ? (void*)ctx->taskbar_hwnd : NULL);
     if (!ctx) return E_POINTER;
     ZeroMemory(&g_state, sizeof(g_state));
     InitializeSRWLock(&g_state.icon_lock);
@@ -160,6 +160,7 @@ static HRESULT IconHover_Init(const PluginContext* ctx) {
     
     InterlockedExchange(&g_state.initialized, 1);
     TE_LogWrite(TE_LOG_INFO, "IconHover plugin initialized");
+    TE_DebugTrace("[TE-DBG] IconHover: Init complete\n");
     return S_OK;
 }
 
@@ -171,6 +172,7 @@ static void CALLBACK DeferredInitTimerProc(HWND hwnd, UINT uMsg, UINT_PTR idEven
     (void)uMsg;
     (void)dwTime;
     /* Kill the timer first to prevent re-entrancy */
+    TE_DebugTraceFmt("[TE-DBG] IconHover: Deferred timer fired hwnd=0x%p id=0x%p\n", (void*)hwnd, (void*)idEvent);
     KillTimer(hwnd, idEvent);
     g_deferred_init_timer_id = 0;
     
@@ -185,16 +187,21 @@ static void CALLBACK DeferredInitTimerProc(HWND hwnd, UINT uMsg, UINT_PTR idEven
     }
     if (!taskbar_hwnd) {
         TE_LogWrite(TE_LOG_WARN, "IconHover deferred init: Shell_TrayWnd not currently present");
+        TE_DebugTrace("[TE-DBG] IconHover: Deferred init aborting, no taskbar HWND\n");
         return;
     }
+    TE_DebugTraceFmt("[TE-DBG] IconHover: Deferred init using taskbar=0x%p\n", (void*)taskbar_hwnd);
 
     g_state.secondary_count = 0;
     EnumWindows(EnumSecondaryTaskbars, (LPARAM)&g_state);
+    TE_DebugTraceFmt("[TE-DBG] IconHover: EnumSecondaryTaskbars count=%u\n", g_state.secondary_count);
 
     HRESULT capture_hr = TE_IconCaptureInit();
+    TE_DebugTraceFmt("[TE-DBG] IconHover: IconCaptureInit hr=0x%08X\n", (unsigned int)capture_hr);
     if (FAILED(capture_hr)) return;
 
     HRESULT uia_hr = TE_UiaInit();
+    TE_DebugTraceFmt("[TE-DBG] IconHover: UiaInit hr=0x%08X\n", (unsigned int)uia_hr);
     if (FAILED(uia_hr)) {
         TE_IconCaptureShutdown();
         return;
@@ -203,8 +210,10 @@ static void CALLBACK DeferredInitTimerProc(HWND hwnd, UINT uMsg, UINT_PTR idEven
     AcquireSRWLockExclusive(&g_state.icon_lock);
     TE_UiaDiscoverIcons(taskbar_hwnd, g_state.icons, TE_MAX_TASKBAR_ICONS, &g_state.icon_count);
     ReleaseSRWLockExclusive(&g_state.icon_lock);
+    TE_DebugTraceFmt("[TE-DBG] IconHover: UiaDiscoverIcons count=%d\n", g_state.icon_count);
 
     HRESULT hr = TE_DcompInit(taskbar_hwnd);
+    TE_DebugTraceFmt("[TE-DBG] IconHover: DcompInit hr=0x%08X\n", (unsigned int)hr);
     if (FAILED(hr)) {
         TE_UiaCleanup();
         TE_IconCaptureShutdown();
@@ -226,6 +235,7 @@ static void CALLBACK DeferredInitTimerProc(HWND hwnd, UINT uMsg, UINT_PTR idEven
     if (g_state.icon_size < 24.0f) g_state.icon_size = 24.0f;
 
     hr = TE_FrameLoopStart(&g_state);
+    TE_DebugTraceFmt("[TE-DBG] IconHover: FrameLoopStart hr=0x%08X\n", (unsigned int)hr);
     if (FAILED(hr)) {
         TE_LogWrite(TE_LOG_ERROR, "IconHover FrameLoopStart failed: 0x%08X", hr);
         TE_DcompShutdown();
@@ -236,9 +246,11 @@ static void CALLBACK DeferredInitTimerProc(HWND hwnd, UINT uMsg, UINT_PTR idEven
 
     InterlockedExchange(&g_state.enabled, 1);
     TE_LogWrite(TE_LOG_INFO, "IconHover plugin fully enabled after deferred init");
+    TE_DebugTrace("[TE-DBG] IconHover: Deferred init complete, plugin enabled\n");
 }
 
 static HRESULT IconHover_Enable(void) {
+    TE_DebugTrace("[TE-DBG] IconHover: Enable entering\n");
     if (!g_state.initialized) {
         TE_LogWrite(TE_LOG_ERROR, "IconHover_Enable failed: plugin not initialized");
         return E_FAIL;
@@ -257,6 +269,7 @@ static HRESULT IconHover_Enable(void) {
      * Explorer's COM apartments and creating cross-thread window ownership. */
     TE_LogWrite(TE_LOG_INFO, "IconHover deferring enable to UI-thread timer");
     g_deferred_init_timer_id = SetTimer(taskbar, ICON_HOVER_INIT_TIMER_ID, 50, DeferredInitTimerProc);
+    TE_DebugTraceFmt("[TE-DBG] IconHover: SetTimer returned id=0x%p err=%lu\n", (void*)g_deferred_init_timer_id, GetLastError());
     if (!g_deferred_init_timer_id) {
         TE_LogWrite(TE_LOG_ERROR, "IconHover SetTimer failed (err=%lu)", GetLastError());
         return HRESULT_FROM_WIN32(GetLastError());
@@ -265,6 +278,7 @@ static HRESULT IconHover_Enable(void) {
 }
 
 static HRESULT IconHover_Disable(void) {
+    TE_DebugTrace("[TE-DBG] IconHover: Disable entering\n");
     InterlockedExchange(&g_state.enabled, 0);
     
     if (g_deferred_init_timer_id && g_state.ctx.taskbar_hwnd) {
@@ -282,6 +296,7 @@ static HRESULT IconHover_Disable(void) {
     ReleaseSRWLockExclusive(&g_state.icon_lock);
 
     TE_LogWrite(TE_LOG_INFO, "IconHover plugin disabled");
+    TE_DebugTrace("[TE-DBG] IconHover: Disable complete\n");
     return S_OK;
 }
 

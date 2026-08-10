@@ -4,6 +4,7 @@
 #include <d3d11_1.h>
 #include <wrl/client.h>
 #include <sdk/te_log.h>
+#include <sdk/te_debug_trace.h>
 
 using Microsoft::WRL::ComPtr;
 
@@ -24,6 +25,7 @@ static LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
 
 HRESULT TE_DcompInit(HWND parent_hwnd)
 {
+    TE_DebugTraceFmt("[TE-DBG] DComp: Init entering parent=0x%p existing_overlay=0x%p\n", (void*)parent_hwnd, (void*)g_overlay_hwnd);
     if (g_overlay_hwnd) return S_OK;
 
     WNDCLASSW wc = {};
@@ -34,27 +36,33 @@ HRESULT TE_DcompInit(HWND parent_hwnd)
 
     RECT parent_rect;
     GetWindowRect(parent_hwnd, &parent_rect);
+    TE_DebugTraceFmt("[TE-DBG] DComp: parent rect l=%ld t=%ld r=%ld b=%ld\n",
+                     parent_rect.left, parent_rect.top, parent_rect.right, parent_rect.bottom);
     
     g_overlay_hwnd = CreateWindowExW(
-        WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+        WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE,
         wc.lpszClassName, L"",
-        WS_POPUP | WS_VISIBLE,
-        parent_rect.left, parent_rect.top,
+        WS_CHILD | WS_VISIBLE,
+        0, 0,
         parent_rect.right - parent_rect.left, parent_rect.bottom - parent_rect.top,
         parent_hwnd, NULL, wc.hInstance, NULL
     );
+    TE_DebugTraceFmt("[TE-DBG] DComp: CreateWindowExW overlay=0x%p err=%lu\n", (void*)g_overlay_hwnd, GetLastError());
     if (!g_overlay_hwnd) {
         HRESULT hr = HRESULT_FROM_WIN32(GetLastError());
         TE_LogWrite(TE_LOG_ERROR, "Overlay CreateWindowExW failed with hr=0x%08X", hr);
         return hr;
     }
     SetLayeredWindowAttributes(g_overlay_hwnd, 0, 255, LWA_ALPHA);
+    TE_DebugTrace("[TE-DBG] DComp: SetLayeredWindowAttributes complete\n");
 
     // D3D11 Init with WARP fallback
     UINT flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
     HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, flags, nullptr, 0, D3D11_SDK_VERSION, &g_d3dDevice, nullptr, nullptr);
+    TE_DebugTraceFmt("[TE-DBG] DComp: D3D11 hardware returned hr=0x%08X\n", (unsigned int)hr);
     if (FAILED(hr)) {
         hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, flags, nullptr, 0, D3D11_SDK_VERSION, &g_d3dDevice, nullptr, nullptr);
+        TE_DebugTraceFmt("[TE-DBG] DComp: D3D11 WARP returned hr=0x%08X\n", (unsigned int)hr);
     }
     if (FAILED(hr)) {
         TE_LogWrite(TE_LOG_ERROR, "D3D11CreateDevice failed with hr=0x%08X", hr);
@@ -64,6 +72,7 @@ HRESULT TE_DcompInit(HWND parent_hwnd)
 
     ComPtr<IDXGIDevice> dxgiDevice;
     hr = g_d3dDevice.As(&dxgiDevice);
+    TE_DebugTraceFmt("[TE-DBG] DComp: Query IDXGIDevice returned hr=0x%08X\n", (unsigned int)hr);
     if (FAILED(hr)) {
         TE_LogWrite(TE_LOG_ERROR, "Query IDXGIDevice failed with hr=0x%08X", hr);
         TE_DcompShutdown();
@@ -72,6 +81,7 @@ HRESULT TE_DcompInit(HWND parent_hwnd)
 
     // DComp Init
     hr = DCompositionCreateDevice(dxgiDevice.Get(), IID_PPV_ARGS(&g_dcompDevice));
+    TE_DebugTraceFmt("[TE-DBG] DComp: DCompositionCreateDevice returned hr=0x%08X\n", (unsigned int)hr);
     if (FAILED(hr)) {
         TE_LogWrite(TE_LOG_ERROR, "DCompositionCreateDevice failed with hr=0x%08X", hr);
         TE_DcompShutdown();
@@ -79,6 +89,7 @@ HRESULT TE_DcompInit(HWND parent_hwnd)
     }
 
     hr = g_dcompDevice->CreateTargetForHwnd(g_overlay_hwnd, TRUE, &g_dcompTarget);
+    TE_DebugTraceFmt("[TE-DBG] DComp: CreateTargetForHwnd returned hr=0x%08X\n", (unsigned int)hr);
     if (FAILED(hr)) {
         TE_LogWrite(TE_LOG_ERROR, "CreateTargetForHwnd failed with hr=0x%08X", hr);
         TE_DcompShutdown();
@@ -86,6 +97,7 @@ HRESULT TE_DcompInit(HWND parent_hwnd)
     }
 
     hr = g_dcompDevice->CreateVisual(&g_dcompRoot);
+    TE_DebugTraceFmt("[TE-DBG] DComp: CreateVisual root returned hr=0x%08X\n", (unsigned int)hr);
     if (FAILED(hr)) {
         TE_LogWrite(TE_LOG_ERROR, "CreateVisual for root failed with hr=0x%08X", hr);
         TE_DcompShutdown();
@@ -120,6 +132,7 @@ HRESULT TE_DcompInit(HWND parent_hwnd)
     }
 
     g_dcompDevice->Commit();
+    TE_DebugTrace("[TE-DBG] DComp: Init complete after Commit\n");
     return S_OK;
 }
 
@@ -144,6 +157,7 @@ HRESULT TE_DcompUpdateVisuals(TE_IconHoverState* state)
 
 void TE_DcompShutdown(void)
 {
+    TE_DebugTraceFmt("[TE-DBG] DComp: Shutdown entering overlay=0x%p\n", (void*)g_overlay_hwnd);
     if (g_dcompDevice && g_dcompTarget) {
         g_dcompTarget->SetRoot(nullptr);
         g_dcompDevice->Commit();
@@ -165,4 +179,5 @@ void TE_DcompShutdown(void)
         g_overlay_hwnd = NULL;
     }
     UnregisterClassW(L"TE_IconHoverOverlay", GetModuleHandleW(NULL));
+    TE_DebugTrace("[TE-DBG] DComp: Shutdown complete\n");
 }

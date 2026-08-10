@@ -9,12 +9,22 @@ extern "C" HRESULT TE_VDesktopNotifyStart(TE_EventEntry* event_table, uint32_t* 
 {
     if (!event_table || !sub_count) return E_POINTER;
 
+    /* Explorer's UI thread already has a COM apartment initialized.
+     * We call CoInitializeEx only to ensure COM is available, but we must
+     * NEVER call CoUninitialize — we do not own Explorer's apartment.
+     * S_FALSE = already initialized (expected), RPC_E_CHANGED_MODE = different
+     * mode (also OK — we just use the existing apartment). */
     HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-    if (SUCCEEDED(hr)) {
-        g_com_initialized = true;
-    } else if (hr != RPC_E_CHANGED_MODE) {
+    if (FAILED(hr) && hr != RPC_E_CHANGED_MODE) {
         return hr;
     }
+    /* If we got S_OK (we were the first to init), balance it immediately
+     * so our shutdown does not tear down Explorer's COM. We already have
+     * a reference from Explorer's own initialization. */
+    if (hr == S_OK) {
+        CoUninitialize();
+    }
+    g_com_initialized = false; /* Never uninitialize on our shutdown */
 
     g_event_table = event_table;
     g_sub_count = sub_count;

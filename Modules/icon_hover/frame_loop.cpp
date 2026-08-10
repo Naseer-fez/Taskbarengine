@@ -4,6 +4,7 @@
 #include <dwmapi.h>
 #include <windows.h>
 #include <sdk/te_log.h>
+#include <sdk/te_debug_trace.h>
 #include <sdk/te_easing.h>
 #include <math.h>
 
@@ -167,6 +168,7 @@ static void CALLBACK FrameLoopCallback(PVOID lpParam, BOOLEAN TimerOrWaitFired)
 
 HRESULT TE_FrameLoopStart(TE_IconHoverState* state)
 {
+    TE_DebugTraceFmt("[TE-DBG] FrameLoop: Start entering state=0x%p running=%ld\n", (void*)state, g_running);
     if (g_running) return S_OK;
 
     g_state = state;
@@ -191,6 +193,7 @@ HRESULT TE_FrameLoopStart(TE_IconHoverState* state)
      * ensures 0% idle CPU per design_decisions.md. */
     g_timer_active = 0;
 
+    TE_DebugTrace("[TE-DBG] FrameLoop: Start complete, timer idle until mouse move\n");
     return S_OK;
 }
 
@@ -200,6 +203,7 @@ void TE_FrameLoopActivate(void)
 
     /* Only create the timer if it's not already active */
     if (InterlockedCompareExchange(&g_timer_active, 1, 0) == 0) {
+        TE_DebugTrace("[TE-DBG] FrameLoop: Activating timer\n");
         if (!CreateTimerQueueTimer(&g_timer, g_timer_queue, FrameLoopCallback,
                                    NULL, 0, 16, WT_EXECUTEDEFAULT)) {
             InterlockedExchange(&g_timer_active, 0);
@@ -216,6 +220,7 @@ void TE_FrameLoopDeactivate(void)
 
 void TE_FrameLoopStop(void)
 {
+    TE_DebugTraceFmt("[TE-DBG] FrameLoop: Stop entering running=%ld\n", g_running);
     if (!g_running) return;
     
     g_running = 0;
@@ -235,6 +240,7 @@ void TE_FrameLoopStop(void)
     g_timer_queue = NULL;
     g_stop_event = NULL;
     g_state = nullptr;
+    TE_DebugTrace("[TE-DBG] FrameLoop: Stop complete\n");
 }
 
 void TE_FrameLoopUpdateMouse(int x, int y)

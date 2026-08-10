@@ -5,6 +5,7 @@ add_library(te_sdk STATIC
     src/te_dpi.c
     src/te_easing.c
     src/te_ipc.c
+    src/te_debug_trace.c
     ${CMAKE_SOURCE_DIR}/ThirdParty/cJSON/cJSON.c
 )
 

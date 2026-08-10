@@ -4,7 +4,9 @@
 #include "scheduler.h"
 #include <sdk/te_types.h>
 #include <sdk/te_log.h>
+#include <sdk/te_debug_trace.h>
 #include <stdio.h>
+#include <string.h>
 #include <wchar.h>
 #include <tlhelp32.h>
 #include <windows.h>
@@ -48,8 +50,10 @@ static HRESULT InstallEngineHook(void* context)
         }
         g_engine_dll = LoadLibraryExW(dll_path, NULL, LOAD_WITH_ALTERED_SEARCH_PATH);
         if (!g_engine_dll) {
+            char dbg[256]; sprintf(dbg, "[TE-DBG] App: LoadLibraryExW failed err=%lu\n", GetLastError()); TE_DebugTrace(dbg);
             return HRESULT_FROM_WIN32(GetLastError());
         }
+        TE_DebugTrace("[TE-DBG] App: EngineDLL.dll loaded successfully\n");
     }
 
     if (g_hook) {
@@ -59,16 +63,41 @@ static HRESULT InstallEngineHook(void* context)
 
     HOOKPROC_FUNC hook_proc = (HOOKPROC_FUNC)GetProcAddress(g_engine_dll, "TE_CbtHookProc");
     if (!hook_proc) {
+        TE_DebugTrace("[TE-DBG] App: GetProcAddress for TE_CbtHookProc failed\n");
         return HRESULT_FROM_WIN32(GetLastError());
     }
 
-    DWORD tid = 0;
     HWND taskbar = FindWindowW(L"Shell_TrayWnd", NULL);
-    if (taskbar) {
-        tid = GetWindowThreadProcessId(taskbar, NULL);
+    if (!taskbar) {
+        /* Shell_TrayWnd not found yet.  Do NOT install a global hook (tid=0)
+         * because that injects EngineDLL into every process on the desktop,
+         * destabilizes XAML island startup, and causes Shell_TrayWnd to be
+         * silently destroyed.  Return E_PENDING so the caller retries later. */
+        TE_DebugTrace("[TE-DBG] App: Shell_TrayWnd not found, REFUSING to install global hook\n");
+        return E_PENDING;
+    }
+
+    DWORD tid = GetWindowThreadProcessId(taskbar, NULL);
+    if (tid == 0) {
+        TE_DebugTrace("[TE-DBG] App: GetWindowThreadProcessId returned 0, REFUSING hook\n");
+        return E_FAIL;
+    }
+    {
+        char dbg[256]; sprintf(dbg, "[TE-DBG] App: InstallEngineHook taskbar=0x%p tid=%lu\n", (void*)taskbar, (unsigned long)tid); TE_DebugTrace(dbg);
     }
 
     g_hook = SetWindowsHookExW(WH_CBT, hook_proc, g_engine_dll, tid);
+    if (g_hook != NULL) {
+        /* Post a harmless WM_NULL message to the taskbar window to force
+         * Explorer's message queue to process a CBT event (HCBT_QS).
+         * This instantly triggers TE_CbtHookProc and injects EngineDLL.dll
+         * without waiting for the user to interact with a window. */
+        PostMessageW(taskbar, WM_NULL, 0, 0);
+        SendNotifyMessageW(taskbar, WM_NULL, 0, 0);
+    }
+    {
+        char dbg[256]; sprintf(dbg, "[TE-DBG] App: SetWindowsHookExW result hook=0x%p err=%lu\n", (void*)g_hook, GetLastError()); TE_DebugTrace(dbg);
+    }
     return g_hook ? S_OK : HRESULT_FROM_WIN32(GetLastError());
 }
 
@@ -111,12 +140,18 @@ static LRESULT CALLBACK HiddenWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
 
         case WM_TIMER:
             if (wParam == REHOOK_TIMER_ID) {
+                TE_DebugTrace("[TE-DBG] App: REHOOK_TIMER fired, reinstalling hook\n");
                 KillTimer(hwnd, REHOOK_TIMER_ID);
-                InstallEngineHook(NULL);
-                DWORD pid = FindExplorerPid();
-                if (pid != 0) {
-                    TE_CrashRecoveryStop();
-                    TE_CrashRecoveryStart(hwnd, pid, InstallEngineHook, NULL);
+                HRESULT hr = InstallEngineHook(NULL);
+                if (hr == E_PENDING) {
+                    TE_DebugTrace("[TE-DBG] App: Taskbar still pending, retrying in 500ms\n");
+                    SetTimer(hwnd, REHOOK_TIMER_ID, 500, NULL);
+                } else if (SUCCEEDED(hr)) {
+                    DWORD pid = FindExplorerPid();
+                    if (pid != 0) {
+                        TE_CrashRecoveryStop();
+                        TE_CrashRecoveryStart(hwnd, pid, InstallEngineHook, NULL);
+                    }
                 }
                 return 0;
             }
@@ -124,6 +159,7 @@ static LRESULT CALLBACK HiddenWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
 
         default:
             if (msg == g_taskbar_created_msg) {
+                TE_DebugTrace("[TE-DBG] App: TaskbarCreated message received\n");
                 /* Delay re-hooking by 500ms to let Explorer's XAML taskbar
                  * complete its startup layout before we subclass it. */
                 SetTimer(hwnd, REHOOK_TIMER_ID, 500, NULL);
@@ -160,14 +196,18 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
 
     HWND hwnd = CreateWindowExW(0, L"TaskbarEngine_HiddenWnd", L"TaskbarEngine Tray Host", 0, 0, 0, 0, 0, HWND_MESSAGE, NULL, hInstance, NULL);
     if (hwnd == NULL) {
-        OutputDebugStringA("[TaskbarEngine Tray] FATAL: CreateWindowExW for hidden window returned NULL\n");
+        TE_DebugTrace("[TaskbarEngine Tray] FATAL: CreateWindowExW for hidden window returned NULL\n");
         return 1;
     }
 
-    if (FAILED(InstallEngineHook(NULL))) {
-        OutputDebugStringA("[TaskbarEngine Tray] Failed to install EngineDLL WH_CBT hook\n");
+    HRESULT hook_hr = InstallEngineHook(NULL);
+    if (SUCCEEDED(hook_hr)) {
+        TE_DebugTrace("[TaskbarEngine Tray] SetWindowsHookEx WH_CBT successfully installed\n");
+    } else if (hook_hr == E_PENDING) {
+        TE_DebugTrace("[TaskbarEngine Tray] Taskbar not ready, scheduling retry in 500ms\n");
+        SetTimer(hwnd, REHOOK_TIMER_ID, 500, NULL);
     } else {
-        OutputDebugStringA("[TaskbarEngine Tray] SetWindowsHookEx WH_CBT successfully installed\n");
+        TE_DebugTrace("[TaskbarEngine Tray] Failed to install EngineDLL WH_CBT hook\n");
     }
 
     HICON app_icon = LoadIconW(hInstance, MAKEINTRESOURCEW(IDI_APPICON));
