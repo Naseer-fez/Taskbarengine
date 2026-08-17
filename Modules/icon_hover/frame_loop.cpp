@@ -21,24 +21,6 @@ static int g_frame_index = 0;
 static int g_frame_count_total = 0;
 static LARGE_INTEGER g_last_frame_qpc = {};
 
-/**
- * @brief Deactivates the frame loop timer from a non-callback context.
- *
- * Deletes the repeating timer so the callback no longer fires.
- * Called when mouse leaves taskbar and settle animation completes.
- * Thread-safe via InterlockedCompareExchange guard.
- */
-static void FrameLoopDeactivateTimer(void)
-{
-    if (InterlockedCompareExchange(&g_timer_active, 0, 1) == 1) {
-        if (g_timer_queue && g_timer) {
-            DeleteTimerQueueTimer(g_timer_queue, g_timer, INVALID_HANDLE_VALUE);
-            g_timer = NULL;
-        }
-        g_last_frame_qpc.QuadPart = 0;
-    }
-}
-
 static void CALLBACK FrameLoopCallback(PVOID lpParam, BOOLEAN TimerOrWaitFired)
 {
     (void)lpParam;
@@ -47,6 +29,18 @@ static void CALLBACK FrameLoopCallback(PVOID lpParam, BOOLEAN TimerOrWaitFired)
     if (!g_state || !g_running) return;
 
     if (WaitForSingleObject(g_stop_event, 0) == WAIT_OBJECT_0) {
+        return;
+    }
+
+    POINT pt;
+    if (!GetCursorPos(&pt)) return;
+
+    bool in_taskbar = PtInRect(&g_state->taskbar_rect, pt);
+    bool is_settling = (g_state->settling == 1);
+
+    /* If mouse is outside taskbar and not settling, idle sleep for 30ms to maintain ~0% CPU */
+    if (!in_taskbar && !g_state->was_in_taskbar && !is_settling) {
+        Sleep(30);
         return;
     }
 
@@ -72,10 +66,18 @@ static void CALLBACK FrameLoopCallback(PVOID lpParam, BOOLEAN TimerOrWaitFired)
             float fps = (avg_ms > 0.0f) ? (1000.0f / avg_ms) : 0.0f;
 
             if (g_state->ctx.publish_state) {
-                StateValue v_fps = { TE_STATE_TYPE_FLOAT, .value = { .f = fps } };
-                StateValue v_avg = { TE_STATE_TYPE_FLOAT, .value = { .f = avg_ms } };
-                StateValue v_min = { TE_STATE_TYPE_FLOAT, .value = { .f = min_ms } };
-                StateValue v_max = { TE_STATE_TYPE_FLOAT, .value = { .f = max_ms } };
+                StateValue v_fps;
+                v_fps.type = TE_STATE_TYPE_FLOAT;
+                v_fps.value.f = fps;
+                StateValue v_avg;
+                v_avg.type = TE_STATE_TYPE_FLOAT;
+                v_avg.value.f = avg_ms;
+                StateValue v_min;
+                v_min.type = TE_STATE_TYPE_FLOAT;
+                v_min.value.f = min_ms;
+                StateValue v_max;
+                v_max.type = TE_STATE_TYPE_FLOAT;
+                v_max.value.f = max_ms;
                 g_state->ctx.publish_state("perf.fps", &v_fps);
                 g_state->ctx.publish_state("perf.avg_ms", &v_avg);
                 g_state->ctx.publish_state("perf.min_ms", &v_min);
@@ -85,29 +87,9 @@ static void CALLBACK FrameLoopCallback(PVOID lpParam, BOOLEAN TimerOrWaitFired)
     }
     g_last_frame_qpc = now_qpc;
 
-    POINT pt;
-    if (!GetCursorPos(&pt)) return;
-
-    bool in_taskbar = PtInRect(&g_state->taskbar_rect, pt);
-    bool is_settling = (g_state->settling == 1);
-
-    /* If mouse is outside taskbar and settle is complete, deactivate the timer.
-     * This achieves true 0% idle CPU when user is not interacting. */
-    if (!in_taskbar && !g_state->was_in_taskbar && !is_settling) {
-        /* The settle animation already completed, so the timer can return to
-         * its true-idle state.  A transition from inside to outside must run
-         * the settle path below first. */
-        FrameLoopDeactivateTimer();
-        return;
-    }
-
     /* Wait for vsync when active */
     DwmFlush();
 
-    /* Exclusive lock used intentionally: callback both reads icons[] (shared with
-     * shell hook) and writes per-frame arrays (scales, displaced_x/y). Splitting
-     * into shared reads + separate mutable state is a future optimization if
-     * profiling shows contention. See AGENTS.md §6. */
     AcquireSRWLockExclusive(&g_state->icon_lock);
 
     int count = g_state->icon_count;
@@ -139,9 +121,8 @@ static void CALLBACK FrameLoopCallback(PVOID lpParam, BOOLEAN TimerOrWaitFired)
                                 count, (float)g_state->radius, g_state->max_scale, g_state->curve);
         QueryPerformanceCounter(&g_state->settle_start_qpc);
     } else if (is_settling) {
-        LARGE_INTEGER now, freq;
+        LARGE_INTEGER now;
         QueryPerformanceCounter(&now);
-        QueryPerformanceFrequency(&freq);
         float elapsed_ms = (float)(now.QuadPart - g_state->settle_start_qpc.QuadPart) * 1000.0f / (float)freq.QuadPart;
         
         float progress = elapsed_ms / (float)(g_state->speed_ms > 0 ? g_state->speed_ms : 150);
@@ -188,34 +169,29 @@ HRESULT TE_FrameLoopStart(TE_IconHoverState* state)
     }
 
     g_running = 1;
-    /* Timer is NOT started here — it will be activated on-demand when the
-     * mouse enters the taskbar region via TE_FrameLoopActivate(). This
-     * ensures 0% idle CPU per design_decisions.md. */
-    g_timer_active = 0;
+    g_timer_active = 1;
+    if (!CreateTimerQueueTimer(&g_timer, g_timer_queue, FrameLoopCallback, NULL, 0, 16, WT_EXECUTEDEFAULT)) {
+        g_running = 0;
+        g_timer_active = 0;
+        CloseHandle(g_stop_event);
+        g_stop_event = NULL;
+        DeleteTimerQueueEx(g_timer_queue, INVALID_HANDLE_VALUE);
+        g_timer_queue = NULL;
+        g_state = nullptr;
+        return HRESULT_FROM_WIN32(GetLastError());
+    }
 
-    TE_DebugTrace("[TE-DBG] FrameLoop: Start complete, timer idle until mouse move\n");
+    TE_DebugTrace("[TE-DBG] FrameLoop: Start complete, active loop running\n");
     return S_OK;
 }
 
 void TE_FrameLoopActivate(void)
 {
-    if (!g_running || !g_timer_queue) return;
-
-    /* Only create the timer if it's not already active */
-    if (InterlockedCompareExchange(&g_timer_active, 1, 0) == 0) {
-        TE_DebugTrace("[TE-DBG] FrameLoop: Activating timer\n");
-        if (!CreateTimerQueueTimer(&g_timer, g_timer_queue, FrameLoopCallback,
-                                   NULL, 0, 16, WT_EXECUTEDEFAULT)) {
-            InterlockedExchange(&g_timer_active, 0);
-            TE_LogWrite(TE_LOG_ERROR, "FrameLoopActivate: failed to create timer (err=%lu)",
-                        GetLastError());
-        }
-    }
+    // Frame loop runs continuously with 30ms idle sleep when outside taskbar
 }
 
 void TE_FrameLoopDeactivate(void)
 {
-    FrameLoopDeactivateTimer();
 }
 
 void TE_FrameLoopStop(void)
@@ -226,11 +202,7 @@ void TE_FrameLoopStop(void)
     g_running = 0;
     SetEvent(g_stop_event);
 
-    /* Deactivate first (deletes the repeating timer) */
-    FrameLoopDeactivateTimer();
-
     if (g_timer_queue) {
-        /* INVALID_HANDLE_VALUE = wait for all callbacks to complete */
         DeleteTimerQueueEx(g_timer_queue, INVALID_HANDLE_VALUE);
     }
     

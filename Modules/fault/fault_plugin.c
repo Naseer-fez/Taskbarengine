@@ -6,7 +6,8 @@ static const PluginMetadata G_METADATA = {
     "1.0.0",
     "TaskbarEngine",
     "Faulting plugin for SEH testing",
-    998
+    998,
+    { 0, 0 }
 };
 
 static HRESULT FaultInitialize(const PluginContext* ctx)

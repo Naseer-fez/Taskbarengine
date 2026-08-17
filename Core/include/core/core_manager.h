@@ -8,6 +8,17 @@ extern "C" {
 
 /**
  * @brief Opaque structure representing internal Core Manager state.
+ *
+ * ## Ownership & Threading Model
+ * - **Singleton Instance**: A single heap-allocated `TE_CoreState` instance is created
+ *   per injected Explorer process during Phase A and freed during Shutdown.
+ * - **Thread Affinity**: Core manager initialization and state mutations execute
+ *   strictly on Explorer's main UI thread (the message pump owning `Shell_TrayWnd`).
+ * - **Lifecycle**:
+ *   1. `TE_CoreManagerInitPhaseA`: Allocates state, initializes event tables, installs subclass.
+ *   2. `TE_CoreManagerInitPhaseB`: Triggered via `WM_TE_INIT` outside loader lock; loads config,
+ *      message filters, timers, scans plugins, and enables active plugins.
+ *   3. `TE_CoreManagerShutdown`: Tears down timers, watchers, plugins, subclass, and frees state.
  */
 typedef struct TE_CoreState TE_CoreState;
 
@@ -15,12 +26,14 @@ typedef struct TE_CoreState TE_CoreState;
  * @brief Initialize the Core Manager Phase A: allocate state, subclass taskbar.
  * @param hinstance Engine DLL module instance handle.
  * @return S_OK on success, or failure HRESULT.
+ * @note Must be called on the UI thread owning Shell_TrayWnd.
  */
 HRESULT TE_CoreManagerInitPhaseA(HINSTANCE hinstance);
 
 /**
  * @brief Initialize the Core Manager Phase B: config, watcher, plugins, IPC.
  * @return S_OK on success, or failure HRESULT.
+ * @note Executed outside loader lock in response to deferred WM_TE_INIT message.
  */
 HRESULT TE_CoreManagerInitPhaseB(void);
 

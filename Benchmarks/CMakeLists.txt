@@ -1,3 +1,6 @@
+add_executable(bench_system bench_system.cpp)
+target_link_libraries(bench_system PRIVATE user32 psapi)
+
 include(FetchContent)
 
 if(MINGW)
@@ -40,8 +43,4 @@ target_link_libraries(te_benchmarks PRIVATE
     benchmark::benchmark
     benchmark::benchmark_main
     te_sdk
-    ole32
 )
-
-add_executable(bench_system bench_system.cpp)
-target_link_libraries(bench_system user32)

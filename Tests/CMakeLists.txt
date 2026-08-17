@@ -28,11 +28,16 @@ add_executable(te_tests
     test_icon_layout.cpp
     test_settings_generation.cpp
     test_config_roundtrip.cpp
+    test_msg_filter.cpp
+    test_timer.cpp
+    test_stability.cpp
     ${CMAKE_SOURCE_DIR}/Core/src/config.c
     ${CMAKE_SOURCE_DIR}/Core/src/event_dispatch.c
     ${CMAKE_SOURCE_DIR}/Core/src/plugin_loader.c
     ${CMAKE_SOURCE_DIR}/Core/src/fault_isolation.c
     ${CMAKE_SOURCE_DIR}/Core/src/state_store.c
+    ${CMAKE_SOURCE_DIR}/Core/src/te_msg_filter.c
+    ${CMAKE_SOURCE_DIR}/Core/src/te_timer.c
     ${CMAKE_SOURCE_DIR}/Modules/taskbar_resize/taskbar_resize.c
     ${CMAKE_SOURCE_DIR}/Modules/icon_hover/magnification.c
     ${CMAKE_SOURCE_DIR}/Modules/icon_hover/icon_layout.c

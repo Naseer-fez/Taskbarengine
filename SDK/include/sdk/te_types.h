@@ -23,7 +23,7 @@ extern "C" {
 /**
  * @brief API version macro for ABI backwards compatibility checks.
  */
-#define TE_API_VERSION 1
+#define TE_API_VERSION 2
 
 /**
  * @brief HRESULT validation macros.

@@ -1,12 +1,20 @@
 param (
     [string]$Configuration = "Release",
-    [string]$Version = "1.0.0"
+    [string]$Version = "1.0.0",
+    [string]$BuildDir = "build_msvc",
+    [string]$OutDir = "",
+    [string]$DestinationZip = "D:\TaskbarEngine-v1.0.0.zip"
 )
 
-$OutDir = "TaskbarEngine-v$Version"
-if (Test-Path $OutDir) { Remove-Item -Recurse -Force $OutDir }
-New-Item -ItemType Directory -Path $OutDir | Out-Null
-New-Item -ItemType Directory -Path "$OutDir\Modules" | Out-Null
+if ([string]::IsNullOrWhiteSpace($OutDir)) {
+    $StagingDir = "$BuildDir\package_staging"
+} else {
+    $StagingDir = $OutDir
+}
+
+if (Test-Path $StagingDir) { Remove-Item -Recurse -Force $StagingDir }
+New-Item -ItemType Directory -Path $StagingDir | Out-Null
+New-Item -ItemType Directory -Path "$StagingDir\Modules" | Out-Null
 
 $FilesToPackage = @(
     @{ Name = "TaskbarEngine.exe"; Dest = "" },
@@ -18,19 +26,42 @@ $FilesToPackage = @(
 
 foreach ($item in $FilesToPackage) {
     # Search for the file in the build directory
-    $file = Get-ChildItem -Path "build" -Filter $item.Name -Recurse | Where-Object { $_.FullName -like "*$Configuration*" -or $_.FullName -like "*\bin\*" } | Select-Object -First 1
+    $file = Get-ChildItem -Path $BuildDir -Filter $item.Name -Recurse | Where-Object { $_.FullName -like "*\bin\*" -or $_.FullName -like "*$Configuration*" } | Select-Object -First 1
     if ($file) {
-        Copy-Item $file.FullName -Destination "$OutDir\$($item.Dest)"
+        Copy-Item $file.FullName -Destination "$StagingDir\$($item.Dest)" -Force
     } else {
         Write-Warning "File not found: $($item.Name)"
     }
 }
 
-Copy-Item "Config\default_config.jsonc" -Destination "$OutDir\config.jsonc"
-Copy-Item "Scripts\uninstall.ps1" -Destination $OutDir
-Copy-Item "LICENSE" -Destination $OutDir
-Copy-Item "README.md" -Destination $OutDir
-Copy-Item "Docs" -Destination "$OutDir\Docs" -Recurse
+# Copy all self-contained Windows App SDK runtime DLLs, PRIs, and dependencies from bin
+$binDir = "$BuildDir\bin"
+if (Test-Path $binDir) {
+    Get-ChildItem -Path $binDir -File | Where-Object { 
+        $_.Extension -in @(".dll", ".pri", ".xbf") -and 
+        $_.Name -notin @("EngineDLL.dll", "taskbar_resize.dll", "icon_hover.dll")
+    } | ForEach-Object {
+        Copy-Item $_.FullName -Destination $StagingDir -Force
+    }
 
-Compress-Archive -Path "$OutDir\*" -DestinationPath "${OutDir}.zip" -Force
-Write-Host "Created ${OutDir}.zip successfully." -ForegroundColor Green
+    if (Test-Path "$binDir\Microsoft.UI.Xaml") {
+        Copy-Item "$binDir\Microsoft.UI.Xaml" -Destination "$StagingDir\Microsoft.UI.Xaml" -Recurse -Force
+    }
+}
+
+Copy-Item "Config\default_config.jsonc" -Destination "$StagingDir\config.jsonc" -Force
+Copy-Item "Scripts\uninstall.ps1" -Destination $StagingDir -Force
+Copy-Item "LICENSE" -Destination $StagingDir -Force
+Copy-Item "README.md" -Destination $StagingDir -Force
+Copy-Item "Docs" -Destination "$StagingDir\Docs" -Recurse -Force
+
+try {
+    if (Test-Path $DestinationZip) { Remove-Item -Force $DestinationZip -ErrorAction Stop }
+    Compress-Archive -Path "$StagingDir\*" -DestinationPath $DestinationZip -Force
+    Write-Host "Created $DestinationZip successfully." -ForegroundColor Green
+} catch {
+    $fallbackZip = "$([System.IO.Path]::GetDirectoryName($DestinationZip))\TaskbarEngine-v$Version-latest.zip"
+    if (Test-Path $fallbackZip) { Remove-Item -Force $fallbackZip -ErrorAction SilentlyContinue }
+    Compress-Archive -Path "$StagingDir\*" -DestinationPath $fallbackZip -Force
+    Write-Host "Created $fallbackZip successfully." -ForegroundColor Green
+}

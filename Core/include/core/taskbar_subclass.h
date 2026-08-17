@@ -60,6 +60,16 @@ typedef struct TE_IpcSyncPayload {
 
 /**
  * @brief Install window subclass on Shell_TrayWnd to intercept WM messages and dispatch events.
+ *
+ * ## Ownership & Threading Model
+ * - Installed via `comctl32!SetWindowSubclass` with ID `TASKBAR_SUBCLASS_ID` ('TESB').
+ * - `g_subclass_ref` holds non-owning pointers to the Core Manager's event dispatch
+ *   table, subscription count, and `TE_CoreState` instance.
+ * - All messages intercepted by `TaskbarSubclassProc` execute synchronously on Explorer's
+ *   UI thread.
+ * - Re-entrancy guard `g_in_geometry_dispatch` prevents recursive feedback loops
+ *   when plugins alter taskbar geometry via `SetWindowPos(SWP_FRAMECHANGED)`.
+ *
  * @param taskbar_hwnd Handle of Shell_TrayWnd taskbar window.
  * @param event_table Event subscription table array.
  * @param sub_count Pointer to event subscription count.
@@ -70,6 +80,7 @@ HRESULT TE_TaskbarSubclassInstall(HWND taskbar_hwnd, TE_EventEntry* event_table,
 
 /**
  * @brief Remove window subclass from Shell_TrayWnd window.
+ *
  * @param taskbar_hwnd Handle of Shell_TrayWnd taskbar window.
  */
 void TE_TaskbarSubclassRemove(HWND taskbar_hwnd);

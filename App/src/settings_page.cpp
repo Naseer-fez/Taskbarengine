@@ -2,12 +2,15 @@
 #include "config_io.h"
 #include "gui_ipc_client.h"
 #include <cJSON.h>
+#include <winrt/Windows.Foundation.h>
+#include <winrt/Windows.Foundation.Collections.h>
 #include <winrt/Microsoft.UI.Xaml.Controls.Primitives.h>
 #include <winrt/Windows.UI.Text.h>
 #include <cmath>
 #include <vector>
 
 using namespace winrt;
+using namespace winrt::Windows::Foundation;
 using namespace winrt::Microsoft::UI::Xaml;
 using namespace winrt::Microsoft::UI::Xaml::Controls;
 
@@ -116,7 +119,7 @@ Page CreateSettingsPage(const std::string& plugin_name, const std::string& schem
                     else if (cJSON* def = cJSON_GetObjectItem(setting, "default")) val = def->valuedouble;
                     
                     num.Value(val);
-                    num.ValueChanged([plugin_name, key, type](NumberBox const& sender, NumberBoxValueChangedEventArgs const& args) {
+                    num.ValueChanged([plugin_name, key, type](NumberBox const&, NumberBoxValueChangedEventArgs const& args) {
                         if (std::isnan(args.NewValue())) return;
                         if (type == "int") {
                             SaveAndReload(plugin_name, key, cJSON_CreateNumber(std::round(args.NewValue())));

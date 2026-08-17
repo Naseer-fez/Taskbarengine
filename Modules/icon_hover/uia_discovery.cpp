@@ -1,5 +1,7 @@
-#include "uia_discovery.h"
+#include <windows.h>
+#include <objbase.h>
 #include <uiautomation.h>
+#include "uia_discovery.h"
 #include <wrl/client.h>
 #include <sdk/te_log.h>
 #include <sdk/te_debug_trace.h>

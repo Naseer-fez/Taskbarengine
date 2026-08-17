@@ -36,7 +36,8 @@ static const PluginMetadata g_metadata = {
     "0.3.0",
     "TaskbarEngine",
     "Resizes the Windows taskbar and restores it on disable.",
-    10
+    10,
+    { 22621, 26100 }
 };
 
 static const SettingDescriptor g_descriptors[] = {

@@ -29,7 +29,7 @@ static bool IpcSendUiCommand(HWND taskbar_hwnd, WPARAM command, LPARAM parameter
     DWORD_PTR local_result = 0;
     if (!taskbar_hwnd || !IsWindow(taskbar_hwnd)) return false;
 
-    BOOL sent = SendMessageTimeoutW(taskbar_hwnd, WM_TE_IPC_COMMAND, command, parameter,
+    LRESULT sent = SendMessageTimeoutW(taskbar_hwnd, WM_TE_IPC_COMMAND, command, parameter,
                                     SMTO_ABORTIFHUNG | SMTO_BLOCK, 2000, &local_result);
     if (result) *result = local_result;
     return sent != 0;

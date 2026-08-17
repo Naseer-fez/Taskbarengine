@@ -9,7 +9,8 @@ static const PluginMetadata G_METADATA = {
     "1.0.0",
     "TaskbarEngine",
     "Dummy plugin for Phase 2 end-to-end testing",
-    999
+    999,
+    { 0, 0 }
 };
 
 static const SettingDescriptor G_SETTINGS_DESCS[] = {

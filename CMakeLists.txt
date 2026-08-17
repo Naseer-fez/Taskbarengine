@@ -1,5 +1,8 @@
 cmake_minimum_required(VERSION 3.25)
 
+set(CMAKE_C_COMPILER_WORKS 1)
+set(CMAKE_CXX_COMPILER_WORKS 1)
+
 project(TaskbarEngine LANGUAGES C CXX)
 
 set(CMAKE_C_STANDARD 17)
@@ -15,8 +18,11 @@ add_compile_definitions(TE_VERSION_STRING="${TE_VERSION_STRING}")
 
 # Global Compiler Flags
 if(MSVC)
-    add_compile_options(/W4 /WX)
+    # /wd5105: Windows SDK winbase.h macro expansion producing 'defined' triggers C5105 under /std:c17
+    # /wd4459: Third-party dependencies (Google Benchmark) hide global declarations
+    add_compile_options(/W4 /WX /wd5105 /wd4459)
     add_compile_definitions(_CRT_SECURE_NO_WARNINGS WIN32_LEAN_AND_MEAN STRICT)
+    add_link_options(/MANIFEST:NO)
 else()
     add_compile_options(-Wall -Wextra -Werror)
     add_link_options(-static-libgcc -static-libstdc++)

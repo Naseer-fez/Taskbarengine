@@ -7,6 +7,11 @@ extern "C" {
 #endif
 
 /**
+ * @brief Checks if the current process is explorer.exe.
+ */
+bool TE_IsExplorerProcess(void);
+
+/**
  * @brief Sets the DLL HINSTANCE.
  */
 void TE_SetEngineInstance(HINSTANCE hinstance);

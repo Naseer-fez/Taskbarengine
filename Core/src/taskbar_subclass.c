@@ -3,6 +3,8 @@
 #include "core/core_manager.h"
 #include "core/shell_hook.h"
 #include "core/power_device.h"
+#include "core/te_msg_filter.h"
+#include "core/te_timer.h"
 #include <commctrl.h>
 #include <sdk/te_log.h>
 #include <sdk/te_debug_trace.h>
@@ -99,6 +101,11 @@ static LRESULT CALLBACK TaskbarSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam,
             return 0;
         }
 
+        case WM_TE_TIMER_FIRE: {
+            TE_TimerDispatchMessage(wParam, lParam);
+            return 0;
+        }
+
         case WM_TE_IPC_COMMAND: {
             TE_LogWrite(TE_LOG_INFO, "Taskbar subclass received WM_TE_IPC_COMMAND (cmd=%lu)", (unsigned long)wParam);
             if (wParam == TE_IPC_CMD_RELOAD_CONFIG) {
@@ -142,12 +149,14 @@ static LRESULT CALLBACK TaskbarSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam,
         }
 
         case WM_MOUSEMOVE: {
-            if (ref && ref->event_table && ref->sub_count) {
-                TE_TaskbarMouseEvent evt = { 0 };
-                evt.taskbar_hwnd = hWnd;
-                evt.x = (int)(short)LOWORD(lParam);
-                evt.y = (int)(short)HIWORD(lParam);
-                TE_EventDispatch(ref->event_table, *ref->sub_count, TE_EVENT_TASKBAR_MOUSE, &evt);
+            if (TE_MsgFilterHasSubscriber(WM_MOUSEMOVE)) {
+                if (ref && ref->event_table && ref->sub_count) {
+                    TE_TaskbarMouseEvent evt = { 0 };
+                    evt.taskbar_hwnd = hWnd;
+                    evt.x = (int)(short)LOWORD(lParam);
+                    evt.y = (int)(short)HIWORD(lParam);
+                    TE_EventDispatch(ref->event_table, *ref->sub_count, TE_EVENT_TASKBAR_MOUSE, &evt);
+                }
             }
             break;
         }

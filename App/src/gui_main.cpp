@@ -1,10 +1,9 @@
 #include <winrt/Windows.Foundation.h>
+#include <winrt/Windows.Foundation.Collections.h>
 #include <winrt/Microsoft.UI.Xaml.h>
 #include <winrt/Microsoft.UI.Xaml.Controls.h>
 #include <winrt/Microsoft.UI.Xaml.Hosting.h>
 #include <windows.h>
-#include <MddBootstrap.h>
-#include <WindowsAppSDK-VersionInfo.h>
 #include <string>
 #include <cJSON.h>
 #include "settings_page.h"
@@ -60,7 +59,7 @@ struct App : ApplicationT<App>
             }
         }
         
-        nav.SelectionChanged([this, contentFrame](NavigationView const& sender, NavigationViewSelectionChangedEventArgs const& args) {
+        nav.SelectionChanged([contentFrame](NavigationView const&, NavigationViewSelectionChangedEventArgs const& args) {
             auto item = args.SelectedItem().as<NavigationViewItem>();
             auto tag = unbox_value<hstring>(item.Tag());
             
@@ -109,17 +108,6 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
 {
     init_apartment(winrt::apartment_type::single_threaded);
 
-    HRESULT hr = MddBootstrapInitialize(
-        WINDOWSAPPSDK_RELEASE_MAJORMINOR,
-        WINDOWSAPPSDK_RELEASE_VERSION_SHORTTAG_W,
-        PACKAGE_VERSION{ 0 }
-    );
-    
-    if (FAILED(hr)) {
-        MessageBoxW(NULL, L"Failed to initialize Windows App SDK. Please install the Windows App SDK runtime.", L"TaskbarEngine", MB_ICONERROR);
-        return 1;
-    }
-
     try {
         winrt::Microsoft::UI::Xaml::Application::Start([](auto&&) {
             winrt::make<winrt::TaskbarEngine::App>();
@@ -130,6 +118,5 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
         MessageBoxW(NULL, L"Unknown WinUI 3 error occurred.", L"TaskbarEngine Error", MB_ICONERROR);
     }
 
-    MddBootstrapShutdown();
     return 0;
 }

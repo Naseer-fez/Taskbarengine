@@ -9,9 +9,12 @@
 #include "core/shell_hook.h"
 #include "core/power_device.h"
 #include "core/vdesktop_notify.h"
+#include "core/te_msg_filter.h"
+#include "core/te_timer.h"
 #include <sdk/te_log.h>
 #include <sdk/te_log_impl.h>
 #include <sdk/te_events.h>
+#include <sdk/te_version.h>
 #include "core/state_store.h"
 #include <sdk/te_debug_trace.h>
 #include <stdio.h>
@@ -37,6 +40,9 @@ static HRESULT CoreSubscribeWrapper(uint32_t event_type, EventCallbackFunc callb
     if (!g_core_state) return E_POINTER;
     uint32_t plugin_id = g_core_state->current_plugin_id;
     TE_PluginEntry* entry = (plugin_id > 0 && plugin_id <= g_core_state->plugin_count) ? &g_core_state->plugins[plugin_id - 1] : NULL;
+    if (event_type == TE_EVENT_TASKBAR_MOUSE) {
+        TE_MsgFilterSubscribe(plugin_id, WM_MOUSEMOVE);
+    }
     return TE_EventSubscribeEx(g_core_state->subscriptions, &g_core_state->subscription_count,
                                (TE_EventType)event_type, callback, user_data, plugin_id, entry);
 }
@@ -44,8 +50,41 @@ static HRESULT CoreSubscribeWrapper(uint32_t event_type, EventCallbackFunc callb
 static HRESULT CoreUnsubscribeWrapper(uint32_t event_type, EventCallbackFunc callback)
 {
     if (!g_core_state) return E_POINTER;
+    uint32_t plugin_id = g_core_state->current_plugin_id;
+    if (event_type == TE_EVENT_TASKBAR_MOUSE) {
+        TE_MsgFilterUnsubscribe(plugin_id, WM_MOUSEMOVE);
+    }
     return TE_EventUnsubscribe(g_core_state->subscriptions, &g_core_state->subscription_count,
                                (TE_EventType)event_type, callback);
+}
+
+static HRESULT CoreSubscribeMessageWrapper(UINT win_msg)
+{
+    if (!g_core_state) return E_POINTER;
+    uint32_t plugin_id = g_core_state->current_plugin_id;
+    return TE_MsgFilterSubscribe(plugin_id, win_msg);
+}
+
+static HRESULT CoreUnsubscribeMessageWrapper(UINT win_msg)
+{
+    if (!g_core_state) return E_POINTER;
+    uint32_t plugin_id = g_core_state->current_plugin_id;
+    return TE_MsgFilterUnsubscribe(plugin_id, win_msg);
+}
+
+static HRESULT CoreRegisterTimerWrapper(uint32_t interval_ms, BOOL recurring,
+                                        TE_TimerCallback callback, void* user_data)
+{
+    if (!g_core_state) return E_POINTER;
+    uint32_t plugin_id = g_core_state->current_plugin_id;
+    return TE_TimerCreate(callback, user_data, interval_ms, recurring, plugin_id, NULL);
+}
+
+static HRESULT CoreCancelTimerWrapper(TE_TimerCallback callback)
+{
+    if (!g_core_state) return E_POINTER;
+    uint32_t plugin_id = g_core_state->current_plugin_id;
+    return TE_TimerCancelByCallback(callback, plugin_id);
 }
 
 static void CoreRequestRedrawNoop(void) {}
@@ -121,8 +160,10 @@ HRESULT TE_CoreManagerInitPhaseB(void)
         wcsncpy(g_core_state->config_path, L"config.jsonc", MAX_PATH - 1);
     }
 
-    /* Initialize State Store */
+    /* Initialize State Store, Message Filter, and Timers */
     TE_StateStoreInit();
+    TE_MsgFilterInit();
+    TE_TimerInit(g_core_state->taskbar_hwnd);
 
     /* Initialize Logging */
     wchar_t log_dir[MAX_PATH];
@@ -137,6 +178,15 @@ HRESULT TE_CoreManagerInitPhaseB(void)
     }
 
     TE_LogWrite(TE_LOG_INFO, "Core Manager initializing Phase B...");
+
+    /* Detect and log Windows version */
+    TE_WindowsVersion win_ver = { 0 };
+    if (SUCCEEDED(TE_GetWindowsVersion(&win_ver))) {
+        TE_LogWrite(TE_LOG_INFO, "Windows Version detected: %u.%u (Build %u, Revision %u, Server=%d)",
+                    win_ver.major, win_ver.minor, win_ver.build, win_ver.revision, (int)win_ver.is_server);
+    } else {
+        TE_LogWrite(TE_LOG_WARN, "Failed to query Windows version via RtlGetVersion");
+    }
 
     /* Start other event sources now that we are outside CBT hook.
      * Keep RegisterShellHookWindow disabled for now: even with a helper HWND,
@@ -206,6 +256,7 @@ HRESULT TE_CoreManagerInitPhaseB(void)
 
         g_core_state->current_plugin_id = i + 1;
 
+        plugin->context->struct_size = sizeof(PluginContext);
         plugin->context->api_version = TE_API_VERSION;
         plugin->context->taskbar_hwnd = g_core_state->taskbar_hwnd;
         plugin->context->monitor = g_core_state->taskbar_hwnd ? MonitorFromWindow(g_core_state->taskbar_hwnd, MONITOR_DEFAULTTONEAREST) : NULL;
@@ -219,6 +270,26 @@ HRESULT TE_CoreManagerInitPhaseB(void)
         plugin->context->publish_state = CorePublishState;
         plugin->context->query_state = CoreQueryState;
         plugin->context->core_opaque = (void*)(uintptr_t)i;
+        plugin->context->subscribe_message = CoreSubscribeMessageWrapper;
+        plugin->context->unsubscribe_message = CoreUnsubscribeMessageWrapper;
+        plugin->context->register_timer = CoreRegisterTimerWrapper;
+        plugin->context->cancel_timer = CoreCancelTimerWrapper;
+
+        /* Check build compatibility */
+        plugin->compat_status = TE_COMPAT_OK;
+        if (plugin->metadata && win_ver.build > 0) {
+            uint32_t min_b = plugin->metadata->compatibility.min_build;
+            uint32_t max_b = plugin->metadata->compatibility.max_tested_build;
+            if (min_b > 0 && win_ver.build < min_b) {
+                plugin->compat_status = TE_COMPAT_UNSUPPORTED_BUILD;
+                TE_LogWrite(TE_LOG_WARN, "Plugin '%s' requires Windows build >= %u (current: %u) - skipping enable",
+                            plugin->metadata->name, min_b, win_ver.build);
+            } else if (max_b > 0 && win_ver.build > max_b) {
+                plugin->compat_status = TE_COMPAT_UNTESTED_BUILD;
+                TE_LogWrite(TE_LOG_WARN, "Plugin '%s' tested up to build %u running on newer build %u",
+                            plugin->metadata->name, max_b, win_ver.build);
+            }
+        }
 
         if (plugin->iface->Initialize) {
             TE_DebugTraceFmt("[TE-DBG] PhaseB: Calling Initialize for '%s'\n", plugin->metadata->name);
@@ -226,8 +297,8 @@ HRESULT TE_CoreManagerInitPhaseB(void)
             TE_DebugTraceFmt("[TE-DBG] PhaseB: Initialize returned for '%s'\n", plugin->metadata->name);
         }
 
-        /* Check enabled setting in config */
-        if (IsPluginEnabledInConfig(plugin->context->config)) {
+        /* Check enabled setting in config, only if compatibility check passed */
+        if (plugin->compat_status != TE_COMPAT_UNSUPPORTED_BUILD && IsPluginEnabledInConfig(plugin->context->config)) {
             TE_DebugTraceFmt("[TE-DBG] PhaseB: Enabling plugin '%s'\n", plugin->metadata->name);
             TE_PluginLoaderEnable(plugin);
             TE_DebugTraceFmt("[TE-DBG] PhaseB: Plugin '%s' Enable returned\n", plugin->metadata->name);
@@ -266,6 +337,13 @@ static void CoreManagerShutdownInternal(bool stop_ipc_server)
     TE_PowerDeviceStop();
     TE_VDesktopNotifyStop();
 
+    for (uint32_t i = 0; i < g_core_state->plugin_count; i++) {
+        TE_TimerCancelAllForPlugin(i + 1);
+        TE_MsgFilterUnsubscribeAll(i + 1);
+    }
+    TE_TimerShutdown();
+    TE_MsgFilterInit();
+
     TE_PluginLoaderUnloadAll(g_core_state->plugins, g_core_state->plugin_count);
 
     if (g_core_state->config_root) {
@@ -297,6 +375,18 @@ void TE_CoreManagerOnConfigChanged(void* core_state_ptr)
     if (!state) return;
 
     TE_LogWrite(TE_LOG_INFO, "Core Manager processing config hot-reload...");
+
+    /* File readability check: verify file is not locked by editor */
+    HANDLE hfile = CreateFileW(state->config_path, GENERIC_READ, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hfile == INVALID_HANDLE_VALUE) {
+        DWORD err = GetLastError();
+        if (err == ERROR_SHARING_VIOLATION || err == ERROR_LOCK_VIOLATION) {
+            TE_LogWrite(TE_LOG_WARN, "Config hot-reload: file locked by writer, skipping partial read");
+            return;
+        }
+    } else {
+        CloseHandle(hfile);
+    }
 
     cJSON* new_root = NULL;
     HRESULT hr = TE_ConfigLoad(state->config_path, &new_root);
@@ -332,9 +422,11 @@ void TE_CoreManagerOnConfigChanged(void* core_state_ptr)
         }
 
         const bool should_enable = IsPluginEnabledInConfig(new_sec);
-        if (should_enable && !plugin->enabled) {
+        if (should_enable && !plugin->enabled && plugin->compat_status != TE_COMPAT_UNSUPPORTED_BUILD) {
             TE_PluginLoaderEnable(plugin);
         } else if (!should_enable && plugin->enabled) {
+            TE_TimerCancelAllForPlugin(i + 1);
+            TE_MsgFilterUnsubscribeAll(i + 1);
             TE_PluginLoaderDisable(plugin);
         }
 
@@ -369,7 +461,15 @@ HRESULT TE_CoreManagerSetPluginEnabledByName(const char* plugin_name, bool enabl
     for (uint32_t i = 0; i < g_core_state->plugin_count; i++) {
         TE_PluginEntry* plugin = &g_core_state->plugins[i];
         if (plugin->metadata && plugin->metadata->name && strcmp(plugin->metadata->name, plugin_name) == 0) {
+            if (enabled && plugin->compat_status == TE_COMPAT_UNSUPPORTED_BUILD) {
+                TE_LogWrite(TE_LOG_WARN, "Cannot enable plugin '%s': incompatible with current Windows build", plugin_name);
+                return HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
+            }
             HRESULT hr = enabled ? TE_PluginLoaderEnable(plugin) : TE_PluginLoaderDisable(plugin);
+            if (SUCCEEDED(hr) && !enabled) {
+                TE_TimerCancelAllForPlugin(i + 1);
+                TE_MsgFilterUnsubscribeAll(i + 1);
+            }
             if (SUCCEEDED(hr) && enabled && plugin->enabled && plugin->context) {
                 TE_ConfigChangedEvent evt = { .new_config = plugin->context->config };
                 TE_EventDispatchTargeted(g_core_state->subscriptions, g_core_state->subscription_count,

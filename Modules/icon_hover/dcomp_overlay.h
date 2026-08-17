@@ -8,6 +8,7 @@ extern "C" {
 #endif
 
 HRESULT TE_DcompInit(HWND parent_hwnd);
+HRESULT TE_DcompLoadIconSurfaces(TE_IconHoverState* state);
 HRESULT TE_DcompUpdateVisuals(TE_IconHoverState* state);
 void TE_DcompShutdown(void);
 

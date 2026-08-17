@@ -31,7 +31,8 @@ static const PluginMetadata g_metadata = {
     "0.4.0",
     "TaskbarEngine",
     "Magnifies taskbar icons on hover using DirectComposition and smooth animation curves.",
-    100
+    100,
+    { 22621, 26100 }
 };
 
 static const char* g_curve_options[] = { "gaussian", "cubic", "linear", "cosine" };
@@ -219,6 +220,8 @@ static void CALLBACK DeferredInitTimerProc(HWND hwnd, UINT uMsg, UINT_PTR idEven
         TE_IconCaptureShutdown();
         return;
     }
+
+    TE_DcompLoadIconSurfaces(&g_state);
 
     RECT tb_rect;
     GetWindowRect(taskbar_hwnd, &tb_rect);

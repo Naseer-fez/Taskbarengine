@@ -13,6 +13,8 @@ add_library(EngineDLL SHARED
     src/power_device.c
     src/vdesktop_notify.cpp
     src/state_store.c
+    src/te_msg_filter.c
+    src/te_timer.c
 )
 
 target_include_directories(EngineDLL PUBLIC

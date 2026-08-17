@@ -1,5 +1,6 @@
 #include "core/vdesktop_notify.h"
 #include <windows.h>
+#include <objbase.h>
 
 static TE_EventEntry* g_event_table = nullptr;
 static uint32_t* g_sub_count = nullptr;

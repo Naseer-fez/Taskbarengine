@@ -1,6 +1,12 @@
 #include <benchmark/benchmark.h>
 #include <core/event_dispatch.h>
 
+extern "C" {
+    static uint32_t g_bench_plugin_id = 0;
+    uint32_t TE_CoreManagerGetCurrentPluginId(void) { return g_bench_plugin_id; }
+    void TE_CoreManagerSetCurrentPluginId(uint32_t id) { g_bench_plugin_id = id; }
+}
+
 static HRESULT BenchCallback(uint32_t type, const void* event_data, void* user_data)
 {
     benchmark::DoNotOptimize(type);

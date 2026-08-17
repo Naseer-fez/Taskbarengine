@@ -9,6 +9,15 @@ extern "C" {
 
 #define TE_MAX_PLUGINS 32
 
+/**
+ * @brief Windows version compatibility status for a loaded plugin.
+ */
+typedef enum TE_PluginCompatStatus {
+    TE_COMPAT_OK,                 /**< Build is supported and within tested range */
+    TE_COMPAT_UNTESTED_BUILD,      /**< Build is newer than plugin's max_tested_build */
+    TE_COMPAT_UNSUPPORTED_BUILD    /**< Build is older than plugin's min_build */
+} TE_PluginCompatStatus;
+
 typedef struct TE_PluginEntry {
     HMODULE                  dll_handle;
     const PluginInterface*   iface;
@@ -17,6 +26,7 @@ typedef struct TE_PluginEntry {
     bool                     enabled;
     uint32_t                 fault_count;      /* consecutive timeout counter */
     bool                     disabled_by_fault;
+    TE_PluginCompatStatus    compat_status;    /* Windows build compatibility status */
 } TE_PluginEntry;
 
 /**

@@ -177,7 +177,7 @@ HRESULT TE_LogInit(const wchar_t* log_dir, TE_LogLevel min_level, bool to_file)
         }
     }
 
-    if (!CreateDirectoryW(g_log_dir_path, NULL)) {
+    if (SHCreateDirectoryExW(NULL, g_log_dir_path, NULL) != ERROR_SUCCESS) {
         DWORD err = GetLastError();
         if (err != ERROR_ALREADY_EXISTS && err != ERROR_ACCESS_DENIED) {
             /* Log directory creation warning in debug output */

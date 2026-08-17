@@ -1,5 +1,6 @@
 # Build output
 build/
+build_*/
 out/
 
 # Object files and libraries
@@ -28,10 +29,13 @@ out/
 # CMake
 CMakeUserPresets.json
 
+# Generated manifests
+App/res/settings_merged.manifest
+
 # Agents scratch dirs
 .agents/*
 !.agents/AGENTS.md
 !.agents/skills/
 
-TaskbarEngine-v*  
- 
+TaskbarEngine-v*
+DTE_*.jsonc

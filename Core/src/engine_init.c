@@ -22,7 +22,6 @@ HRESULT TE_EngineInitialize(void)
     TE_DebugTrace("[TE-DBG] TE_EngineInitialize: Starting first-time init\n");
 
     /* Defense-in-depth: only initialize inside explorer.exe */
-    extern bool TE_IsExplorerProcess(void);
     if (!TE_IsExplorerProcess()) {
         TE_DebugTrace("[TE-DBG] TE_EngineInitialize: Not explorer process, aborting\n");
         InterlockedExchange(&g_engine_initialized, 0);

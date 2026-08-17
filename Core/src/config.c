@@ -9,11 +9,15 @@ static const char* DEFAULT_CONFIG_CONTENT =
 "    \"version\": 1,\n"
 "    \"core\": {\n"
 "        \"log_level\": \"info\",\n"
-"        \"log_to_file\": false\n"
+"        \"log_to_file\": true\n"
 "    },\n"
 "    \"plugin\": {\n"
-"        \"DummyPlugin\": {\n"
-"            \"enabled\": true\n"
+"        \"icon_hover\": {\n"
+"            \"enabled\": true,\n"
+"            \"scale\": 1.35,\n"
+"            \"radius\": 130.0,\n"
+"            \"curve\": \"gaussian\",\n"
+"            \"speed_ms\": 150\n"
 "        }\n"
 "    }\n"
 "}\n";
@@ -56,7 +60,7 @@ HRESULT TE_ConfigLoad(const wchar_t* path, cJSON** out_root)
         wchar_t* last_slash = wcsrchr(dir_path, L'\\');
         if (last_slash) {
             *last_slash = L'\0';
-            CreateDirectoryW(dir_path, NULL);
+            SHCreateDirectoryExW(NULL, dir_path, NULL);
         }
 
         HANDLE hfile = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
