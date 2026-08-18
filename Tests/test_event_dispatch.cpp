@@ -107,4 +107,21 @@ TEST_CASE("Event Dispatch Subscription Table", "[event]") {
         TE_EventDispatch(table, count, TE_EVENT_CONFIG_CHANGED, nullptr);
         REQUIRE(g_callback_count == 1);
     }
+
+    SECTION("Fault Isolation in Event Dispatch") {
+        TE_PluginEntry mock_entry{};
+        mock_entry.enabled = true;
+        mock_entry.disabled_by_fault = false;
+        mock_entry.fault_count = 0;
+
+        g_callback_count = 0;
+        HRESULT hr = TE_EventSubscribeEx(table, &count, TE_EVENT_CONFIG_CHANGED, TestEventCallback, nullptr, 1, &mock_entry);
+        REQUIRE(SUCCEEDED(hr));
+
+        /* Normal dispatch works */
+        TE_EventDispatch(table, count, TE_EVENT_CONFIG_CHANGED, nullptr);
+        REQUIRE(g_callback_count == 1);
+        REQUIRE(mock_entry.fault_count == 0);
+        REQUIRE(mock_entry.disabled_by_fault == false);
+    }
 }

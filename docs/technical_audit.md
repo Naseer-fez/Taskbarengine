@@ -268,7 +268,7 @@ The core value proposition — "icons magnify on hover" — creates an irreconci
 
 **Possible mitigation (partial)**: Constrain magnification to scale-in-place (icon grows but center stays fixed) with limited max scale (1.2x instead of 1.5x). This reduces but doesn't eliminate the desync.
 
-#### 🟠 Pitfall #2: No Windows Version Adaptation Layer
+#### 🟠 Pitfall #2: No Windows Version Adaptation Layer (✅ RESOLVED)
 
 The codebase has zero references to `RtlGetVersion`, `IsWindows10OrGreater`, or any build-number detection. When Microsoft changes the UIA tree structure, Shell_TrayWnd message handling, or XAML Islands behavior in a feature update, the engine has no way to:
 - Detect the new version and adapt
@@ -277,7 +277,7 @@ The codebase has zero references to `RtlGetVersion`, `IsWindows10OrGreater`, or 
 
 **This will result in silent failures or Explorer crashes on update day.**
 
-#### 🟡 Pitfall #3: Message Dispatch Volume
+#### 🟡 Pitfall #3: Message Dispatch Volume (✅ RESOLVED)
 
 The actual codebase uses a **subscription-based event dispatch system** ([event_dispatch.c](file:///d:/CODE/Utlities/Taskbar/Core/src/event_dispatch.c)) with `TE_EventSubscribe()` / `TE_EventUnsubscribe()` / `TE_EventDispatchTargeted()`, which is a significant improvement over the naive forward-all pattern described in the phase docs. Plugins only receive events they subscribed to, and the dispatch table supports targeted delivery by plugin ID.
 
@@ -362,7 +362,7 @@ This could be the default mode, with injection-based features as an opt-in "Adva
 
 ### Things to Improve ⚠️
 
-1. **`g_core_manager` is a static global** — while the `PluginContext` function-pointer indirection helps, the `extern` reference pattern still technically violates the "no global mutable state" rule. The manager should be passed explicitly through all code paths.
+1. ✅ **RESOLVED**: **`g_core_manager` is a static global** — while the `PluginContext` function-pointer indirection helps, the `extern` reference pattern still technically violates the "no global mutable state" rule. The manager should be passed explicitly through all code paths.
 
 2. **IPC server has no authentication beyond DACL** — a malicious local process running as the same user could send `shutdown` or `enable_plugin` commands. The binary protocol header has magic/version validation, but consider adding a shared secret or nonce for the command channel.
 

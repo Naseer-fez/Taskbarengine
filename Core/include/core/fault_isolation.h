@@ -31,13 +31,13 @@ HRESULT TE_FaultIsolationCallPlugin(TE_PluginEntry* entry, HRESULT (*callback)(v
 HRESULT TE_FaultIsolationCallPluginInit(TE_PluginEntry* entry, HRESULT (*callback)(const PluginContext*), const PluginContext* ctx);
 
 /**
- * @brief Invoke an event callback wrapped in SEH exception handling and 100ms watchdog timer.
+ * @brief Invoke an event callback wrapped in SEH exception handling. (No watchdog timer for performance).
  * @param entry Target plugin entry (may be NULL).
  * @param callback Event callback pointer.
  * @param type Event type.
  * @param event_data Event payload pointer.
  * @param user_data User context pointer.
- * @return S_OK on success, or E_FAIL/E_ABORT on fault/timeout.
+ * @return S_OK on success, or E_FAIL on fault.
  */
 HRESULT TE_FaultIsolationCallEventCallback(TE_PluginEntry* entry, TE_EventCallback callback, TE_EventType type, const void* event_data, void* user_data);
 

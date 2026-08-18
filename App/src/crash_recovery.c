@@ -1,4 +1,5 @@
 #include "app/crash_recovery.h"
+#include <sdk/te_debug_trace.h>
 
 static HANDLE g_thread = NULL;
 static HANDLE g_stop_event = NULL;
@@ -25,6 +26,7 @@ static DWORD WINAPI RecoveryThreadProc(LPVOID param)
     DWORD wait = WaitForMultipleObjects(2, waits, FALSE, INFINITE);
     if (wait == WAIT_OBJECT_0 + 1) {
         InterlockedExchange(&g_state, TE_CRASH_RECOVERY_WAITING_TASKBAR_CREATED);
+        TE_DebugTrace("[TE-DBG] CrashRecovery: Explorer process exited, waiting for TaskbarCreated\n");
         /* Message-only windows do not receive broadcast TaskbarCreated
          * notifications.  Explicitly notify the tray host after Explorer
          * exits so it can reinstall the hook for the replacement process. */

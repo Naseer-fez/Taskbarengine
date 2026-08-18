@@ -28,3 +28,34 @@ static void BM_EventDispatchSingleSubscriber(benchmark::State& state)
 }
 
 BENCHMARK(BM_EventDispatchSingleSubscriber);
+
+static void BM_EventDispatchMultiSubscriber(benchmark::State& state)
+{
+    TE_EventEntry table[TE_MAX_SUBSCRIPTIONS];
+    uint32_t count = 0;
+    TE_EventDispatchInit(table, &count);
+    int num_subscribers = (int)state.range(0);
+    for (int i = 0; i < num_subscribers; i++) {
+        TE_EventSubscribe(table, &count, TE_EVENT_CONFIG_CHANGED, BenchCallback, nullptr, (uint32_t)(i + 1));
+    }
+
+    for (auto _ : state) {
+        TE_EventDispatch(table, count, TE_EVENT_CONFIG_CHANGED, nullptr);
+    }
+    state.SetItemsProcessed(state.iterations() * num_subscribers);
+}
+
+BENCHMARK(BM_EventDispatchMultiSubscriber)->Arg(1)->Arg(4)->Arg(8)->Arg(16);
+
+static void BM_EventDispatchNoSubscriber(benchmark::State& state)
+{
+    TE_EventEntry table[TE_MAX_SUBSCRIPTIONS];
+    uint32_t count = 0;
+    TE_EventDispatchInit(table, &count);
+
+    for (auto _ : state) {
+        TE_EventDispatch(table, count, TE_EVENT_CONFIG_CHANGED, nullptr);
+    }
+}
+
+BENCHMARK(BM_EventDispatchNoSubscriber);

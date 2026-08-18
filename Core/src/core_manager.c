@@ -187,6 +187,11 @@ HRESULT TE_CoreManagerInitPhaseB(void)
     } else {
         TE_LogWrite(TE_LOG_WARN, "Failed to query Windows version via RtlGetVersion");
     }
+    
+    if (win_ver.build > 0 && !TE_IsBuildSupported(win_ver.build)) {
+        TE_LogWrite(TE_LOG_ERROR, "Windows Build %u is not supported. TaskbarEngine initialization aborted.", win_ver.build);
+        return HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
+    }
 
     /* Start other event sources now that we are outside CBT hook.
      * Keep RegisterShellHookWindow disabled for now: even with a helper HWND,

@@ -13,6 +13,12 @@ extern "C" {
 int TE_TaskbarResizeClampHeight(int height);
 int TE_TaskbarResizeScaleForDpi(int value, uint32_t dpi);
 
+/**
+ * Modifies a WINDOWPOS struct to enforce the target height at the given DPI.
+ * Used by the WM_WINDOWPOSCHANGING handler. Exposed for unit testing.
+ */
+void TE_TaskbarResizeEnforceWindowPos(WINDOWPOS* wp, int target_height, uint32_t dpi);
+
 #ifdef __cplusplus
 }
 #endif

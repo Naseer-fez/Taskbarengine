@@ -210,14 +210,21 @@ static void RestoreGeometry(void)
     }
 }
 
-static void EnforceWindowPos(WINDOWPOS* wp)
+void TE_TaskbarResizeEnforceWindowPos(WINDOWPOS* wp, int target_height, uint32_t dpi)
+{
+    if (!wp) return;
+
+    int old_cy = wp->cy;
+    int scaled_height = TE_TaskbarResizeScaleForDpi(target_height, dpi);
+    wp->cy = scaled_height;
+    wp->y += old_cy - scaled_height;
+}
+
+static void EnforceWindowPos(WINDOWPOS* wp, HWND taskbar_hwnd)
 {
     if (!g_state.enabled || !wp) return;
 
-    int old_cy = wp->cy;
-    int target_height = TE_TaskbarResizeScaleForDpi(g_state.settings.height, CurrentDpi());
-    wp->cy = target_height;
-    wp->y += old_cy - target_height;
+    TE_TaskbarResizeEnforceWindowPos(wp, g_state.settings.height, WindowDpi(taskbar_hwnd));
 }
 
 static HRESULT OnEvent(uint32_t type, const void* event_data, void* user_data)
@@ -230,7 +237,7 @@ static HRESULT OnEvent(uint32_t type, const void* event_data, void* user_data)
             if (evt) {
                 g_state.taskbar_hwnd = evt->taskbar_hwnd;
                 FindOrAddBar(evt->taskbar_hwnd);
-                EnforceWindowPos(evt->window_pos);
+                EnforceWindowPos(evt->window_pos, evt->taskbar_hwnd);
             }
             break;
         }

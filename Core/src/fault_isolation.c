@@ -226,11 +226,6 @@ HRESULT TE_FaultIsolationCallEventCallback(TE_PluginEntry* entry, TE_EventCallba
         TE_CoreManagerSetCurrentPluginId(plugin_id);
     }
 
-    WatchdogContext wd_ctx = { 0 };
-    HANDLE htimer = NULL;
-
-    BOOL timer_created = CreateTimerQueueTimer(&htimer, NULL, WatchdogTimerCallback, &wd_ctx, TE_WATCHDOG_TIMEOUT_MS, 0, WT_EXECUTEONLYONCE);
-
     bool caught_exception = false;
 
 #ifdef _MSC_VER
@@ -257,27 +252,16 @@ HRESULT TE_FaultIsolationCallEventCallback(TE_PluginEntry* entry, TE_EventCallba
     g_in_veh_guarded_call = 0;
 #endif
 
-    if (timer_created && htimer) {
-        DeleteTimerQueueTimer(NULL, htimer, INVALID_HANDLE_VALUE);
-    }
-
     if (plugin_id > 0) {
         TE_CoreManagerSetCurrentPluginId(prev_plugin_id);
     }
 
     if (entry) {
-        if (caught_exception || wd_ctx.fired) {
+        if (caught_exception) {
             entry->fault_count++;
-            if (wd_ctx.fired) {
-                TE_LogWrite(TE_LOG_WARN, "Watchdog timeout (%dms) during event callback (type %d) in plugin '%s' (strike %u/%u)",
-                            TE_WATCHDOG_TIMEOUT_MS, (int)type,
-                            (entry->metadata && entry->metadata->name) ? entry->metadata->name : "unknown",
-                            entry->fault_count, TE_MAX_FAULT_STRIKES);
-            }
-
             DisableFaultedPlugin(entry, true);
 
-            return caught_exception ? E_FAIL : E_ABORT;
+            return E_FAIL;
         }
 
         entry->fault_count = 0;

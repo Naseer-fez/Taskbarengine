@@ -143,15 +143,15 @@ everything).
 
 ## Deliverables
 
-- [ ] TaskbarResize plugin resizes taskbar to configured height on enable
-- [ ] Height changes via config hot-reload take effect within 200ms
-- [ ] `Disable()` restores original taskbar height and work area
-- [ ] Named pipe IPC working between Tray App and Engine
-- [ ] Tray context menu: Exit cleanly shuts down the system
-- [ ] Explorer crash recovery works (kill + automatic re-injection)
-- [ ] All 7 event sources registered and dispatching
-- [ ] Google Benchmark measuring event dispatch latency
-- [ ] All unit tests pass
+- [x] TaskbarResize plugin resizes taskbar to configured height on enable
+- [x] Height changes via config hot-reload take effect within 200ms
+- [x] `Disable()` restores original taskbar height and work area
+- [x] Named pipe IPC working between Tray App and Engine
+- [x] Tray context menu: Exit cleanly shuts down the system
+- [x] Explorer crash recovery works (kill + automatic re-injection)
+- [x] All 7 event sources registered and dispatching
+- [x] Google Benchmark measuring event dispatch latency
+- [x] All unit tests pass
 
 ## Exit Criteria (Definition of Done)
 
