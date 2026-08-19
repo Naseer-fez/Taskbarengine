@@ -45,24 +45,50 @@ static HBITMAP CreateBitmapFromIcon(HICON hIcon, int width, int height)
         ReleaseDC(NULL, hdc);
         return NULL;
     }
-    HBITMAP hbm = CreateCompatibleBitmap(hdc, width, height);
-    if (!hbm) {
+
+    BITMAPINFO bmi = {};
+    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth = width;
+    bmi.bmiHeader.biHeight = -height; // Top-down 32-bit DIB
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+
+    void* bits = nullptr;
+    HBITMAP hbm = CreateDIBSection(hdc, &bmi, DIB_RGB_COLORS, &bits, NULL, 0);
+    if (!hbm || !bits) {
+        if (hbm) DeleteObject(hbm);
         DeleteDC(memDC);
         ReleaseDC(NULL, hdc);
         return NULL;
     }
-    
+
+    memset(bits, 0, width * height * 4);
+
     HBITMAP oldBmp = (HBITMAP)SelectObject(memDC, hbm);
-    
-    RECT r = {0, 0, width, height};
-    HBRUSH transparentBrush = (HBRUSH)GetStockObject(BLACK_BRUSH);
-    FillRect(memDC, &r, transparentBrush);
-
     DrawIconEx(memDC, 0, 0, hIcon, width, height, 0, NULL, DI_NORMAL);
-
-    SelectObject(memDC, oldBmp); // Restore original bitmap before deletion (Fix F15)
+    SelectObject(memDC, oldBmp);
     DeleteDC(memDC);
     ReleaseDC(NULL, hdc);
+
+    // If icon does not have per-pixel alpha, set opaque alpha for non-black pixels
+    uint32_t* pPixels = (uint32_t*)bits;
+    bool has_alpha = false;
+    int total_pixels = width * height;
+    for (int i = 0; i < total_pixels; i++) {
+        if ((pPixels[i] & 0xFF000000) != 0) {
+            has_alpha = true;
+            break;
+        }
+    }
+
+    if (!has_alpha) {
+        for (int i = 0; i < total_pixels; i++) {
+            if ((pPixels[i] & 0x00FFFFFF) != 0) {
+                pPixels[i] |= 0xFF000000;
+            }
+        }
+    }
 
     return hbm;
 }
@@ -94,6 +120,18 @@ HRESULT TE_IconCaptureGet(const wchar_t* app_id, TE_IconEntry* out_entry)
     }
 
     if (!hIcon) {
+        hr = SHGetImageList(SHIL_EXTRALARGE, IID_PPV_ARGS(&imageList));
+        if (SUCCEEDED(hr) && imageList) {
+            SHFILEINFOW sfi = {};
+            DWORD_PTR res = SHGetFileInfoW(app_id, FILE_ATTRIBUTE_NORMAL, &sfi, sizeof(sfi), 
+                                          SHGFI_SYSICONINDEX | SHGFI_USEFILEATTRIBUTES);
+            if (res != 0) {
+                imageList->GetIcon(sfi.iIcon, ILD_TRANSPARENT, &hIcon);
+            }
+        }
+    }
+
+    if (!hIcon) {
         // Fallback to ExtractIconW
         hIcon = ExtractIconW(GetModuleHandleW(NULL), app_id, 0);
     }
@@ -103,28 +141,57 @@ HRESULT TE_IconCaptureGet(const wchar_t* app_id, TE_IconEntry* out_entry)
         hbm = CreateBitmapFromIcon(hIcon, 256, 256);
         DestroyIcon(hIcon);
     } else {
+        // Try IShellItemImageFactory for Windows 11 packaged/modern applications
+        ComPtr<IShellItemImageFactory> imageFactory;
+        if (SUCCEEDED(SHCreateItemFromParsingName(app_id, nullptr, IID_PPV_ARGS(&imageFactory)))) {
+            SIZE size = { 256, 256 };
+            imageFactory->GetImage(size, SIIGBF_BIGGERSIZEOK | SIIGBF_ICONONLY, &hbm);
+        }
+    }
+
+    if (!hbm) {
         // Fallback colored fill for unresolvable icons
         HDC hdc = GetDC(NULL);
+        if (!hdc) return E_OUTOFMEMORY;
         HDC memDC = CreateCompatibleDC(hdc);
-        hbm = CreateCompatibleBitmap(hdc, 256, 256);
-        if (!hdc || !memDC || !hbm) {
-            if (hbm) DeleteObject(hbm);
-            if (memDC) DeleteDC(memDC);
-            if (hdc) ReleaseDC(NULL, hdc);
+        if (!memDC) {
+            ReleaseDC(NULL, hdc);
             return E_OUTOFMEMORY;
         }
+
+        BITMAPINFO bmi = {};
+        bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        bmi.bmiHeader.biWidth = 256;
+        bmi.bmiHeader.biHeight = -256;
+        bmi.bmiHeader.biPlanes = 1;
+        bmi.bmiHeader.biBitCount = 32;
+        bmi.bmiHeader.biCompression = BI_RGB;
+
+        void* bits = nullptr;
+        hbm = CreateDIBSection(hdc, &bmi, DIB_RGB_COLORS, &bits, NULL, 0);
+        if (!hbm || !bits) {
+            if (hbm) DeleteObject(hbm);
+            DeleteDC(memDC);
+            ReleaseDC(NULL, hdc);
+            return E_OUTOFMEMORY;
+        }
+
         HBITMAP oldBmp = (HBITMAP)SelectObject(memDC, hbm);
-        
         int hash = 0;
         for (const wchar_t* p = app_id; *p; p++) hash += *p;
-        HBRUSH brush = CreateSolidBrush(RGB((hash*17)%256, (hash*31)%256, (hash*47)%256));
+        HBRUSH brush = CreateSolidBrush(RGB((hash * 17) % 256, (hash * 31) % 256, (hash * 47) % 256));
         RECT r = {0, 0, 256, 256};
         FillRect(memDC, &r, brush);
         DeleteObject(brush);
-        
-        SelectObject(memDC, oldBmp); // Restore original bitmap before deletion (Fix F15)
+        SelectObject(memDC, oldBmp);
         DeleteDC(memDC);
         ReleaseDC(NULL, hdc);
+
+        // Ensure alpha is opaque for fallback tile
+        uint32_t* pPixels = (uint32_t*)bits;
+        for (int i = 0; i < 256 * 256; i++) {
+            pPixels[i] |= 0xFF000000;
+        }
     }
 
     if (!hbm) return E_OUTOFMEMORY;

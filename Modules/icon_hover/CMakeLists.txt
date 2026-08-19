@@ -25,6 +25,9 @@ target_link_libraries(IconHoverPlugin PRIVATE
     gdi32
     shell32
     oleaut32
+    uiautomationcore
+    windowscodecs
+    shlwapi
 )
 
 set_target_properties(IconHoverPlugin PROPERTIES

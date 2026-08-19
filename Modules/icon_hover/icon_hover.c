@@ -130,11 +130,14 @@ static BOOL CALLBACK EnumSecondaryTaskbars(HWND hwnd, LPARAM lParam)
 
 static HRESULT OnTaskbarMouse(uint32_t event_type, const void* event_data, void* user_data)
 {
-    (void)event_type; (void)event_data; (void)user_data;
-    if (g_state.enabled) {
-        /* Activate the frame loop timer on-demand when mouse is over taskbar.
-         * TE_FrameLoopActivate is a no-op if the timer is already active. */
-        TE_FrameLoopActivate();
+    (void)event_type; (void)user_data;
+    if (g_state.enabled && event_data) {
+        const TE_TaskbarMouseEvent* evt = (const TE_TaskbarMouseEvent*)event_data;
+        if (evt->x >= 0 && evt->y >= 0) {
+            /* Activate the frame loop timer on-demand when mouse is over taskbar.
+             * TE_FrameLoopActivate is a thread-safe no-op if the timer is already active. */
+            TE_FrameLoopActivate();
+        }
     }
     return S_OK;
 }

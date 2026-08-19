@@ -5,6 +5,7 @@
 #include <wrl/client.h>
 #include <sdk/te_log.h>
 #include <sdk/te_debug_trace.h>
+#include <algorithm>
 
 using Microsoft::WRL::ComPtr;
 
@@ -100,17 +101,36 @@ HRESULT TE_UiaDiscoverIcons(HWND taskbar_hwnd, TE_TaskbarIcon* out_icons, int ma
                 el->get_CurrentName(&id_bstr);
             }
 
-            out_icons[count].bounds = rect;
-            out_icons[count].icon_index = count;
             if (id_bstr) {
+                // Filter out system control buttons
+                if (wcscmp(id_bstr, L"StartButton") == 0 ||
+                    wcscmp(id_bstr, L"SearchButton") == 0 ||
+                    wcscmp(id_bstr, L"TaskViewButton") == 0 ||
+                    wcscmp(id_bstr, L"WidgetsButton") == 0 ||
+                    wcscmp(id_bstr, L"ShowDesktopButton") == 0 ||
+                    wcscmp(id_bstr, L"NotificationCenterButton") == 0 ||
+                    wcscmp(id_bstr, L"SystemClockChangeNotificationsButton") == 0) {
+                    SysFreeString(id_bstr);
+                    continue;
+                }
+
+                out_icons[count].bounds = rect;
+                out_icons[count].icon_index = count;
                 wcsncpy(out_icons[count].app_id, id_bstr, 255);
                 out_icons[count].app_id[255] = L'\0';
                 SysFreeString(id_bstr);
-            } else {
-                out_icons[count].app_id[0] = L'\0';
+                count++;
             }
+        }
+    }
 
-            count++;
+    // Sort icons strictly left-to-right by screen coordinate
+    if (count > 1) {
+        std::sort(out_icons, out_icons + count, [](const TE_TaskbarIcon& a, const TE_TaskbarIcon& b) {
+            return a.bounds.left < b.bounds.left;
+        });
+        for (int i = 0; i < count; i++) {
+            out_icons[i].icon_index = i;
         }
     }
 
