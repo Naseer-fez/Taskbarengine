@@ -1,46 +1,95 @@
 trigger:
   - main
+  - 'v*'
 
 pool:
   vmImage: 'windows-latest'
 
 jobs:
 - job: BuildRelease
-  displayName: 'Build and Test (MSVC Release)'
+  displayName: 'Build, Test, Benchmark, and Package (MSVC Release)'
   steps:
-  - task: CMake@1
-    displayName: 'Configure CMake'
-    inputs:
-      workingDirectory: '$(Build.SourcesDirectory)/build'
-      cmakeArgs: '-G Ninja -DCMAKE_BUILD_TYPE=Release ..'
+  - checkout: self
+    submodules: true
 
   - task: CMake@1
-    displayName: 'Build Release'
+    displayName: 'Configure CMake (MSVC Release)'
     inputs:
-      workingDirectory: '$(Build.SourcesDirectory)/build'
-      cmakeArgs: '--build . --config Release'
+      workingDirectory: '$(Build.SourcesDirectory)'
+      cmakeArgs: '-B build -G Ninja -DCMAKE_BUILD_TYPE=Release'
 
-  - script: |
+  - task: CMake@1
+    displayName: 'Build Release Targets'
+    inputs:
+      workingDirectory: '$(Build.SourcesDirectory)'
+      cmakeArgs: '--build build --config Release'
+
+  - powershell: |
       cd build
       ctest -C Release --output-on-failure
-    displayName: 'Run Tests'
+    displayName: 'Run Catch2 Unit Tests'
+
+  - powershell: |
+      cd build\bin
+      .\te_benchmarks.exe --benchmark_format=console
+    displayName: 'Run Google Micro-Benchmarks'
+
+  - powershell: |
+      cd build\bin
+      .\bench_system.exe --quick -o "$(Build.SourcesDirectory)\benchmark_report.md"
+    displayName: 'Run System Benchmark Suite'
+
+  - powershell: |
+      powershell -File Scripts\package.ps1 -BuildDir build -DestinationZip "$(Build.ArtifactStagingDirectory)\TaskbarEngine-v1.0.0.zip"
+    displayName: 'Create Release ZIP Package'
 
   - task: PublishPipelineArtifact@1
+    displayName: 'Publish Release ZIP Package'
     inputs:
-      targetPath: '$(Build.SourcesDirectory)/build/bin'
-      artifactName: 'TaskbarEngine-Binaries'
+      targetPath: '$(Build.ArtifactStagingDirectory)\TaskbarEngine-v1.0.0.zip'
+      artifactName: 'TaskbarEngine-v1.0.0-Release'
+
+  - task: PublishPipelineArtifact@1
+    displayName: 'Publish Benchmark Report'
+    inputs:
+      targetPath: '$(Build.SourcesDirectory)\benchmark_report.md'
+      artifactName: 'Benchmark-Report'
 
 - job: BuildDebugASan
-  displayName: 'Build (Clang-cl Debug ASan)'
+  displayName: 'Build and Test (Clang-cl Debug + ASan)'
   steps:
+  - checkout: self
+    submodules: true
+
   - task: CMake@1
     displayName: 'Configure CMake (Clang-cl ASan)'
     inputs:
-      workingDirectory: '$(Build.SourcesDirectory)/build_asan'
-      cmakeArgs: '-G Ninja -T clangcl -DCMAKE_BUILD_TYPE=Debug -DTE_ENABLE_ASAN=ON ..'
+      workingDirectory: '$(Build.SourcesDirectory)'
+      cmakeArgs: '-B build_asan -G Ninja -T clangcl -DCMAKE_BUILD_TYPE=Debug -DTE_ENABLE_ASAN=ON'
 
   - task: CMake@1
-    displayName: 'Build ASan'
+    displayName: 'Build Debug ASan'
     inputs:
-      workingDirectory: '$(Build.SourcesDirectory)/build_asan'
-      cmakeArgs: '--build . --config Debug'
+      workingDirectory: '$(Build.SourcesDirectory)'
+      cmakeArgs: '--build build_asan --config Debug'
+
+  - powershell: |
+      cd build_asan
+      ctest -C Debug --output-on-failure
+    displayName: 'Run Catch2 Tests with AddressSanitizer'
+
+- job: BuildDocumentation
+  displayName: 'Build Doxygen API Documentation'
+  steps:
+  - checkout: self
+
+  - powershell: |
+      choco install doxygen.install -y
+      doxygen Doxyfile
+    displayName: 'Generate Doxygen API Documentation'
+
+  - task: PublishPipelineArtifact@1
+    displayName: 'Publish API HTML Documentation'
+    inputs:
+      targetPath: '$(Build.SourcesDirectory)\Docs\api'
+      artifactName: 'TaskbarEngine-API-Docs'

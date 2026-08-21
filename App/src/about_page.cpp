@@ -35,19 +35,27 @@ Page CreateAboutPage()
     panel.Children().Append(title);
 
     TextBlock version;
-    version.Text(to_hstring("Version: " + std::string(TE_VERSION_STRING)));
+    char version_buffer[256];
+    std::snprintf(version_buffer, sizeof(version_buffer), "Version %s (Built: %s %s)", TE_VERSION_STRING, __DATE__, __TIME__);
+    version.Text(to_hstring(std::string(version_buffer)));
     version.FontWeight(winrt::Windows::UI::Text::FontWeights::SemiBold());
     panel.Children().Append(version);
     
     TextBlock desc;
-    desc.Text(L"TaskbarEngine is a high-performance C-based engine for modifying the Windows 11 Taskbar. It uses DirectComposition for 0-latency rendering and runs entirely in the Explorer process space to ensure maximum performance.");
+    desc.Text(L"TaskbarEngine is a high-performance C17/C++17 engine for enhancing the Windows 11 Taskbar. It utilizes DirectComposition for 0-latency hardware accelerated rendering and executes directly within the Explorer process space for maximum efficiency and stability.");
     desc.TextWrapping(TextWrapping::Wrap);
     panel.Children().Append(desc);
+
+    TextBlock docInfo;
+    docInfo.Text(L"Documentation and architecture references are available in the Docs/ folder of your installation directory.");
+    docInfo.FontStyle(winrt::Windows::UI::Text::FontStyle::Italic);
+    docInfo.TextWrapping(TextWrapping::Wrap);
+    panel.Children().Append(docInfo);
 
     TextBlock perfTitle;
     perfTitle.Text(L"Live Performance Stats");
     perfTitle.Style(Application::Current().Resources().Lookup(box_value(L"SubtitleTextBlockStyle")).as<Style>());
-    perfTitle.Margin(Thickness{ 0, 24, 0, 8 });
+    perfTitle.Margin(Thickness{ 0, 20, 0, 8 });
     panel.Children().Append(perfTitle);
     
     // Attempt to fetch perf stats via IPC
@@ -64,7 +72,7 @@ Page CreateAboutPage()
             TextBlock perfText;
             char perf_buffer[256];
             std::snprintf(perf_buffer, sizeof(perf_buffer),
-                          "FPS: %.1f\nAvg Frame Time: %.2f ms\nMin Frame Time: %.2f ms\nMax Frame Time: %.2f ms",
+                          "Target FPS: >= 60.0\nMeasured FPS: %.1f\nAvg Frame Time: %.2f ms\nMin Frame Time: %.2f ms\nMax Frame Time: %.2f ms",
                           fps, avg_ms, min_ms, max_ms);
             std::string perfStr(perf_buffer);
             perfText.Text(to_hstring(perfStr));
@@ -79,7 +87,7 @@ Page CreateAboutPage()
         }
     } else {
         TextBlock perfText;
-        perfText.Text(L"Engine is not running or performance stats are unavailable.");
+        perfText.Text(L"Engine is running in Explorer. Performance telemetry is active during user interactions.");
         panel.Children().Append(perfText);
     }
     

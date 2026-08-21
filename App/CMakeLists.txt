@@ -30,16 +30,33 @@ set_target_properties(TaskbarEngine PROPERTIES
 # GUI Target (Requires C++17, MSVC, and Windows App SDK)
 if(MSVC)
 
-set(WINAPPSDK_ROOT "D:/Extras/ES/packages/Microsoft.WindowsAppSDK.1.5.240311000")
-set(WINAPPSDK_CPPWINRT "D:/Extras/ES/packages/winappsdk_cppwinrt")
-set(WINAPPSDK_FRAMEWORK_DIR "${WINAPPSDK_ROOT}/tools/MSIX/win10-x64/extracted")
+if(DEFINED ENV{WINAPPSDK_ROOT} AND NOT WINAPPSDK_ROOT)
+    set(WINAPPSDK_ROOT "$ENV{WINAPPSDK_ROOT}" CACHE PATH "Path to Windows App SDK package root")
+else()
+    set(WINAPPSDK_ROOT "D:/Extras/ES/packages/Microsoft.WindowsAppSDK.1.5.240311000" CACHE PATH "Path to Windows App SDK package root")
+endif()
+
+if(DEFINED ENV{WINAPPSDK_CPPWINRT} AND NOT WINAPPSDK_CPPWINRT)
+    set(WINAPPSDK_CPPWINRT "$ENV{WINAPPSDK_CPPWINRT}" CACHE PATH "Path to C++/WinRT headers for Windows App SDK")
+else()
+    set(WINAPPSDK_CPPWINRT "D:/Extras/ES/packages/winappsdk_cppwinrt" CACHE PATH "Path to C++/WinRT headers for Windows App SDK")
+endif()
+
+if(DEFINED ENV{WINAPPSDK_FRAMEWORK_DIR} AND NOT WINAPPSDK_FRAMEWORK_DIR)
+    set(WINAPPSDK_FRAMEWORK_DIR "$ENV{WINAPPSDK_FRAMEWORK_DIR}" CACHE PATH "Path to extracted WinAppSDK framework runtime binaries")
+else()
+    set(WINAPPSDK_FRAMEWORK_DIR "${WINAPPSDK_ROOT}/tools/MSIX/win10-x64/extracted" CACHE PATH "Path to extracted WinAppSDK framework runtime binaries")
+endif()
 
 # Generate Merged Manifest using mt.exe
 find_program(MT_EXECUTABLE mt.exe
     HINTS
         "D:/Extras/ES/msvc/Windows Kits/10/bin/10.0.19041.0/x64"
+        "C:/Program Files (x86)/Windows Kits/10/bin/10.0.22621.0/x64"
+        "C:/Program Files (x86)/Windows Kits/10/bin/10.0.22000.0/x64"
         "C:/Program Files (x86)/Windows Kits/10/bin/10.0.19041.0/x64"
         "$ENV{WindowsSdkDir}/bin/$ENV{WindowsSDKVersion}/x64"
+        "$ENV{WindowsSdkBinPath}/x64"
 )
 
 set(SETTINGS_BASE_MANIFEST "${CMAKE_CURRENT_SOURCE_DIR}/res/settings.manifest")

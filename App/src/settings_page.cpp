@@ -4,6 +4,7 @@
 #include <cJSON.h>
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Foundation.Collections.h>
+#include <winrt/Windows.UI.h>
 #include <winrt/Microsoft.UI.Xaml.Controls.Primitives.h>
 #include <winrt/Windows.UI.Text.h>
 #include <cmath>
@@ -173,6 +174,32 @@ Page CreateSettingsPage(const std::string& plugin_name, const std::string& schem
                         SaveAndReload(plugin_name, key, cJSON_CreateString(to_string(sender.as<TextBox>().Text()).c_str()));
                     });
                     itemPanel.Children().Append(txt);
+                } else if (type == "color") {
+                    ColorPicker picker;
+                    picker.IsColorSpectrumVisible(true);
+                    picker.IsAlphaEnabled(true);
+                    picker.IsHexInputVisible(true);
+                    
+                    uint32_t val_color = 0xFFFFFFFF;
+                    if (current && cJSON_IsNumber(current)) {
+                        val_color = (uint32_t)current->valuedouble;
+                    } else if (cJSON* def = cJSON_GetObjectItem(setting, "default")) {
+                        if (cJSON_IsNumber(def)) val_color = (uint32_t)def->valuedouble;
+                    }
+                    
+                    winrt::Windows::UI::Color c;
+                    c.A = static_cast<uint8_t>((val_color >> 24) & 0xFF);
+                    c.R = static_cast<uint8_t>((val_color >> 16) & 0xFF);
+                    c.G = static_cast<uint8_t>((val_color >> 8) & 0xFF);
+                    c.B = static_cast<uint8_t>(val_color & 0xFF);
+                    picker.Color(c);
+                    
+                    picker.ColorChanged([plugin_name, key](ColorPicker const&, ColorChangedEventArgs const& args) {
+                        auto clr = args.NewColor();
+                        uint32_t argb = ((uint32_t)clr.A << 24) | ((uint32_t)clr.R << 16) | ((uint32_t)clr.G << 8) | (uint32_t)clr.B;
+                        SaveAndReload(plugin_name, key, cJSON_CreateNumber(argb));
+                    });
+                    itemPanel.Children().Append(picker);
                 }
 
                 if (current) cJSON_Delete(current);

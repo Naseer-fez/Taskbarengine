@@ -1,5 +1,6 @@
 add_executable(bench_system bench_system.cpp)
-target_link_libraries(bench_system PRIVATE user32 psapi)
+target_include_directories(bench_system PRIVATE ${CMAKE_SOURCE_DIR}/SDK/include)
+target_link_libraries(bench_system PRIVATE user32 psapi te_sdk)
 
 include(FetchContent)
 

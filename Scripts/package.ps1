@@ -3,14 +3,20 @@ param (
     [string]$Version = "1.0.0",
     [string]$BuildDir = "build_msvc",
     [string]$OutDir = "",
-    [string]$DestinationZip = "D:\TaskbarEngine-v1.0.0.zip"
+    [string]$DestinationZip = ""
 )
+
+if ([string]::IsNullOrWhiteSpace($DestinationZip)) {
+    $DestinationZip = "$PSScriptRoot\..\TaskbarEngine-v$Version.zip"
+}
 
 if ([string]::IsNullOrWhiteSpace($OutDir)) {
     $StagingDir = "$BuildDir\package_staging"
 } else {
     $StagingDir = $OutDir
 }
+
+Write-Host "Staging release package to $StagingDir..." -ForegroundColor Cyan
 
 if (Test-Path $StagingDir) { Remove-Item -Recurse -Force $StagingDir }
 New-Item -ItemType Directory -Path $StagingDir | Out-Null
@@ -25,10 +31,10 @@ $FilesToPackage = @(
 )
 
 foreach ($item in $FilesToPackage) {
-    # Search for the file in the build directory
     $file = Get-ChildItem -Path $BuildDir -Filter $item.Name -Recurse | Where-Object { $_.FullName -like "*\bin\*" -or $_.FullName -like "*$Configuration*" } | Select-Object -First 1
     if ($file) {
         Copy-Item $file.FullName -Destination "$StagingDir\$($item.Dest)" -Force
+        Write-Host "  -> Included $($item.Name)"
     } else {
         Write-Warning "File not found: $($item.Name)"
     }
@@ -59,8 +65,13 @@ try {
     if (Test-Path $DestinationZip) { Remove-Item -Force $DestinationZip -ErrorAction Stop }
     Compress-Archive -Path "$StagingDir\*" -DestinationPath $DestinationZip -Force
     Write-Host "Created $DestinationZip successfully." -ForegroundColor Green
+
+    # Generate SHA256 checksum
+    $hash = (Get-FileHash -Path $DestinationZip -Algorithm SHA256).Hash
+    Set-Content -Path "$DestinationZip.sha256" -Value "$hash  $(Split-Path $DestinationZip -Leaf)"
+    Write-Host "Generated SHA256: $hash" -ForegroundColor Green
 } catch {
-    $fallbackZip = "$([System.IO.Path]::GetDirectoryName($DestinationZip))\TaskbarEngine-v$Version-latest.zip"
+    $fallbackZip = "$PSScriptRoot\..\TaskbarEngine-v$Version.zip"
     if (Test-Path $fallbackZip) { Remove-Item -Force $fallbackZip -ErrorAction SilentlyContinue }
     Compress-Archive -Path "$StagingDir\*" -DestinationPath $fallbackZip -Force
     Write-Host "Created $fallbackZip successfully." -ForegroundColor Green

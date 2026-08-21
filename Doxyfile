@@ -1,14 +1,21 @@
 PROJECT_NAME           = "TaskbarEngine"
+PROJECT_NUMBER         = "1.0.0"
+PROJECT_BRIEF          = "High-performance C17/C++17 Windows 11 Taskbar Extension Engine"
 OUTPUT_DIRECTORY       = "Docs/api"
 GENERATE_HTML          = YES
 GENERATE_LATEX         = NO
-INPUT                  = "SDK/include" "Core/include" "App/src" "Modules"
+INPUT                  = "SDK/include" "Core/include" "App/include" "Modules"
+EXCLUDE_PATTERNS       = "*/ThirdParty/*" "*/build*/*" "*/Tests/*" "*/Benchmarks/*"
+FILE_PATTERNS          = *.h *.c *.cpp *.hpp
 RECURSIVE              = YES
 EXTRACT_ALL            = YES
 EXTRACT_PRIVATE        = NO
 EXTRACT_STATIC         = NO
 QUIET                  = YES
 WARNINGS               = YES
-WARN_IF_UNDOCUMENTED   = YES
+WARN_IF_UNDOCUMENTED   = NO
 WARN_IF_DOC_ERROR      = YES
-WARN_NO_PARAMDOC       = YES
+WARN_NO_PARAMDOC       = NO
+MACRO_EXPANSION        = YES
+EXPAND_ONLY_PREDEF     = YES
+PREDEFINED             = "TE_EXPORT=" "TE_API=" "__cplusplus=1" "DOXYGEN_SHOULD_SKIP_THIS"
