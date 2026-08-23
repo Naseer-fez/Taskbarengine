@@ -18,9 +18,9 @@ if ([string]::IsNullOrWhiteSpace($OutDir)) {
 
 Write-Host "Staging release package to $StagingDir..." -ForegroundColor Cyan
 
-if (Test-Path $StagingDir) { Remove-Item -Recurse -Force $StagingDir }
-New-Item -ItemType Directory -Path $StagingDir | Out-Null
-New-Item -ItemType Directory -Path "$StagingDir\Modules" | Out-Null
+if (Test-Path $StagingDir) { Remove-Item -Recurse -Force $StagingDir -ErrorAction Stop }
+New-Item -ItemType Directory -Path $StagingDir -Force | Out-Null
+New-Item -ItemType Directory -Path "$StagingDir\Modules" -Force | Out-Null
 
 $FilesToPackage = @(
     @{ Name = "TaskbarEngine.exe"; Dest = "" },
@@ -75,4 +75,9 @@ try {
     if (Test-Path $fallbackZip) { Remove-Item -Force $fallbackZip -ErrorAction SilentlyContinue }
     Compress-Archive -Path "$StagingDir\*" -DestinationPath $fallbackZip -Force
     Write-Host "Created $fallbackZip successfully." -ForegroundColor Green
+
+    # Generate SHA256 checksum for fallback archive
+    $hash = (Get-FileHash -Path $fallbackZip -Algorithm SHA256).Hash
+    Set-Content -Path "$fallbackZip.sha256" -Value "$hash  $(Split-Path $fallbackZip -Leaf)"
+    Write-Host "Generated SHA256: $hash" -ForegroundColor Green
 }

@@ -11,17 +11,28 @@ static HANDLE g_ipc_pipe = INVALID_HANDLE_VALUE;
 
 static HRESULT IpcWriteMessage(HANDLE pipe, TE_IpcMsgType type, const void* payload, uint32_t payload_len)
 {
-    uint8_t buffer[sizeof(TE_IpcHeader) + TE_IPC_MAX_PAYLOAD];
-    uint32_t total = 0;
-    HRESULT hr = TE_IpcSerialize(buffer, sizeof(buffer), type, payload, payload_len, &total);
-    if (FAILED(hr)) return hr;
-
-    DWORD written = 0;
-    if (!WriteFile(pipe, buffer, total, &written, NULL) || written != total) {
-        DWORD error = GetLastError();
-        return HRESULT_FROM_WIN32(error != ERROR_SUCCESS ? error : ERROR_WRITE_FAULT);
+    if (payload_len > TE_IPC_MAX_PAYLOAD) {
+        return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
     }
-    return S_OK;
+
+    size_t buffer_size = sizeof(TE_IpcHeader) + (size_t)payload_len;
+    uint8_t* buffer = (uint8_t*)HeapAlloc(GetProcessHeap(), 0, buffer_size);
+    if (!buffer) {
+        return E_OUTOFMEMORY;
+    }
+
+    uint32_t total = 0;
+    HRESULT hr = TE_IpcSerialize(buffer, buffer_size, type, payload, payload_len, &total);
+    if (SUCCEEDED(hr)) {
+        DWORD written = 0;
+        if (!WriteFile(pipe, buffer, total, &written, NULL) || written != total) {
+            DWORD error = GetLastError();
+            hr = HRESULT_FROM_WIN32(error != ERROR_SUCCESS ? error : ERROR_WRITE_FAULT);
+        }
+    }
+
+    HeapFree(GetProcessHeap(), 0, buffer);
+    return hr;
 }
 
 static bool IpcSendUiCommand(HWND taskbar_hwnd, WPARAM command, LPARAM parameter, DWORD_PTR* result)

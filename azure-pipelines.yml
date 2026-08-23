@@ -65,7 +65,7 @@ jobs:
     displayName: 'Configure CMake (Clang-cl ASan)'
     inputs:
       workingDirectory: '$(Build.SourcesDirectory)'
-      cmakeArgs: '-B build_asan -G Ninja -T clangcl -DCMAKE_BUILD_TYPE=Debug -DTE_ENABLE_ASAN=ON'
+      cmakeArgs: '-B build_asan -G Ninja -DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl -DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_FLAGS="-fsanitize=address" -DCMAKE_CXX_FLAGS="-fsanitize=address" -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address" -DCMAKE_SHARED_LINKER_FLAGS="-fsanitize=address"'
 
   - task: CMake@1
     displayName: 'Build Debug ASan'

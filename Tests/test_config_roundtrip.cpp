@@ -15,8 +15,10 @@ static void WriteTempConfigFile(const wchar_t* path, const std::string& content)
 TEST_CASE("Config Hot-Reload - Direct Overwrite and Parsing", "[config][roundtrip]") {
     wchar_t temp_dir[MAX_PATH];
     GetTempPathW(MAX_PATH, temp_dir);
+    size_t len = wcslen(temp_dir);
+    const wchar_t* sep = (len > 0 && temp_dir[len - 1] == L'\\') ? L"" : L"\\";
     wchar_t temp_file[MAX_PATH];
-    swprintf(temp_file, MAX_PATH, L"%sTE_test_config_%lu.jsonc", temp_dir, GetCurrentProcessId());
+    swprintf(temp_file, MAX_PATH, L"%s%sTE_test_config_%lu.jsonc", temp_dir, sep, GetCurrentProcessId());
 
     std::string v1_jsonc = 
         "// TaskbarEngine Initial Configuration\n"
@@ -82,8 +84,10 @@ TEST_CASE("Config Hot-Reload - Direct Overwrite and Parsing", "[config][roundtri
 TEST_CASE("Config Hot-Reload - Invalid JSON Preserves Stability", "[config][roundtrip]") {
     wchar_t temp_dir[MAX_PATH];
     GetTempPathW(MAX_PATH, temp_dir);
+    size_t len = wcslen(temp_dir);
+    const wchar_t* sep = (len > 0 && temp_dir[len - 1] == L'\\') ? L"" : L"\\";
     wchar_t temp_file[MAX_PATH];
-    swprintf(temp_file, MAX_PATH, L"%sTE_test_invalid_%lu.jsonc", temp_dir, GetCurrentProcessId());
+    swprintf(temp_file, MAX_PATH, L"%s%sTE_test_invalid_%lu.jsonc", temp_dir, sep, GetCurrentProcessId());
 
     std::string malformed = "{ \"core\": { \"log_level\": \"INFO\" ... unclosed ";
     WriteTempConfigFile(temp_file, malformed);

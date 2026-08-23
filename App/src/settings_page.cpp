@@ -10,6 +10,8 @@
 #include <cmath>
 #include <vector>
 
+#include <mutex>
+
 using namespace winrt;
 using namespace winrt::Windows::Foundation;
 using namespace winrt::Microsoft::UI::Xaml;
@@ -17,11 +19,21 @@ using namespace winrt::Microsoft::UI::Xaml::Controls;
 
 namespace winrt::TaskbarEngine {
 
+static std::mutex g_settings_mutex;
+
 static void SaveAndReload(const std::string& plugin_name, const std::string& key, cJSON* value)
 {
+    std::lock_guard<std::mutex> lock(g_settings_mutex);
     std::wstring path = ConfigIO_GetConfigPath();
     cJSON* root = ConfigIO_Load(path);
     if (!root) {
+        DWORD attr = GetFileAttributesW(path.c_str());
+        if (attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY)) {
+            // File exists on disk, but loading/parsing failed (e.g. sharing violation, lock, or syntax error).
+            // Do NOT overwrite existing configuration with an empty object to avoid data loss.
+            if (value) cJSON_Delete(value);
+            return;
+        }
         root = cJSON_CreateObject();
     }
     
@@ -35,6 +47,7 @@ static void SaveAndReload(const std::string& plugin_name, const std::string& key
 
 static cJSON* GetCurrentValue(const std::string& plugin_name, const std::string& key)
 {
+    std::lock_guard<std::mutex> lock(g_settings_mutex);
     std::wstring path = ConfigIO_GetConfigPath();
     cJSON* root = ConfigIO_Load(path);
     cJSON* res = nullptr;
@@ -111,9 +124,15 @@ Page CreateSettingsPage(const std::string& plugin_name, const std::string& schem
                     NumberBox num;
                     num.SpinButtonPlacementMode(NumberBoxSpinButtonPlacementMode::Inline);
                     
-                    if (cJSON* min = cJSON_GetObjectItem(setting, "min")) num.Minimum(min->valuedouble);
-                    if (cJSON* max = cJSON_GetObjectItem(setting, "max")) num.Maximum(max->valuedouble);
-                    if (cJSON* step = cJSON_GetObjectItem(setting, "step")) num.SmallChange(step->valuedouble);
+                    if (cJSON* min = cJSON_GetObjectItem(setting, "min")) {
+                        if (cJSON_IsNumber(min)) num.Minimum(min->valuedouble);
+                    }
+                    if (cJSON* max = cJSON_GetObjectItem(setting, "max")) {
+                        if (cJSON_IsNumber(max)) num.Maximum(max->valuedouble);
+                    }
+                    if (cJSON* step = cJSON_GetObjectItem(setting, "step")) {
+                        if (cJSON_IsNumber(step)) num.SmallChange(step->valuedouble);
+                    }
                     
                     double val = 0;
                     if (current && cJSON_IsNumber(current)) val = current->valuedouble;

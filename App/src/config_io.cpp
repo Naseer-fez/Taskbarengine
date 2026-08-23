@@ -26,6 +26,10 @@ cJSON* ConfigIO_Load(const std::wstring& path)
     return nullptr;
 }
 
+#include <atomic>
+
+static std::atomic<uint64_t> g_config_save_seq{ 0 };
+
 HRESULT ConfigIO_Save(const std::wstring& path, cJSON* root)
 {
     if (!root) return E_POINTER;
@@ -43,7 +47,13 @@ HRESULT ConfigIO_Save(const std::wstring& path, cJSON* root)
         }
     }
 
-    std::wstring temp_path = path + L".tmp." + std::to_wstring(GetCurrentProcessId());
+    uint64_t seq = ++g_config_save_seq;
+    std::wstring temp_path = path + L".tmp." 
+                           + std::to_wstring(GetCurrentProcessId()) + L"_"
+                           + std::to_wstring(GetCurrentThreadId()) + L"_"
+                           + std::to_wstring(GetTickCount64()) + L"_"
+                           + std::to_wstring(seq);
+
     std::ofstream out(temp_path.c_str(), std::ios::binary | std::ios::trunc);
     if (!out) {
         cJSON_free(json_str);
@@ -51,15 +61,16 @@ HRESULT ConfigIO_Save(const std::wstring& path, cJSON* root)
     }
 
     out.write(json_str, strlen(json_str));
-    if (!out.good()) {
-        cJSON_free(json_str);
-        DeleteFileW(temp_path.c_str());
-        return E_FAIL;
-    }
+    bool write_ok = out.good();
     out.close();
     cJSON_free(json_str);
 
-    if (!MoveFileExW(temp_path.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+    if (!write_ok) {
+        DeleteFileW(temp_path.c_str());
+        return E_FAIL;
+    }
+
+    if (!MoveFileExW(temp_path.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED | MOVEFILE_WRITE_THROUGH)) {
         DWORD error = GetLastError();
         DeleteFileW(temp_path.c_str());
         return HRESULT_FROM_WIN32(error);
