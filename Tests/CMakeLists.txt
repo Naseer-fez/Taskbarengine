@@ -31,7 +31,9 @@ add_executable(te_tests
     test_msg_filter.cpp
     test_timer.cpp
     test_stability.cpp
+    test_log.cpp
     ${CMAKE_SOURCE_DIR}/Core/src/config.c
+
     ${CMAKE_SOURCE_DIR}/Core/src/event_dispatch.c
     ${CMAKE_SOURCE_DIR}/Core/src/plugin_loader.c
     ${CMAKE_SOURCE_DIR}/Core/src/fault_isolation.c

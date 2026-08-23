@@ -9,8 +9,6 @@
 #include <math.h>
 
 static TE_IconHoverState* g_state = nullptr;
-static HANDLE g_timer_queue = NULL;
-static HANDLE g_timer = NULL;
 static HANDLE g_stop_event = NULL;
 static volatile LONG g_running = 0;
 static volatile LONG g_timer_active = 0;
@@ -23,10 +21,9 @@ static LARGE_INTEGER g_last_frame_qpc = {};
 
 static SRWLOCK g_timer_lock = SRWLOCK_INIT;
 
-static void CALLBACK FrameLoopCallback(PVOID lpParam, BOOLEAN TimerOrWaitFired)
+static void FrameLoopCallback(void* user_data)
 {
-    (void)lpParam;
-    (void)TimerOrWaitFired;
+    (void)user_data;
 
     if (!g_state || !g_running) return;
 
@@ -145,8 +142,8 @@ static void CALLBACK FrameLoopCallback(PVOID lpParam, BOOLEAN TimerOrWaitFired)
             TE_LayoutComputePositions(g_state->scales, g_state->base_centers_x, 
                                       g_state->displaced_x, g_state->displaced_y, 
                                       count, g_state->icon_size, (float)g_state->taskbar_rect.bottom);
-            ReleaseSRWLockExclusive(&g_state->icon_lock);
             TE_DcompUpdateVisuals(g_state);
+            ReleaseSRWLockExclusive(&g_state->icon_lock);
             TE_FrameLoopDeactivate();
             return;
         }
@@ -157,10 +154,10 @@ static void CALLBACK FrameLoopCallback(PVOID lpParam, BOOLEAN TimerOrWaitFired)
                               g_state->displaced_x, g_state->displaced_y, 
                               count, g_state->icon_size, (float)g_state->taskbar_rect.bottom);
 
-    ReleaseSRWLockExclusive(&g_state->icon_lock);
-
     /* Update DirectComposition visuals */
     TE_DcompUpdateVisuals(g_state);
+
+    ReleaseSRWLockExclusive(&g_state->icon_lock);
 }
 
 HRESULT TE_FrameLoopStart(TE_IconHoverState* state)
@@ -175,32 +172,38 @@ HRESULT TE_FrameLoopStart(TE_IconHoverState* state)
         return HRESULT_FROM_WIN32(GetLastError());
     }
     
-    g_timer_queue = CreateTimerQueue();
-    if (!g_timer_queue) {
-        HRESULT hr = HRESULT_FROM_WIN32(GetLastError());
+    g_running = 1;
+    HRESULT hr = TE_FrameLoopActivate();
+    if (FAILED(hr)) {
+        g_running = 0;
         CloseHandle(g_stop_event);
         g_stop_event = NULL;
         g_state = nullptr;
         return hr;
     }
 
-    g_running = 1;
-    TE_FrameLoopActivate();
-
     TE_DebugTrace("[TE-DBG] FrameLoop: Start complete, active loop running\n");
     return S_OK;
 }
 
-void TE_FrameLoopActivate(void)
+HRESULT TE_FrameLoopActivate(void)
 {
-    if (!g_running || !g_state || !g_timer_queue) return;
+    if (!g_running || !g_state) return S_FALSE;
 
+    HRESULT hr = S_OK;
     AcquireSRWLockExclusive(&g_timer_lock);
     if (!g_timer_active) {
-        g_timer_active = 1;
-        CreateTimerQueueTimer(&g_timer, g_timer_queue, FrameLoopCallback, NULL, 0, 16, WT_EXECUTEDEFAULT);
+        if (TE_CTX_HAS_FIELD(&g_state->ctx, register_timer) && g_state->ctx.register_timer) {
+            hr = g_state->ctx.register_timer(16, TRUE, FrameLoopCallback, NULL);
+            if (SUCCEEDED(hr)) {
+                g_timer_active = 1;
+            }
+        } else {
+            hr = E_NOTIMPL;
+        }
     }
     ReleaseSRWLockExclusive(&g_timer_lock);
+    return hr;
 }
 
 void TE_FrameLoopDeactivate(void)
@@ -208,10 +211,8 @@ void TE_FrameLoopDeactivate(void)
     AcquireSRWLockExclusive(&g_timer_lock);
     if (g_timer_active) {
         g_timer_active = 0;
-        if (g_timer && g_timer_queue) {
-            HANDLE t = g_timer;
-            g_timer = NULL;
-            DeleteTimerQueueTimer(g_timer_queue, t, NULL);
+        if (g_state && TE_CTX_HAS_FIELD(&g_state->ctx, cancel_timer) && g_state->ctx.cancel_timer) {
+            g_state->ctx.cancel_timer(FrameLoopCallback);
         }
     }
     ReleaseSRWLockExclusive(&g_timer_lock);
@@ -229,11 +230,6 @@ void TE_FrameLoopStop(void)
 
     TE_FrameLoopDeactivate();
 
-    if (g_timer_queue) {
-        DeleteTimerQueueEx(g_timer_queue, INVALID_HANDLE_VALUE);
-        g_timer_queue = NULL;
-    }
-    
     if (g_stop_event) {
         CloseHandle(g_stop_event);
         g_stop_event = NULL;

@@ -128,3 +128,4 @@ add_custom_command(TARGET TaskbarEngineSettings POST_BUILD
 )
 
 endif()
+set_target_properties(TaskbarEngine PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")

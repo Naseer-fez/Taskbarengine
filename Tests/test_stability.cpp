@@ -17,6 +17,7 @@ static HRESULT StabilityDummyEventCb(uint32_t type, const void* data, void* udat
     return S_OK;
 }
 
+#ifdef _MSC_VER
 TEST_CASE("Stability - Fault Isolation and Auto-Disable", "[stability][fault]") {
     TE_PluginEntry registry[TE_MAX_PLUGINS];
     memset(registry, 0, sizeof(registry));
@@ -66,6 +67,7 @@ TEST_CASE("Stability - Fault Isolation and Auto-Disable", "[stability][fault]") 
 
     TE_PluginLoaderUnloadAll(registry, count);
 }
+#endif
 
 TEST_CASE("Stability - Rapid Enable and Disable Cycles (100 iterations)", "[stability]") {
     TE_PluginEntry registry[TE_MAX_PLUGINS];

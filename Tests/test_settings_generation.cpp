@@ -135,36 +135,43 @@ TEST_CASE("Settings Schema Serialization and Parsing for GUI Controls", "[gui][s
 TEST_CASE("Settings Descriptor Struct Translation Integrity", "[gui][descriptors]") {
     const char* curve_options[] = { "gaussian", "cubic", "linear", "cosine" };
     
-    SettingDescriptor descriptors[] = {
-        {
-            "scale",
-            "Hover Scale",
-            "Magnification scale factor",
-            TE_SETTING_FLOAT,
-            { .f = { 1.35f, 1.0f, 2.0f, 0.05f } }
-        },
-        {
-            "radius",
-            "Effect Radius",
-            "Radius of neighbor icon scaling",
-            TE_SETTING_INT,
-            { .i = { 120, 40, 300, 10 } }
-        },
-        {
-            "curve",
-            "Easing Function",
-            "Interpolation curve",
-            TE_SETTING_ENUM,
-            { .e = { "gaussian", curve_options, 4 } }
-        },
-        {
-            "show_border",
-            "Show Border",
-            "Highlight active icon",
-            TE_SETTING_BOOL,
-            { .b = { false } }
-        }
-    };
+    SettingDescriptor d0 = {};
+    d0.key = "scale";
+    d0.label = "Hover Scale";
+    d0.tooltip = "Magnification scale factor";
+    d0.type = TE_SETTING_FLOAT;
+    d0.value.f.default_val = 1.35f;
+    d0.value.f.min = 1.0f;
+    d0.value.f.max = 2.0f;
+    d0.value.f.step = 0.05f;
+
+    SettingDescriptor d1 = {};
+    d1.key = "radius";
+    d1.label = "Effect Radius";
+    d1.tooltip = "Radius of neighbor icon scaling";
+    d1.type = TE_SETTING_INT;
+    d1.value.i.default_val = 120;
+    d1.value.i.min = 40;
+    d1.value.i.max = 300;
+    d1.value.i.step = 10;
+
+    SettingDescriptor d2 = {};
+    d2.key = "curve";
+    d2.label = "Easing Function";
+    d2.tooltip = "Interpolation curve";
+    d2.type = TE_SETTING_ENUM;
+    d2.value.e.default_val = "gaussian";
+    d2.value.e.options = curve_options;
+    d2.value.e.count = 4;
+
+    SettingDescriptor d3 = {};
+    d3.key = "show_border";
+    d3.label = "Show Border";
+    d3.tooltip = "Highlight active icon";
+    d3.type = TE_SETTING_BOOL;
+    d3.value.b.default_val = false;
+
+    SettingDescriptor descriptors[] = { d0, d1, d2, d3 };
 
     PluginSettings settings = {
         descriptors,

@@ -121,3 +121,43 @@ TEST_CASE("Timer - Dispatch Message Simulation", "[timer]") {
 
     TE_TimerShutdown();
 }
+
+static volatile LONG g_test_callback_active = 0;
+
+static void BlockingTimerCallback(void* user_data)
+{
+    (void)user_data;
+    InterlockedExchange(&g_test_callback_active, 1);
+    /* Block for a bit to simulate work that might deadlock with shutdown */
+    Sleep(500);
+    InterlockedExchange(&g_test_callback_active, 0);
+}
+
+TEST_CASE("Timer - Shutdown During Active Callback", "[timer]") {
+    REQUIRE(TE_TimerInit(NULL) == S_OK);
+    
+    g_test_callback_active = 0;
+    
+    uint32_t timer_id = 0;
+    REQUIRE(TE_TimerCreate(BlockingTimerCallback, NULL, 50, TRUE, 1, &timer_id) == S_OK);
+    
+    /* Wait for callback to become active */
+    int waits = 0;
+    while (!InterlockedCompareExchange(&g_test_callback_active, 0, 0) && waits < 10) {
+        Sleep(50);
+        waits++;
+    }
+    
+    REQUIRE(InterlockedCompareExchange(&g_test_callback_active, 0, 0) == 1);
+    
+    /* Call shutdown while callback is executing. It should not deadlock and should return. */
+    TE_TimerShutdown();
+    
+    /* Verify callback eventually completes */
+    waits = 0;
+    while (InterlockedCompareExchange(&g_test_callback_active, 0, 0) && waits < 20) {
+        Sleep(50);
+        waits++;
+    }
+    REQUIRE(InterlockedCompareExchange(&g_test_callback_active, 0, 0) == 0);
+}

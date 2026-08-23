@@ -2,6 +2,14 @@
 #include <core/config.h>
 #include <sdk/te_jsonc.h>
 
+extern "C" bool TE_CoreManagerIsPluginEnabledInConfig(const cJSON* config);
+extern "C" bool TE_CoreManagerIsPluginEnabledInConfig(const cJSON* config) {
+    if (!config) return false;
+    const cJSON* item = cJSON_GetObjectItemCaseSensitive(config, "enabled");
+    if (!item || !cJSON_IsBool(item)) return false;
+    return cJSON_IsTrue(item);
+}
+
 TEST_CASE("Config Parsing and Section Retrieval", "[config]") {
     SECTION("Parse config string and extract sections") {
         const char* json_str = R"({

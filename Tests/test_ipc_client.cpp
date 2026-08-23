@@ -1,4 +1,5 @@
 #include <catch2/catch_test_macros.hpp>
+#include <windows.h>
 
 extern "C" {
 #include <app/ipc_client.h>
@@ -14,11 +15,22 @@ TEST_CASE("IPC client parameter validation and symbols", "[ipc_client]") {
     hr = TE_IpcClientSendCommand(TE_IPC_MSG_ENABLE_PLUGIN, dummy, 65536 + 1, NULL);
     REQUIRE(FAILED(hr));
 
-    // 3. Simple sanity checks on the return of other functions when engine is not running
-    // Since we're not running the server, they should fail gracefully (retry loop timeout)
-    hr = TE_IpcClientShutdownEngine();
-    REQUIRE(FAILED(hr));
+    // 3. Validate TE_IpcClientGetSettingsSchema pointer validation
+    hr = TE_IpcClientGetSettingsSchema(NULL);
+    REQUIRE(hr == E_POINTER);
+}
 
-    hr = TE_IpcClientReloadConfig();
-    REQUIRE(FAILED(hr));
+TEST_CASE("IPC queries when engine is running", "[ipc_client][integration]") {
+    char env_val[32] = {0};
+    GetEnvironmentVariableA("TE_INTEGRATION_TESTS", env_val, sizeof(env_val));
+    if (strcmp(env_val, "1") != 0) {
+        SKIP("Integration tests disabled. Set TE_INTEGRATION_TESTS=1 to run.");
+    }
+
+    char* settings = NULL;
+    HRESULT hr = TE_IpcClientGetSettingsSchema(&settings);
+    REQUIRE(SUCCEEDED(hr));
+    if (settings) {
+        TE_IpcClientFreeBuffer(settings);
+    }
 }

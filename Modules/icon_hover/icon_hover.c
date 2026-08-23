@@ -169,16 +169,12 @@ static HRESULT IconHover_Init(const PluginContext* ctx) {
 }
 
 #define ICON_HOVER_INIT_TIMER_ID 0x54454948 /* 'TEIH' */
-static UINT_PTR g_deferred_init_timer_id = 0;
+static bool g_deferred_init_pending = false;
 
-static void CALLBACK DeferredInitTimerProc(HWND hwnd, UINT uMsg, UINT_PTR idEvent, DWORD dwTime)
+static void DeferredInitTimerCallback(void* user_data)
 {
-    (void)uMsg;
-    (void)dwTime;
-    /* Kill the timer first to prevent re-entrancy */
-    TE_DebugTraceFmt("[TE-DBG] IconHover: Deferred timer fired hwnd=0x%p id=0x%p\n", (void*)hwnd, (void*)idEvent);
-    KillTimer(hwnd, idEvent);
-    g_deferred_init_timer_id = 0;
+    (void)user_data;
+    g_deferred_init_pending = false;
     
     TE_LogWrite(TE_LOG_INFO, "IconHover running deferred initialization...");
     
@@ -268,17 +264,16 @@ static HRESULT IconHover_Enable(void) {
         return E_HANDLE;
     }
 
-    /* Use SetTimer instead of CreateTimerQueueTimer so the callback runs on
-     * the thread that owns taskbar_hwnd (Explorer's UI thread).  The previous
-     * WT_EXECUTEINTIMERTHREAD approach ran COM init, UIA discovery, DComp
-     * window creation, and EnumWindows on a thread-pool thread, corrupting
-     * Explorer's COM apartments and creating cross-thread window ownership. */
     TE_LogWrite(TE_LOG_INFO, "IconHover deferring enable to UI-thread timer");
-    g_deferred_init_timer_id = SetTimer(taskbar, ICON_HOVER_INIT_TIMER_ID, 50, DeferredInitTimerProc);
-    TE_DebugTraceFmt("[TE-DBG] IconHover: SetTimer returned id=0x%p err=%lu\n", (void*)g_deferred_init_timer_id, GetLastError());
-    if (!g_deferred_init_timer_id) {
-        TE_LogWrite(TE_LOG_ERROR, "IconHover SetTimer failed (err=%lu)", GetLastError());
-        return HRESULT_FROM_WIN32(GetLastError());
+    if (g_state.ctx.register_timer) {
+        HRESULT hr = g_state.ctx.register_timer(50, FALSE, DeferredInitTimerCallback, NULL);
+        if (FAILED(hr)) {
+            TE_LogWrite(TE_LOG_ERROR, "IconHover register_timer failed (hr=0x%08X)", hr);
+            return hr;
+        }
+        g_deferred_init_pending = true;
+    } else {
+        return E_NOTIMPL;
     }
     return S_OK;
 }
@@ -287,9 +282,9 @@ static HRESULT IconHover_Disable(void) {
     TE_DebugTrace("[TE-DBG] IconHover: Disable entering\n");
     InterlockedExchange(&g_state.enabled, 0);
     
-    if (g_deferred_init_timer_id && g_state.ctx.taskbar_hwnd) {
-        KillTimer(g_state.ctx.taskbar_hwnd, ICON_HOVER_INIT_TIMER_ID);
-        g_deferred_init_timer_id = 0;
+    if (g_deferred_init_pending && g_state.ctx.cancel_timer) {
+        g_state.ctx.cancel_timer(DeferredInitTimerCallback);
+        g_deferred_init_pending = false;
     }
 
     TE_FrameLoopStop();

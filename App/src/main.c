@@ -1,6 +1,7 @@
 #include "app/tray.h"
 #include "app/tray_menu.h"
 #include "app/crash_recovery.h"
+#include "app/ipc_client.h"
 #include "scheduler.h"
 #include <sdk/te_types.h>
 #include <sdk/te_log.h>
@@ -126,6 +127,7 @@ static LRESULT CALLBACK HiddenWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
 
         case WM_DESTROY:
             TE_CrashRecoveryStop();
+            TE_IpcClientShutdownEngine();
             if (g_hook != NULL) {
                 UnhookWindowsHookEx(g_hook);
                 g_hook = NULL;
@@ -194,7 +196,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
     wc.lpszClassName = L"TaskbarEngine_HiddenWnd";
     RegisterClassW(&wc);
 
-    HWND hwnd = CreateWindowExW(0, L"TaskbarEngine_HiddenWnd", L"TaskbarEngine Tray Host", 0, 0, 0, 0, 0, HWND_MESSAGE, NULL, hInstance, NULL);
+    HWND hwnd = CreateWindowExW(0, L"TaskbarEngine_HiddenWnd", L"TaskbarEngine Tray Host", 0, 0, 0, 0, 0, NULL, NULL, hInstance, NULL);
     if (hwnd == NULL) {
         TE_DebugTrace("[TaskbarEngine Tray] FATAL: CreateWindowExW for hidden window returned NULL\n");
         return 1;

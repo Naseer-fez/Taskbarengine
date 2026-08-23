@@ -99,10 +99,12 @@ static HRESULT CoreQueryState(const char* key, StateValue* out_val)
     return TE_StateQuery(key, out_val);
 }
 
-static bool IsPluginEnabledInConfig(const cJSON* config)
+bool TE_CoreManagerIsPluginEnabledInConfig(const cJSON* config)
 {
-    const cJSON* item = config ? cJSON_GetObjectItemCaseSensitive(config, "enabled") : NULL;
-    return !item || !cJSON_IsBool(item) || cJSON_IsTrue(item);
+    if (!config) return false;
+    const cJSON* item = cJSON_GetObjectItemCaseSensitive(config, "enabled");
+    if (!item || !cJSON_IsBool(item)) return false;
+    return cJSON_IsTrue(item);
 }
 
 HRESULT TE_CoreManagerInitPhaseA(HINSTANCE hinstance)
@@ -165,6 +167,31 @@ HRESULT TE_CoreManagerInitPhaseB(void)
     TE_MsgFilterInit();
     TE_TimerInit(g_core_state->taskbar_hwnd);
 
+    /* Load Configuration */
+    HRESULT hr = TE_ConfigLoad(g_core_state->config_path, &g_core_state->config_root);
+    TE_DebugTraceFmt("[TE-DBG] PhaseB: ConfigLoad returned hr=0x%08X\n", (unsigned int)hr);
+
+    TE_LogLevel min_level = TE_LOG_INFO;
+    bool log_to_file = true;
+    
+    if (SUCCEEDED(hr) && g_core_state->config_root) {
+        const cJSON* core_sec = TE_ConfigGetCoreSection(g_core_state->config_root);
+        if (core_sec) {
+            const cJSON* level_item = cJSON_GetObjectItemCaseSensitive(core_sec, "log_level");
+            if (level_item && cJSON_IsString(level_item)) {
+                if (_stricmp(level_item->valuestring, "debug") == 0) min_level = TE_LOG_DEBUG;
+                else if (_stricmp(level_item->valuestring, "info") == 0) min_level = TE_LOG_INFO;
+                else if (_stricmp(level_item->valuestring, "warn") == 0) min_level = TE_LOG_WARN;
+                else if (_stricmp(level_item->valuestring, "error") == 0) min_level = TE_LOG_ERROR;
+            }
+            
+            const cJSON* file_item = cJSON_GetObjectItemCaseSensitive(core_sec, "log_to_file");
+            if (file_item && cJSON_IsBool(file_item)) {
+                log_to_file = cJSON_IsTrue(file_item);
+            }
+        }
+    }
+
     /* Initialize Logging */
     wchar_t log_dir[MAX_PATH];
     wcsncpy(log_dir, g_core_state->config_path, MAX_PATH - 1);
@@ -172,9 +199,13 @@ HRESULT TE_CoreManagerInitPhaseB(void)
     wchar_t* last_slash = wcsrchr(log_dir, L'\\');
     if (last_slash) {
         wcsncpy(last_slash + 1, L"logs", MAX_PATH - (last_slash + 1 - log_dir) - 1);
-        TE_LogInit(log_dir, TE_LOG_DEBUG, true);
+        TE_LogInit(log_dir, min_level, log_to_file);
     } else {
-        TE_LogInit(NULL, TE_LOG_DEBUG, true);
+        TE_LogInit(NULL, min_level, log_to_file);
+    }
+
+    if (FAILED(hr)) {
+        TE_LogWrite(TE_LOG_WARN, "Failed to load config, starting with empty config");
     }
 
     TE_LogWrite(TE_LOG_INFO, "Core Manager initializing Phase B...");
@@ -203,13 +234,6 @@ HRESULT TE_CoreManagerInitPhaseB(void)
         TE_DebugTrace("[TE-DBG] PhaseB: PowerDeviceStart completed\n");
         TE_VDesktopNotifyStart(g_core_state->subscriptions, &g_core_state->subscription_count);
         TE_DebugTrace("[TE-DBG] PhaseB: VDesktopNotifyStart completed\n");
-    }
-
-    /* Load Configuration */
-    HRESULT hr = TE_ConfigLoad(g_core_state->config_path, &g_core_state->config_root);
-    TE_DebugTraceFmt("[TE-DBG] PhaseB: ConfigLoad returned hr=0x%08X\n", (unsigned int)hr);
-    if (FAILED(hr)) {
-        TE_LogWrite(TE_LOG_WARN, "Failed to load config, starting with empty config");
     }
 
     /* Resolve Modules Directory */
@@ -303,7 +327,7 @@ HRESULT TE_CoreManagerInitPhaseB(void)
         }
 
         /* Check enabled setting in config, only if compatibility check passed */
-        if (plugin->compat_status != TE_COMPAT_UNSUPPORTED_BUILD && IsPluginEnabledInConfig(plugin->context->config)) {
+        if (plugin->compat_status != TE_COMPAT_UNSUPPORTED_BUILD && TE_CoreManagerIsPluginEnabledInConfig(plugin->context->config)) {
             TE_DebugTraceFmt("[TE-DBG] PhaseB: Enabling plugin '%s'\n", plugin->metadata->name);
             TE_PluginLoaderEnable(plugin);
             TE_DebugTraceFmt("[TE-DBG] PhaseB: Plugin '%s' Enable returned\n", plugin->metadata->name);
@@ -426,7 +450,7 @@ void TE_CoreManagerOnConfigChanged(void* core_state_ptr)
             plugin->context->config = new_sec;
         }
 
-        const bool should_enable = IsPluginEnabledInConfig(new_sec);
+        const bool should_enable = TE_CoreManagerIsPluginEnabledInConfig(new_sec);
         if (should_enable && !plugin->enabled && plugin->compat_status != TE_COMPAT_UNSUPPORTED_BUILD) {
             TE_PluginLoaderEnable(plugin);
         } else if (!should_enable && plugin->enabled) {

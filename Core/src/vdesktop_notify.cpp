@@ -19,13 +19,13 @@ extern "C" HRESULT TE_VDesktopNotifyStart(TE_EventEntry* event_table, uint32_t* 
     if (FAILED(hr) && hr != RPC_E_CHANGED_MODE) {
         return hr;
     }
-    /* If we got S_OK (we were the first to init), balance it immediately
-     * so our shutdown does not tear down Explorer's COM. We already have
-     * a reference from Explorer's own initialization. */
+    /* If we got S_OK (we were the first to init), we must keep it initialized
+     * and balance it during shutdown. */
     if (hr == S_OK) {
-        CoUninitialize();
+        g_com_initialized = true;
+    } else {
+        g_com_initialized = false;
     }
-    g_com_initialized = false; /* Never uninitialize on our shutdown */
 
     g_event_table = event_table;
     g_sub_count = sub_count;

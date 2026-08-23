@@ -16,3 +16,4 @@ target_include_directories(te_sdk PUBLIC
 )
 
 target_compile_definitions(te_sdk PUBLIC _CRT_SECURE_NO_WARNINGS)
+set_target_properties(te_sdk PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")

@@ -3,37 +3,6 @@
 #include <windows.h>
 #include <sdk/te_log.h>
 
-#ifndef _MSC_VER
-#include <setjmp.h>
-
-static __thread jmp_buf g_veh_jmp;
-static __thread volatile LONG g_in_veh_guarded_call = 0;
-static PVOID g_veh_handle = NULL;
-static SRWLOCK g_veh_init_lock = SRWLOCK_INIT;
-
-static LONG WINAPI VehExceptionHandler(PEXCEPTION_POINTERS pExceptionInfo)
-{
-    if (g_in_veh_guarded_call && pExceptionInfo && pExceptionInfo->ExceptionRecord) {
-        DWORD code = pExceptionInfo->ExceptionRecord->ExceptionCode;
-        if (code == EXCEPTION_ACCESS_VIOLATION || code == EXCEPTION_ILLEGAL_INSTRUCTION ||
-            code == EXCEPTION_INT_DIVIDE_BY_ZERO || code == EXCEPTION_DATATYPE_MISALIGNMENT) {
-            longjmp(g_veh_jmp, 1);
-        }
-    }
-    return EXCEPTION_CONTINUE_SEARCH;
-}
-
-static void EnsureVehHandlerRegistered(void)
-{
-    if (!g_veh_handle) {
-        AcquireSRWLockExclusive(&g_veh_init_lock);
-        if (!g_veh_handle) {
-            g_veh_handle = AddVectoredExceptionHandler(1, VehExceptionHandler);
-        }
-        ReleaseSRWLockExclusive(&g_veh_init_lock);
-    }
-}
-#endif
 
 typedef struct WatchdogContext {
     volatile LONG fired;
@@ -101,17 +70,9 @@ HRESULT TE_FaultIsolationCallPlugin(TE_PluginEntry* entry, HRESULT (*callback)(v
                     (entry->metadata && entry->metadata->name) ? entry->metadata->name : "unknown");
     }
 #else
-    EnsureVehHandlerRegistered();
-    g_in_veh_guarded_call = 1;
-    if (setjmp(g_veh_jmp) == 0) {
-        hr = callback();
-    } else {
-        caught_exception = true;
-        TE_LogWrite(TE_LOG_ERROR, "VEH Exception caught during %s in plugin '%s'",
-                    callback_name ? callback_name : "callback",
-                    (entry->metadata && entry->metadata->name) ? entry->metadata->name : "unknown");
-    }
-    g_in_veh_guarded_call = 0;
+    (void)caught_exception;
+    (void)callback_name;
+    hr = callback();
 #endif
 
     if (timer_created && htimer) {
@@ -175,16 +136,8 @@ HRESULT TE_FaultIsolationCallPluginInit(TE_PluginEntry* entry, HRESULT (*callbac
                     (entry->metadata && entry->metadata->name) ? entry->metadata->name : "unknown");
     }
 #else
-    EnsureVehHandlerRegistered();
-    g_in_veh_guarded_call = 1;
-    if (setjmp(g_veh_jmp) == 0) {
-        hr = callback(ctx);
-    } else {
-        caught_exception = true;
-        TE_LogWrite(TE_LOG_ERROR, "VEH Exception caught during Initialize in plugin '%s'",
-                    (entry->metadata && entry->metadata->name) ? entry->metadata->name : "unknown");
-    }
-    g_in_veh_guarded_call = 0;
+    (void)caught_exception;
+    hr = callback(ctx);
 #endif
 
     if (timer_created && htimer) {
@@ -239,17 +192,8 @@ HRESULT TE_FaultIsolationCallEventCallback(TE_PluginEntry* entry, TE_EventCallba
                     (entry && entry->metadata && entry->metadata->name) ? entry->metadata->name : "unknown");
     }
 #else
-    EnsureVehHandlerRegistered();
-    g_in_veh_guarded_call = 1;
-    if (setjmp(g_veh_jmp) == 0) {
-        callback(type, event_data, user_data);
-    } else {
-        caught_exception = true;
-        TE_LogWrite(TE_LOG_ERROR, "VEH Exception caught in event callback (type %d) for plugin '%s'",
-                    (int)type,
-                    (entry && entry->metadata && entry->metadata->name) ? entry->metadata->name : "unknown");
-    }
-    g_in_veh_guarded_call = 0;
+    (void)caught_exception;
+    callback(type, event_data, user_data);
 #endif
 
     if (plugin_id > 0) {

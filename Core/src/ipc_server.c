@@ -60,7 +60,8 @@ static void IpcHandleMessage(HANDLE pipe, const TE_IpcHeader* header, const uint
                     break;
                 }
             } else {
-                TE_CoreManagerShutdownFromIpc();
+                IpcWriteMessage(pipe, TE_IPC_MSG_STATUS, "UNAVAILABLE", 11);
+                break;
             }
             IpcWriteMessage(pipe, TE_IPC_MSG_SHUTDOWN_COMPLETE, NULL, 0);
             if (g_ipc_stop_event) SetEvent(g_ipc_stop_event);
@@ -74,7 +75,8 @@ static void IpcHandleMessage(HANDLE pipe, const TE_IpcHeader* header, const uint
                     break;
                 }
             } else {
-                TE_CoreManagerReloadConfig();
+                IpcWriteMessage(pipe, TE_IPC_MSG_STATUS, "UNAVAILABLE", 11);
+                break;
             }
             IpcWriteMessage(pipe, TE_IPC_MSG_STATUS, "OK", 3);
             break;
@@ -95,8 +97,8 @@ static void IpcHandleMessage(HANDLE pipe, const TE_IpcHeader* header, const uint
                 }
                 hr = (HRESULT)(LONG)command_result;
             } else {
-                hr = TE_CoreManagerSetPluginEnabledByName((const char*)payload,
-                                                          header->type == TE_IPC_MSG_ENABLE_PLUGIN);
+                IpcWriteMessage(pipe, TE_IPC_MSG_STATUS, "UNAVAILABLE", 11);
+                break;
             }
             IpcWriteMessage(pipe, TE_IPC_MSG_STATUS, SUCCEEDED(hr) ? "OK" : "ERROR", SUCCEEDED(hr) ? 3 : 6);
             break;
@@ -119,7 +121,9 @@ static void IpcHandleMessage(HANDLE pipe, const TE_IpcHeader* header, const uint
                     break;
                 }
             } else {
-                sync_payload.result_code = TE_CoreManagerBuildPluginList(list, sync_payload.buffer_len);
+                IpcWriteMessage(pipe, TE_IPC_MSG_STATUS, "UNAVAILABLE", 11);
+                HeapFree(GetProcessHeap(), 0, list);
+                break;
             }
             IpcWriteMessage(pipe, TE_IPC_MSG_PLUGIN_LIST, list, sync_payload.result_code);
             HeapFree(GetProcessHeap(), 0, list);
@@ -142,7 +146,9 @@ static void IpcHandleMessage(HANDLE pipe, const TE_IpcHeader* header, const uint
                     break;
                 }
             } else {
-                sync_payload.result_code = TE_CoreManagerBuildSettingsSchema(schema, sync_payload.buffer_len);
+                IpcWriteMessage(pipe, TE_IPC_MSG_STATUS, "UNAVAILABLE", 11);
+                HeapFree(GetProcessHeap(), 0, schema);
+                break;
             }
             IpcWriteMessage(pipe, TE_IPC_MSG_SETTINGS_RESPONSE, schema, sync_payload.result_code);
             HeapFree(GetProcessHeap(), 0, schema);
@@ -165,7 +171,9 @@ static void IpcHandleMessage(HANDLE pipe, const TE_IpcHeader* header, const uint
                     break;
                 }
             } else {
-                sync_payload.result_code = TE_CoreManagerBuildPerfStats(stats, sync_payload.buffer_len);
+                IpcWriteMessage(pipe, TE_IPC_MSG_STATUS, "UNAVAILABLE", 11);
+                HeapFree(GetProcessHeap(), 0, stats);
+                break;
             }
             IpcWriteMessage(pipe, TE_IPC_MSG_PERF_STATS_RESPONSE, stats, sync_payload.result_code);
             HeapFree(GetProcessHeap(), 0, stats);

@@ -33,13 +33,14 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
     (void)lpvReserved;
 
     switch (fdwReason) {
-        case DLL_PROCESS_ATTACH:
+        case DLL_PROCESS_ATTACH: {
             g_hinst_dll = hinstDLL;
             TE_SetEngineInstance(hinstDLL);
             DisableThreadLibraryCalls(hinstDLL);
             /* OutputDebugStringA is safe under loader lock */
             OutputDebugStringA("[TE-DBG] DllMain: DLL_PROCESS_ATTACH\n");
             break;
+        }
 
         case DLL_PROCESS_DETACH:
             OutputDebugStringA("[TE-DBG] DllMain: DLL_PROCESS_DETACH\n");

@@ -86,8 +86,13 @@ static void TE_RotateLogs(const wchar_t* dir)
 static DWORD WINAPI TE_LogFlushThreadProc(LPVOID param)
 {
     (void)param;
-    while (g_log_running) {
-        WaitForSingleObject(g_flush_event, 100);
+    bool keep_running = true;
+    while (keep_running) {
+        keep_running = (g_log_running != 0);
+        
+        if (keep_running) {
+            WaitForSingleObject(g_flush_event, 100);
+        }
 
         if (!g_log_to_file || g_log_file_path[0] == L'\0') {
             /* If file logging is disabled, drain and clear unread entries */
@@ -115,7 +120,22 @@ static DWORD WINAPI TE_LogFlushThreadProc(LPVOID param)
         HANDLE hfile = CreateFileW(g_log_file_path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
                                    NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
         if (hfile == INVALID_HANDLE_VALUE) {
-            /* Skip draining if unable to open file */
+            /* If we can't open the file, drain the entries to prevent ring buffer deadlock */
+            while (r != w) {
+                uint32_t idx = ((uint32_t)r) & (TE_LOG_RING_SIZE - 1);
+                TE_LogEntry* entry = &g_ring_buffer[idx];
+                if (InterlockedCompareExchange(&entry->state, TE_LOG_STATE_READING, TE_LOG_STATE_UNREAD) == TE_LOG_STATE_UNREAD) {
+                    InterlockedExchange(&entry->state, TE_LOG_STATE_EMPTY);
+                    r = (LONG)((ULONG)r + 1u);
+                } else {
+                    break;
+                }
+            }
+            InterlockedExchange(&g_read_idx, r);
+
+#ifdef TE_DEBUG
+            OutputDebugStringA("[TE_WARN] Logger flush thread failed to open log file, dropping messages.\n");
+#endif
             continue;
         }
 
@@ -258,14 +278,10 @@ void TE_LogWriteV(TE_LogLevel level, const char* fmt, va_list args)
     uint32_t idx = ((uint32_t)w) & (TE_LOG_RING_SIZE - 1);
     TE_LogEntry* entry = &g_ring_buffer[idx];
 
-    /* A reservation is never abandoned; otherwise the consumer would stall at
-     * the resulting gap in the ordered ring. */
-    if (InterlockedCompareExchange(&entry->state, TE_LOG_STATE_WRITING, TE_LOG_STATE_EMPTY) != TE_LOG_STATE_EMPTY) {
-        entry->level = (uint32_t)TE_LOG_WARN;
-        entry->timestamp_ms = (uint32_t)GetTickCount64();
-        strcpy_s(entry->message, sizeof(entry->message), "Log entry dropped because its ring slot was unavailable.");
-        InterlockedExchange(&entry->state, TE_LOG_STATE_UNREAD);
-        return;
+    /* A RESERVATION IS NEVER ABANDONED; otherwise the consumer would stall at
+     * the resulting gap in the ordered ring. Spin until the slot is empty. */
+    while (InterlockedCompareExchange(&entry->state, TE_LOG_STATE_WRITING, TE_LOG_STATE_EMPTY) != TE_LOG_STATE_EMPTY) {
+        YieldProcessor();
     }
 
     entry->level = (uint32_t)level;

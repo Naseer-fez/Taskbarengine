@@ -86,6 +86,7 @@ Configuration is stored in `%LOCALAPPDATA%\TaskbarEngine\config.jsonc`:
 ## Building from Source
 
 ### Prerequisites
+- **Supported Compilers**: MSVC (`cl.exe`) or Clang-cl (`clang-cl.exe`) ONLY. MinGW, GCC, and GNU-compatible Clang are explicitly NOT supported due to ABI and Win32 COM requirements.
 - **Visual Studio 2022** (v17.4+ with *Desktop development with C++*)
 - **CMake** 3.25+
 - **Ninja** build system

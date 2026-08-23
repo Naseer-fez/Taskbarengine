@@ -66,7 +66,7 @@ void TE_EventDispatchTargeted(const TE_EventEntry* table, uint32_t count, TE_Eve
 {
     if (!table || count == 0) return;
 
-    for (uint32_t i = 0; i < count; i++) {
+    for (int32_t i = (int32_t)count - 1; i >= 0; i--) {
         if (table[i].type == type && table[i].callback != NULL) {
             if (target_plugin_id != 0 && table[i].plugin_id != 0 && table[i].plugin_id != target_plugin_id) {
                 continue; /* Skip event for non-targeted plugins */

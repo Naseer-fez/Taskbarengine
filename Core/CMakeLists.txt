@@ -35,3 +35,4 @@ set_target_properties(EngineDLL PROPERTIES
     PREFIX ""
     OUTPUT_NAME "EngineDLL"
 )
+set_target_properties(EngineDLL PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")

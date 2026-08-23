@@ -97,6 +97,12 @@ uint32_t TE_CoreManagerBuildSettingsSchema(char* buffer, size_t buffer_len);
  */
 uint32_t TE_CoreManagerBuildPerfStats(char* buffer, size_t buffer_len);
 
+/**
+ * @brief Evaluates whether a plugin's configuration section indicates it is enabled.
+ */
+struct cJSON;
+bool TE_CoreManagerIsPluginEnabledInConfig(const struct cJSON* config);
+
 #ifdef __cplusplus
 }
 #endif

@@ -34,7 +34,7 @@ HRESULT TE_ShellHookStart(HWND hwnd, TE_EventEntry* event_table, uint32_t* sub_c
     RegisterClassW(&wc);
 
     g_hook_hwnd = CreateWindowExW(0, L"TE_ShellHookHelper", L"", 0,
-                                  0, 0, 0, 0, HWND_MESSAGE, NULL,
+                                  0, 0, 0, 0, NULL, NULL,
                                   GetModuleHandleW(NULL), NULL);
     if (!g_hook_hwnd) return HRESULT_FROM_WIN32(GetLastError());
 

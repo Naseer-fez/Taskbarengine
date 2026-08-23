@@ -22,10 +22,13 @@ static HANDLE g_timer_queue = NULL;
 static HWND g_notify_hwnd = NULL;
 static SRWLOCK g_timer_lock = SRWLOCK_INIT;
 static volatile LONG g_timer_seq = 1;
+static volatile LONG g_timer_stopping = 0;
 
 static VOID CALLBACK TimerQueueRoutine(PVOID param, BOOLEAN timer_or_wait_fired)
 {
     (void)timer_or_wait_fired;
+    if (InterlockedCompareExchange(&g_timer_stopping, 0, 0)) return;
+
     uint32_t timer_id = (uint32_t)(uintptr_t)param;
 
     AcquireSRWLockShared(&g_timer_lock);
@@ -59,11 +62,14 @@ static VOID CALLBACK TimerQueueRoutine(PVOID param, BOOLEAN timer_or_wait_fired)
 
             if (!rec) {
                 target->cancelled = 1;
-                target->in_use = 0;
-                if (target->timer_handle && g_timer_queue) {
-                    DeleteTimerQueueTimer(g_timer_queue, target->timer_handle, NULL);
-                    target->timer_handle = NULL;
+                HANDLE th = target->timer_handle;
+                target->timer_handle = NULL;
+                if (th && g_timer_queue) {
+                    DeleteTimerQueueTimer(g_timer_queue, th, NULL);
                 }
+                /* We do not clear in_use here, letting the client cancel or it remains tombstoned. 
+                   Wait, actually for one-shot we should clear it. */
+                target->in_use = 0;
             }
 
             ReleaseSRWLockExclusive(&g_timer_lock);
@@ -77,21 +83,37 @@ static VOID CALLBACK TimerQueueRoutine(PVOID param, BOOLEAN timer_or_wait_fired)
 HRESULT TE_TimerInit(HWND notify_hwnd)
 {
     AcquireSRWLockExclusive(&g_timer_lock);
+    InterlockedExchange(&g_timer_stopping, 1);
+    HANDLE saved_queue = g_timer_queue;
+    g_timer_queue = NULL;
 
-    if (g_timer_queue) {
-        DeleteTimerQueueEx(g_timer_queue, INVALID_HANDLE_VALUE);
-        g_timer_queue = NULL;
+    for (int i = 0; i < TE_MAX_TIMERS; i++) {
+        if (g_timers[i].in_use) {
+            g_timers[i].cancelled = 1;
+            if (g_timers[i].timer_handle && saved_queue) {
+                DeleteTimerQueueTimer(saved_queue, g_timers[i].timer_handle, NULL);
+                g_timers[i].timer_handle = NULL;
+            }
+        }
+    }
+    ReleaseSRWLockExclusive(&g_timer_lock);
+
+    if (saved_queue) {
+        DeleteTimerQueueEx(saved_queue, INVALID_HANDLE_VALUE);
     }
 
+    AcquireSRWLockExclusive(&g_timer_lock);
     memset(g_timers, 0, sizeof(g_timers));
     g_notify_hwnd = notify_hwnd;
 
     g_timer_queue = CreateTimerQueue();
     if (!g_timer_queue) {
+        InterlockedExchange(&g_timer_stopping, 0);
         ReleaseSRWLockExclusive(&g_timer_lock);
         return HRESULT_FROM_WIN32(GetLastError());
     }
 
+    InterlockedExchange(&g_timer_stopping, 0);
     ReleaseSRWLockExclusive(&g_timer_lock);
     return S_OK;
 }
@@ -105,6 +127,11 @@ HRESULT TE_TimerCreate(TE_TimerCallback callback, void* user_data,
     }
 
     AcquireSRWLockExclusive(&g_timer_lock);
+
+    if (InterlockedCompareExchange(&g_timer_stopping, 0, 0)) {
+        ReleaseSRWLockExclusive(&g_timer_lock);
+        return E_FAIL;
+    }
 
     if (!g_timer_queue) {
         g_timer_queue = CreateTimerQueue();
@@ -294,27 +321,30 @@ void TE_TimerDispatchMessage(WPARAM wParam, LPARAM lParam)
 void TE_TimerShutdown(void)
 {
     AcquireSRWLockExclusive(&g_timer_lock);
+    InterlockedExchange(&g_timer_stopping, 1);
+    HANDLE saved_queue = g_timer_queue;
+    g_timer_queue = NULL;
 
     for (int i = 0; i < TE_MAX_TIMERS; i++) {
         if (g_timers[i].in_use) {
             g_timers[i].cancelled = 1;
-            g_timers[i].in_use = 0;
-            if (g_timers[i].timer_handle && g_timer_queue) {
-                DeleteTimerQueueTimer(g_timer_queue, g_timers[i].timer_handle, NULL);
+            /* Do not clear in_use to prevent slot reuse while queue drains */
+            if (g_timers[i].timer_handle && saved_queue) {
+                DeleteTimerQueueTimer(saved_queue, g_timers[i].timer_handle, NULL);
                 g_timers[i].timer_handle = NULL;
             }
         }
     }
+    ReleaseSRWLockExclusive(&g_timer_lock);
 
-    memset(g_timers, 0, sizeof(g_timers));
-
-    if (g_timer_queue) {
-        DeleteTimerQueueEx(g_timer_queue, INVALID_HANDLE_VALUE);
-        g_timer_queue = NULL;
+    if (saved_queue) {
+        DeleteTimerQueueEx(saved_queue, INVALID_HANDLE_VALUE);
     }
 
+    AcquireSRWLockExclusive(&g_timer_lock);
+    memset(g_timers, 0, sizeof(g_timers));
     g_notify_hwnd = NULL;
-
+    InterlockedExchange(&g_timer_stopping, 0);
     ReleaseSRWLockExclusive(&g_timer_lock);
 }
 

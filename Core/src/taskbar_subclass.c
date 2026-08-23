@@ -164,7 +164,8 @@ static LRESULT CALLBACK TaskbarSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam,
         case WM_NCDESTROY: {
             TE_DebugTrace("[TE-DBG] SubclassProc: WM_NCDESTROY - Shell_TrayWnd is being DESTROYED!\n");
             RemoveWindowSubclass(hWnd, TaskbarSubclassProc, TASKBAR_SUBCLASS_ID);
-            TE_LogWrite(TE_LOG_INFO, "Subclass automatically removed on WM_NCDESTROY");
+            TE_LogWrite(TE_LOG_INFO, "Subclass automatically removed on WM_NCDESTROY, triggering Core Manager shutdown");
+            TE_CoreManagerShutdown();
             break;
         }
     }

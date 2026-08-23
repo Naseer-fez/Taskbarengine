@@ -9,13 +9,20 @@ static HWND g_notify_hwnd = NULL;
 static wchar_t g_watch_dir[MAX_PATH] = { 0 };
 static volatile LONG g_watcher_running = 0;
 
+static HANDLE g_debounce_active_event = NULL;
+
 static VOID CALLBACK DebounceTimerCallback(PVOID lpParameter, BOOLEAN TimerOrWaitFired)
 {
     (void)lpParameter;
     (void)TimerOrWaitFired;
-    if (g_notify_hwnd && IsWindow(g_notify_hwnd)) {
+    InterlockedExchangePointer((PVOID volatile*)&g_timer_handle, NULL);
+    HWND hwnd = g_notify_hwnd;
+    if (g_watcher_running && hwnd && IsWindow(hwnd)) {
         TE_LogWrite(TE_LOG_INFO, "Config file change debounced (100ms), posting WM_TE_CONFIG_CHANGED");
-        PostMessageW(g_notify_hwnd, WM_TE_CONFIG_CHANGED, 0, 0);
+        PostMessageW(hwnd, WM_TE_CONFIG_CHANGED, 0, 0);
+    }
+    if (g_debounce_active_event) {
+        SetEvent(g_debounce_active_event);
     }
 }
 
@@ -40,7 +47,6 @@ static DWORD WINAPI WatcherThreadProc(LPVOID param)
         return 1;
     }
 
-
     HANDLE handles[2] = { g_stop_event, ov.hEvent };
 
     while (g_watcher_running) {
@@ -62,13 +68,40 @@ static DWORD WINAPI WatcherThreadProc(LPVOID param)
             break;
         } else if (wait_res == WAIT_OBJECT_0 + 1) {
             /* Directory change signaled */
-            HANDLE old_timer = (HANDLE)InterlockedExchangePointer((PVOID volatile*)&g_timer_handle, NULL);
-            if (old_timer) {
-                DeleteTimerQueueTimer(NULL, old_timer, NULL);
-            }
-            HANDLE new_timer = NULL;
-            if (CreateTimerQueueTimer(&new_timer, NULL, DebounceTimerCallback, NULL, 100, 0, WT_EXECUTEONLYONCE)) {
-                InterlockedExchangePointer((PVOID volatile*)&g_timer_handle, new_timer);
+            BOOL is_target = FALSE;
+            DWORD offset = 0;
+            PFILE_NOTIFY_INFORMATION pni = (PFILE_NOTIFY_INFORMATION)buffer;
+            do {
+                if (pni->FileNameLength > 0) {
+                    wchar_t filename[MAX_PATH] = { 0 };
+                    DWORD chars = pni->FileNameLength / sizeof(wchar_t);
+                    if (chars < MAX_PATH) {
+                        wcsncpy(filename, pni->FileName, chars);
+                        filename[chars] = L'\0';
+                        if (_wcsicmp(filename, L"config.jsonc") == 0) {
+                            is_target = TRUE;
+                            break;
+                        }
+                    }
+                }
+                offset = pni->NextEntryOffset;
+                pni = (PFILE_NOTIFY_INFORMATION)((LPBYTE)pni + offset);
+            } while (offset != 0);
+
+            if (is_target) {
+                HANDLE old_timer = (HANDLE)InterlockedExchangePointer((PVOID volatile*)&g_timer_handle, NULL);
+                if (old_timer) {
+                    DeleteTimerQueueTimer(NULL, old_timer, NULL);
+                }
+                if (g_debounce_active_event) {
+                    ResetEvent(g_debounce_active_event);
+                }
+                HANDLE new_timer = NULL;
+                if (CreateTimerQueueTimer(&new_timer, NULL, DebounceTimerCallback, NULL, 100, 0, WT_EXECUTEONLYONCE)) {
+                    InterlockedExchangePointer((PVOID volatile*)&g_timer_handle, new_timer);
+                } else if (g_debounce_active_event) {
+                    SetEvent(g_debounce_active_event);
+                }
             }
         } else {
             break;
@@ -91,6 +124,14 @@ HRESULT TE_ConfigWatcherStart(const wchar_t* config_dir, HWND notify_hwnd)
 
     g_stop_event = CreateEventW(NULL, TRUE, FALSE, NULL);
     if (!g_stop_event) return HRESULT_FROM_WIN32(GetLastError());
+    
+    g_debounce_active_event = CreateEventW(NULL, TRUE, TRUE, NULL); // Manual reset, initially signaled
+    if (!g_debounce_active_event) {
+        CloseHandle(g_stop_event);
+        g_stop_event = NULL;
+        return HRESULT_FROM_WIN32(GetLastError());
+    }
+    
     g_watcher_running = 1;
 
     g_thread_handle = CreateThread(NULL, 0, WatcherThreadProc, NULL, 0, NULL);
@@ -116,7 +157,7 @@ void TE_ConfigWatcherStop(void)
     }
 
     if (g_thread_handle) {
-        WaitForSingleObject(g_thread_handle, 1000);
+        WaitForSingleObject(g_thread_handle, INFINITE);
         CloseHandle(g_thread_handle);
         g_thread_handle = NULL;
     }
@@ -129,5 +170,14 @@ void TE_ConfigWatcherStop(void)
     HANDLE old_timer = (HANDLE)InterlockedExchangePointer((PVOID volatile*)&g_timer_handle, NULL);
     if (old_timer) {
         DeleteTimerQueueTimer(NULL, old_timer, INVALID_HANDLE_VALUE);
+    } else if (g_debounce_active_event) {
+        WaitForSingleObject(g_debounce_active_event, INFINITE);
     }
+    
+    if (g_debounce_active_event) {
+        CloseHandle(g_debounce_active_event);
+        g_debounce_active_event = NULL;
+    }
+    
+    g_notify_hwnd = NULL;
 }

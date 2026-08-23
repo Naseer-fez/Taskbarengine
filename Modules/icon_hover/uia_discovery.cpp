@@ -10,25 +10,20 @@
 using Microsoft::WRL::ComPtr;
 
 static ComPtr<IUIAutomation> g_uia;
-static bool g_uia_com_initialized = false;
+static int g_uia_com_initialized = 0;
 
 HRESULT TE_UiaInit(void)
 {
-    /* Explorer's UI thread already has a COM apartment initialized.
-     * We ensure COM is available but NEVER call CoUninitialize since
-     * we do not own Explorer's apartment. */
     TE_DebugTrace("[TE-DBG] UIA: TE_UiaInit entering\n");
     HRESULT hr_com = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
     TE_DebugTraceFmt("[TE-DBG] UIA: CoInitializeEx returned hr=0x%08X\n", (unsigned int)hr_com);
-    if (FAILED(hr_com) && hr_com != RPC_E_CHANGED_MODE) {
+    if (SUCCEEDED(hr_com)) {
+        g_uia_com_initialized++;
+    } else if (hr_com != RPC_E_CHANGED_MODE) {
         TE_DebugTraceFmt("[TE-DBG] UIA: CoInitializeEx failed hr=0x%08X\n", (unsigned int)hr_com);
         return hr_com;
     }
-
-    /* Never call CoUninitialize here. This runs on Explorer's taskbar UI
-     * thread; tearing down that apartment can silently destroy Shell_TrayWnd. */
-    g_uia_com_initialized = false; /* Never uninitialize on our shutdown */
-    TE_DebugTrace("[TE-DBG] UIA: TE_UiaInit leaving without CoUninitialize\n");
+    
     return S_OK;
 }
 
@@ -141,7 +136,10 @@ HRESULT TE_UiaDiscoverIcons(HWND taskbar_hwnd, TE_TaskbarIcon* out_icons, int ma
 
 void TE_UiaCleanup(void)
 {
-    TE_DebugTrace("[TE-DBG] UIA: Cleanup resetting UIA pointer without CoUninitialize\n");
+    TE_DebugTrace("[TE-DBG] UIA: Cleanup resetting UIA pointer\n");
     g_uia.Reset();
-    /* Never call CoUninitialize — we do not own Explorer's COM apartment */
+    while (g_uia_com_initialized > 0) {
+        CoUninitialize();
+        g_uia_com_initialized--;
+    }
 }

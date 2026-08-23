@@ -113,3 +113,85 @@ HRESULT TE_IpcClientReloadConfig(void)
     if (FAILED(hr)) return hr;
     return (response == TE_IPC_MSG_STATUS) ? S_OK : E_FAIL;
 }
+
+HRESULT TE_IpcClientGetSettingsSchema(char** out_schema)
+{
+    if (!out_schema) return E_POINTER;
+    *out_schema = NULL;
+
+    HANDLE pipe = INVALID_HANDLE_VALUE;
+    const DWORD total_timeout_ms = 2000;
+    DWORD start_tick = GetTickCount();
+
+    for (int attempt = 0; attempt < 5; attempt++) {
+        pipe = CreateFileW(TE_PIPE_NAME, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (pipe != INVALID_HANDLE_VALUE) break;
+        DWORD err = GetLastError();
+        if (err != ERROR_PIPE_BUSY && err != ERROR_FILE_NOT_FOUND) return HRESULT_FROM_WIN32(err);
+        DWORD elapsed = GetTickCount() - start_tick;
+        if (elapsed >= total_timeout_ms) return HRESULT_FROM_WIN32(ERROR_TIMEOUT);
+        DWORD remaining = total_timeout_ms - elapsed;
+        if (!WaitNamedPipeW(TE_PIPE_NAME, remaining > 200 ? 200 : remaining)) {
+            DWORD wait_err = GetLastError();
+            if (wait_err != ERROR_SEM_TIMEOUT && wait_err != ERROR_FILE_NOT_FOUND) return HRESULT_FROM_WIN32(wait_err);
+        }
+    }
+
+    if (pipe == INVALID_HANDLE_VALUE) {
+        DWORD last_err = GetLastError();
+        return HRESULT_FROM_WIN32(last_err == ERROR_SUCCESS ? ERROR_TIMEOUT : last_err);
+    }
+
+    size_t send_buf_size = sizeof(TE_IpcHeader);
+    uint8_t* send_buf = (uint8_t*)HeapAlloc(GetProcessHeap(), 0, send_buf_size);
+    if (!send_buf) {
+        CloseHandle(pipe);
+        return E_OUTOFMEMORY;
+    }
+
+    uint32_t total = 0;
+    HRESULT hr = TE_IpcSerialize(send_buf, send_buf_size, TE_IPC_MSG_GET_SETTINGS, NULL, 0, &total);
+    if (SUCCEEDED(hr)) {
+        DWORD written = 0;
+        if (!WriteFile(pipe, send_buf, total, &written, NULL) || written != total) {
+            DWORD error = GetLastError();
+            hr = HRESULT_FROM_WIN32(error != ERROR_SUCCESS ? error : ERROR_WRITE_FAULT);
+        }
+    }
+    HeapFree(GetProcessHeap(), 0, send_buf);
+
+    if (SUCCEEDED(hr)) {
+        TE_IpcHeader response;
+        hr = TE_IpcReadExact(pipe, &response, sizeof(response));
+        if (SUCCEEDED(hr)) hr = TE_IpcValidateHeader(&response);
+        if (SUCCEEDED(hr)) {
+            if (response.type != TE_IPC_MSG_SETTINGS_RESPONSE) {
+                hr = E_UNEXPECTED;
+            } else if (response.payload_length == 0 || response.payload_length > TE_IPC_MAX_PAYLOAD) {
+                hr = HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
+            } else {
+                char* schema_buf = (char*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (size_t)response.payload_length + 1);
+                if (!schema_buf) {
+                    hr = E_OUTOFMEMORY;
+                } else {
+                    hr = TE_IpcReadExact(pipe, schema_buf, response.payload_length);
+                    if (SUCCEEDED(hr)) {
+                        *out_schema = schema_buf;
+                    } else {
+                        HeapFree(GetProcessHeap(), 0, schema_buf);
+                    }
+                }
+            }
+        }
+    }
+
+    CloseHandle(pipe);
+    return hr;
+}
+
+void TE_IpcClientFreeBuffer(void* buffer)
+{
+    if (buffer) {
+        HeapFree(GetProcessHeap(), 0, buffer);
+    }
+}

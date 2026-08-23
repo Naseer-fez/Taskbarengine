@@ -12,11 +12,29 @@ jobs:
   - checkout: self
     submodules: true
 
+  - powershell: |
+      New-Item -ItemType Directory -Force -Path "$(Build.SourcesDirectory)\deps"
+      cd "$(Build.SourcesDirectory)\deps"
+      
+      Invoke-WebRequest -Uri "https://www.nuget.org/api/v2/package/Microsoft.WindowsAppSDK/1.5.240311000" -OutFile "Microsoft.WindowsAppSDK.zip"
+      Expand-Archive -Path "Microsoft.WindowsAppSDK.zip" -DestinationPath "Microsoft.WindowsAppSDK"
+      
+      Invoke-WebRequest -Uri "https://www.nuget.org/api/v2/package/Microsoft.Windows.CppWinRT/2.0.240111.5" -OutFile "Microsoft.Windows.CppWinRT.zip"
+      Expand-Archive -Path "Microsoft.Windows.CppWinRT.zip" -DestinationPath "Microsoft.Windows.CppWinRT"
+      
+      New-Item -ItemType Directory -Force -Path "Microsoft.WindowsAppSDK\tools\MSIX\win10-x64\extracted"
+      $msix = Get-ChildItem -Path "Microsoft.WindowsAppSDK\tools\MSIX\win10-x64" -Filter "*WindowsAppRuntime*.msix" | Select-Object -First 1
+      if ($msix) {
+          Copy-Item -Path $msix.FullName -Destination "Microsoft.WindowsAppSDK\tools\MSIX\win10-x64\framework.zip"
+          Expand-Archive -Path "Microsoft.WindowsAppSDK\tools\MSIX\win10-x64\framework.zip" -DestinationPath "Microsoft.WindowsAppSDK\tools\MSIX\win10-x64\extracted"
+      }
+    displayName: 'Provision Windows App SDK and CppWinRT'
+
   - task: CMake@1
     displayName: 'Configure CMake (MSVC Release)'
     inputs:
       workingDirectory: '$(Build.SourcesDirectory)'
-      cmakeArgs: '-B build -G Ninja -DCMAKE_BUILD_TYPE=Release'
+      cmakeArgs: '-B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DWINAPPSDK_ROOT="$(Build.SourcesDirectory)/deps/Microsoft.WindowsAppSDK" -DWINAPPSDK_CPPWINRT="$(Build.SourcesDirectory)/deps/Microsoft.Windows.CppWinRT" -DWINAPPSDK_FRAMEWORK_DIR="$(Build.SourcesDirectory)/deps/Microsoft.WindowsAppSDK/tools/MSIX/win10-x64/extracted"'
 
   - task: CMake@1
     displayName: 'Build Release Targets'
@@ -40,6 +58,14 @@ jobs:
     displayName: 'Run System Benchmark Suite'
 
   - powershell: |
+      if (-not (Test-Path "build\bin\TaskbarEngineSettings.exe")) {
+          Write-Error "TaskbarEngineSettings.exe was not built!"
+          exit 1
+      }
+      if (-not (Test-Path "build\bin\Microsoft.WindowsAppRuntime.Bootstrap.dll")) {
+          Write-Error "Windows App SDK runtime binaries were not deployed!"
+          exit 1
+      }
       powershell -File Scripts\package.ps1 -BuildDir build -DestinationZip "$(Build.ArtifactStagingDirectory)\TaskbarEngine-v1.0.0.zip"
     displayName: 'Create Release ZIP Package'
 
@@ -61,11 +87,29 @@ jobs:
   - checkout: self
     submodules: true
 
+  - powershell: |
+      New-Item -ItemType Directory -Force -Path "$(Build.SourcesDirectory)\deps"
+      cd "$(Build.SourcesDirectory)\deps"
+      
+      Invoke-WebRequest -Uri "https://www.nuget.org/api/v2/package/Microsoft.WindowsAppSDK/1.5.240311000" -OutFile "Microsoft.WindowsAppSDK.zip"
+      Expand-Archive -Path "Microsoft.WindowsAppSDK.zip" -DestinationPath "Microsoft.WindowsAppSDK"
+      
+      Invoke-WebRequest -Uri "https://www.nuget.org/api/v2/package/Microsoft.Windows.CppWinRT/2.0.240111.5" -OutFile "Microsoft.Windows.CppWinRT.zip"
+      Expand-Archive -Path "Microsoft.Windows.CppWinRT.zip" -DestinationPath "Microsoft.Windows.CppWinRT"
+      
+      New-Item -ItemType Directory -Force -Path "Microsoft.WindowsAppSDK\tools\MSIX\win10-x64\extracted"
+      $msix = Get-ChildItem -Path "Microsoft.WindowsAppSDK\tools\MSIX\win10-x64" -Filter "*WindowsAppRuntime*.msix" | Select-Object -First 1
+      if ($msix) {
+          Copy-Item -Path $msix.FullName -Destination "Microsoft.WindowsAppSDK\tools\MSIX\win10-x64\framework.zip"
+          Expand-Archive -Path "Microsoft.WindowsAppSDK\tools\MSIX\win10-x64\framework.zip" -DestinationPath "Microsoft.WindowsAppSDK\tools\MSIX\win10-x64\extracted"
+      }
+    displayName: 'Provision Windows App SDK and CppWinRT'
+
   - task: CMake@1
     displayName: 'Configure CMake (Clang-cl ASan)'
     inputs:
       workingDirectory: '$(Build.SourcesDirectory)'
-      cmakeArgs: '-B build_asan -G Ninja -DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl -DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_FLAGS="-fsanitize=address" -DCMAKE_CXX_FLAGS="-fsanitize=address" -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address" -DCMAKE_SHARED_LINKER_FLAGS="-fsanitize=address"'
+      cmakeArgs: '-B build_asan -G Ninja -DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl -DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_FLAGS="-fsanitize=address" -DCMAKE_CXX_FLAGS="-fsanitize=address" -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address" -DCMAKE_SHARED_LINKER_FLAGS="-fsanitize=address" -DWINAPPSDK_ROOT="$(Build.SourcesDirectory)/deps/Microsoft.WindowsAppSDK" -DWINAPPSDK_CPPWINRT="$(Build.SourcesDirectory)/deps/Microsoft.Windows.CppWinRT" -DWINAPPSDK_FRAMEWORK_DIR="$(Build.SourcesDirectory)/deps/Microsoft.WindowsAppSDK/tools/MSIX/win10-x64/extracted"'
 
   - task: CMake@1
     displayName: 'Build Debug ASan'

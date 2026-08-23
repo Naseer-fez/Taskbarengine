@@ -7,7 +7,7 @@ extern "C" {
 
 HRESULT TE_FrameLoopStart(TE_IconHoverState* state);
 void TE_FrameLoopStop(void);
-void TE_FrameLoopActivate(void);
+HRESULT TE_FrameLoopActivate(void);
 void TE_FrameLoopDeactivate(void);
 void TE_FrameLoopUpdateMouse(int x, int y);
 
