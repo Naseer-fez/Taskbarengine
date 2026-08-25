@@ -6,9 +6,14 @@ description: Use this skill to understand the phase-by-phase implementation road
 
 You have been tasked with rebuilding TaskbarEngine. This is a complex, multi-phase systems engineering project.
 
-To plan your work efficiently:
-1. Read the index: `d:/CODE/Utlities/Taskbar/implementations/README.md`
-2. Read the phase roadmap: `d:/CODE/Utlities/Taskbar/implementations/06_reconstruction_phases.md`
+**CRITICAL TOKEN-SAVING RULE:** 
+DO NOT read entire documentation files (like `06_reconstruction_phases.md`) into context. They are massive and waste tokens. 
+Instead, when you need to know about a specific Phase (e.g., Phase 2), you MUST:
+1. Run `grep_search` to find the exact line numbers for that phase (e.g., `grep_search` for "Phase 2" in `06_reconstruction_phases.md`).
+2. Use `view_file` with `StartLine` and `EndLine` to read ONLY the section of the document that pertains to your current phase.
+
+**Roadmap Information:**
+- The phase roadmap is located at: `d:/CODE/Utlities/Taskbar/implementations/06_reconstruction_phases.md`
 
 **How to execute a phase:**
 - Each phase in the roadmap defines its Objective, Implementation steps, Components, Dependencies, Validation steps, and Exit Criteria.
