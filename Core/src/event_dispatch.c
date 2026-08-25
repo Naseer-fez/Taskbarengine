@@ -59,7 +59,7 @@ HRESULT TE_EventDispatchUnsubscribe(uint32_t event_type, TE_EventCallback callba
             g_subscriptions[i].active = FALSE;
             g_subscription_count--;
             
-            // Compact array
+            /* Compact array */
             for (uint32_t j = i; j < TE_MAX_SUBSCRIPTIONS - 1; ++j) {
                 g_subscriptions[j] = g_subscriptions[j + 1];
             }
@@ -75,11 +75,15 @@ void TE_EventDispatchFire(uint32_t event_type, const void* event_data)
 {
     for (uint32_t i = 0; i < TE_MAX_SUBSCRIPTIONS; ++i) {
         if (g_subscriptions[i].active && g_subscriptions[i].event_type == event_type) {
+#ifdef _MSC_VER
             __try {
                 g_subscriptions[i].callback(event_type, event_data, g_subscriptions[i].user_data);
             } __except(EXCEPTION_EXECUTE_HANDLER) {
                 TE_LogWrite(TE_LOG_ERROR, "EventDispatch", "Exception caught in event callback");
             }
+#else
+            g_subscriptions[i].callback(event_type, event_data, g_subscriptions[i].user_data);
+#endif
         }
     }
 }

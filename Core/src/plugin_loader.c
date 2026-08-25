@@ -84,7 +84,7 @@ HRESULT TE_PluginLoaderScanAndLoad(const wchar_t* modules_dir) {
                     
                     HMODULE hMod = LoadLibraryW(dll_path);
                     if (hMod) {
-                        GetPluginInterfaceFunc get_interface = (GetPluginInterfaceFunc)GetProcAddress(hMod, "GetPluginInterface");
+                        GetPluginInterfaceFunc get_interface = (GetPluginInterfaceFunc)(void*)GetProcAddress(hMod, "GetPluginInterface");
                         if (get_interface) {
                             const PluginInterface* iface = get_interface();
                             if (iface) {

@@ -34,7 +34,7 @@ HRESULT TE_CoreManagerInit(HWND taskbar_hwnd) {
     memset(&g_core, 0, sizeof(g_core));
     g_core.taskbar_hwnd = taskbar_hwnd;
     
-    GetDpiForWindow_t pGetDpiForWindow = (GetDpiForWindow_t)GetProcAddress(GetModuleHandleW(L"user32.dll"), "GetDpiForWindow");
+    GetDpiForWindow_t pGetDpiForWindow = (GetDpiForWindow_t)(void*)GetProcAddress(GetModuleHandleW(L"user32.dll"), "GetDpiForWindow");
     if (pGetDpiForWindow) {
         g_core.dpi = pGetDpiForWindow(taskbar_hwnd);
     } else {

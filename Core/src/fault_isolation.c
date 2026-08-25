@@ -19,6 +19,7 @@ HRESULT TE_FaultIsolatedCall(int* fault_count, const char* plugin_name,
     if (!method) return TE_E_INVALIDARG;
     
     HRESULT hr = TE_S_OK;
+#ifdef _MSC_VER
     __try {
         hr = method();
     } __except(TE_FaultFilter(GetExceptionInformation(), plugin_name)) {
@@ -35,5 +36,11 @@ HRESULT TE_FaultIsolatedCall(int* fault_count, const char* plugin_name,
         
         hr = TE_E_FAIL;
     }
+#else
+    (void)plugin_name;
+    (void)method_name;
+    (void)fault_count;
+    hr = method();
+#endif
     return hr;
 }

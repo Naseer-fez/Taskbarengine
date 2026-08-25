@@ -13,6 +13,7 @@ add_library(EngineDLL SHARED
 
 target_include_directories(EngineDLL PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/ThirdParty/cJSON
 )
 
 target_link_libraries(EngineDLL PRIVATE
