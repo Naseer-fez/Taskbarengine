@@ -1,5 +1,9 @@
 # TaskbarEngine
 
+> [!WARNING]
+> **V2 Reconstruction in Progress**
+> This repository is currently undergoing a complete V2 reconstruction on the `V2` branch. The V1 codebase has been archived, and we are currently implementing a new highly-optimized architecture (Two-process model, zero-latency DirectComposition rendering, and strict C17 Plugin ABI). Please see the `V2` branch and `implementations/` directory for the latest technical specifications and roadmap.
+
 [![Build Status](https://dev.azure.com/TaskbarEngine/TaskbarEngine/_apis/build/status/TaskbarEngine-CI?branchName=main)](https://dev.azure.com/TaskbarEngine/TaskbarEngine)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Windows%2011%20(22H2--24H2)-lightgrey.svg)](Docs/00_Project_Overview.md)
