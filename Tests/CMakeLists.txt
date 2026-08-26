@@ -29,11 +29,14 @@ target_link_libraries(te_core_testlib PUBLIC
 
 add_executable(te_tests
     test_jsonc.cpp
-    test_config.cpp
-    test_event_dispatch.cpp
     test_plugin_loader.cpp
-    test_ring_buffer.cpp
+    test_event_dispatch.cpp
     test_dpi.cpp
+    test_config.cpp
+    test_ring_buffer.cpp
+    test_ipc_protocol.cpp
+    test_taskbar_resize.cpp
+    test_crash_recovery.cpp
 )
 
 target_link_libraries(te_tests PRIVATE

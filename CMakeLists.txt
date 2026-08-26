@@ -12,8 +12,12 @@ if(MSVC)
     add_compile_options(
         $<$<COMPILE_LANGUAGE:C>:/W4>
         $<$<COMPILE_LANGUAGE:C>:/WX>
+        $<$<COMPILE_LANGUAGE:C>:/wd5105>
+        $<$<COMPILE_LANGUAGE:C>:/wd4459>
         $<$<COMPILE_LANGUAGE:CXX>:/W4>
         $<$<COMPILE_LANGUAGE:CXX>:/WX>
+        $<$<COMPILE_LANGUAGE:CXX>:/wd5105>
+        $<$<COMPILE_LANGUAGE:CXX>:/wd4459>
     )
 else()
     add_compile_options(
@@ -39,7 +43,9 @@ add_subdirectory(ThirdParty/cJSON)
 add_subdirectory(SDK)
 add_subdirectory(Core)
 add_subdirectory(Modules/dummy)
+add_subdirectory(Modules/taskbar_resize)
 add_subdirectory(App)
+add_subdirectory(Benchmarks)
 
 # Tests (only when building tests)
 option(TE_BUILD_TESTS "Build unit tests" ON)

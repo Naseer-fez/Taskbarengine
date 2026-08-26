@@ -3,6 +3,8 @@
 #include <commctrl.h>
 #include "core/core_manager.h"
 #include "core/event_dispatch.h"
+#include "core/shell_hook.h"
+#include "core/power_device.h"
 #include <sdk/te_events.h>
 #include <sdk/te_log.h>
 
@@ -70,8 +72,18 @@ LRESULT CALLBACK TE_TaskbarSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             TE_CoreManagerShutdown();
             break;
             
+        case WM_POWERBROADCAST:
+            TE_PowerProcess(wParam, lParam);
+            break;
+            
+        case WM_DEVICECHANGE:
+            TE_DeviceProcess(wParam, lParam);
+            break;
+            
         default:
-            if (TE_IsMessageSubscribed(msg)) {
+            if (msg == TE_ShellHookGetMessageId() && msg != 0) {
+                TE_ShellHookProcess(wParam, lParam);
+            } else if (TE_IsMessageSubscribed(msg)) {
                 /* TODO(Phase3): Forward subscribed messages to plugins */
             }
             break;

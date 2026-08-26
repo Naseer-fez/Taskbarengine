@@ -1,0 +1,4 @@
+#include <windows.h>
+#include "../include/app/tray.h"
+
+IDI_APPICON ICON "app.ico"

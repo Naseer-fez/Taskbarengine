@@ -9,6 +9,10 @@ add_library(EngineDLL SHARED
     src/fault_isolation.c
     src/taskbar_subclass.c
     src/state_store.c
+    src/ipc_server.c
+    src/shell_hook.c
+    src/power_device.c
+    src/vdesktop_notify.cpp
 )
 
 target_include_directories(EngineDLL PRIVATE

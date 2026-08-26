@@ -65,6 +65,12 @@ TE_PluginEntry* TE_PluginLoaderGetEntry(int index);
 /** Find a plugin by name. Returns NULL if not found. */
 TE_PluginEntry* TE_PluginLoaderFindByName(const char* name);
 
+/** Enable a single plugin by name. */
+HRESULT TE_PluginLoaderEnablePluginByName(const char* name);
+
+/** Disable a single plugin by name. */
+void TE_PluginLoaderDisablePluginByName(const char* name);
+
 #ifdef __cplusplus
 }
 #endif

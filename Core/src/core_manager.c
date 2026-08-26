@@ -3,17 +3,21 @@
 #include <shlwapi.h>
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 #include "core/config.h"
 #include "core/event_dispatch.h"
 #include "core/plugin_loader.h"
 #include "core/config_watcher.h"
 #include "core/state_store.h"
+#include "core/ipc_server.h"
 #include <sdk/te_log.h>
 #include <sdk/te_log_impl.h>
 #include <sdk/te_jsonc.h>
 #include <sdk/te_events.h>
 #include <sdk/te_plugin.h>
 #include "core/engine.h"
+#include "core/shell_hook.h"
+#include "core/vdesktop_notify.h"
 
 static struct {
     BOOL initialized;
@@ -67,6 +71,9 @@ HRESULT TE_CoreManagerInit(HWND taskbar_hwnd) {
     TE_PluginLoaderEnableAll();
     
     TE_ConfigWatcherStart(g_core.config_dir, g_core.taskbar_hwnd);
+    TE_IpcServerStart(g_core.taskbar_hwnd);
+    TE_ShellHookInit(g_core.taskbar_hwnd);
+    TE_VDesktopInit();
     
     g_core.initialized = TRUE;
     TE_LogWrite(TE_LOG_INFO, "CoreManager", "Core Manager initialized successfully");
@@ -77,7 +84,10 @@ HRESULT TE_CoreManagerInit(HWND taskbar_hwnd) {
 void TE_CoreManagerShutdown(void) {
     if (!g_core.initialized) return;
     
+    TE_IpcServerStop();
     TE_ConfigWatcherStop();
+    TE_ShellHookShutdown(g_core.taskbar_hwnd);
+    TE_VDesktopShutdown();
     TE_PluginLoaderDisableAll();
     TE_PluginLoaderShutdownAll();
     TE_PluginLoaderShutdown();
@@ -123,13 +133,24 @@ HRESULT TE_CoreManagerReloadConfig(void) {
 }
 
 void TE_CoreManagerHandleCommand(int cmd_type, void* payload) {
-    (void)payload;
     switch (cmd_type) {
         case TE_CMD_RELOAD_CONFIG:
             TE_CoreManagerReloadConfig();
             break;
         case TE_CMD_SHUTDOWN:
             TE_CoreManagerShutdown();
+            break;
+        case TE_CMD_ENABLE_PLUGIN:
+            if (payload) {
+                TE_PluginLoaderEnablePluginByName((const char*)payload);
+                free(payload);
+            }
+            break;
+        case TE_CMD_DISABLE_PLUGIN:
+            if (payload) {
+                TE_PluginLoaderDisablePluginByName((const char*)payload);
+                free(payload);
+            }
             break;
     }
 }

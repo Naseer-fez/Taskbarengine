@@ -94,7 +94,7 @@ HRESULT TE_PluginLoaderScanAndLoad(const wchar_t* modules_dir) {
                                     g_plugins[g_plugin_count].interface_ptr = iface;
                                     g_plugins[g_plugin_count].metadata = meta;
                                     g_plugins[g_plugin_count].plugin_id = (uint32_t)g_plugin_count + 1;
-                                    wcsncpy(g_plugins[g_plugin_count].dll_path, dll_path, MAX_PATH);
+                                    wcsncpy_s(g_plugins[g_plugin_count].dll_path, MAX_PATH, dll_path, _TRUNCATE);
                                     g_plugin_count++;
                                 }
                             }
@@ -136,12 +136,12 @@ HRESULT TE_PluginLoaderInitializeAll(HWND taskbar_hwnd, uint32_t dpi, const stru
         g_ctx.monitor = MonitorFromWindow(taskbar_hwnd, MONITOR_DEFAULTTOPRIMARY);
         g_ctx.dpi = dpi;
         g_ctx.config = TE_ConfigGetPluginSection((cJSON*)config_root, (char*)g_plugins[i].metadata->name);
-        g_ctx.log = (void*)TE_LogWrite;
+        g_ctx.log = TE_LogWrite;
         g_ctx.subscribe = TE_PluginSubscribeWrapper;
         g_ctx.unsubscribe = TE_PluginUnsubscribeWrapper;
         g_ctx.request_redraw = TE_PluginRequestRedrawWrapper;
-        g_ctx.publish_state = (void*)TE_StatePublish;
-        g_ctx.query_state = (void*)TE_StateQuery;
+        g_ctx.publish_state = (PublishStateFunc)TE_StatePublish;
+        g_ctx.query_state = (QueryStateFunc)TE_StateQuery;
         g_ctx.core_opaque = &g_plugins[i];
         g_ctx.subscribe_message = TE_PluginSubscribeMessageWrapper;
         g_ctx.unsubscribe_message = TE_PluginUnsubscribeMessageWrapper;
@@ -228,4 +228,28 @@ TE_PluginEntry* TE_PluginLoaderFindByName(const char* name) {
         }
     }
     return NULL;
+}
+
+HRESULT TE_PluginLoaderEnablePluginByName(const char* name) {
+    TE_PluginEntry* entry = TE_PluginLoaderFindByName(name);
+    if (!entry) return TE_E_INVALIDARG;
+    if (!entry->initialized) return TE_E_FAIL;
+    if (entry->enabled) return TE_S_OK;
+    
+    g_current_plugin_id = entry->plugin_id;
+    HRESULT res = TE_FaultIsolatedCall(&entry->fault_count, (char*)entry->metadata->name, "Enable", PluginEnableFunc);
+    if (SUCCEEDED(res)) {
+        entry->enabled = TRUE;
+    }
+    return res;
+}
+
+void TE_PluginLoaderDisablePluginByName(const char* name) {
+    TE_PluginEntry* entry = TE_PluginLoaderFindByName(name);
+    if (!entry) return;
+    if (!entry->enabled) return;
+    
+    g_current_plugin_id = entry->plugin_id;
+    TE_FaultIsolatedCall(&entry->fault_count, (char*)entry->metadata->name, "Disable", PluginDisableFunc);
+    entry->enabled = FALSE;
 }

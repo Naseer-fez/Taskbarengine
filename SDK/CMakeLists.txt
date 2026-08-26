@@ -2,6 +2,8 @@ add_library(te_sdk STATIC
     src/te_jsonc.c
     src/te_log_impl.c
     src/te_dpi.c
+    src/te_ipc.c
+    src/te_version.c
 )
 
 target_include_directories(te_sdk PUBLIC

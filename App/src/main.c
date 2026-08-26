@@ -1,4 +1,6 @@
 #include "app/tray.h"
+#include "app/tray_menu.h"
+#include "app/crash_recovery.h"
 #include <windows.h>
 #include <strsafe.h>
 
@@ -13,11 +15,14 @@ static LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT msg, WPARAM wparam, LPARA
     switch (msg) {
         case TE_TRAY_CALLBACK_MSG:
             switch (LOWORD(lparam)) {
-                case WM_RBUTTONUP:
-                    MessageBoxW(NULL, L"TaskbarEngine — Right-click menu (TODO: Phase 3)", L"TaskbarEngine", MB_OK | MB_ICONINFORMATION);
+                case WM_RBUTTONUP: {
+                    POINT pt;
+                    GetCursorPos(&pt);
+                    TE_TrayMenuShow(hwnd, pt);
                     break;
+                }
                 case WM_LBUTTONDBLCLK:
-                    MessageBoxW(NULL, L"TaskbarEngine — Double-click action (TODO: Phase 3)", L"TaskbarEngine", MB_OK | MB_ICONINFORMATION);
+                    MessageBoxW(NULL, L"TaskbarEngine", L"TaskbarEngine", MB_OK | MB_ICONINFORMATION);
                     break;
             }
             return 0;
@@ -27,6 +32,7 @@ static LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT msg, WPARAM wparam, LPARA
             return 0;
 
         case WM_DESTROY:
+            TE_CrashRecoveryStop();
             if (g_hook) {
                 UnhookWindowsHookEx(g_hook);
                 g_hook = NULL;
@@ -114,6 +120,7 @@ int WINAPI wWinMain(HINSTANCE hinstance, HINSTANCE hprev_instance, PWSTR cmd_lin
                             MessageBoxW(NULL, L"Failed to install WH_CBT hook.", L"TaskbarEngine Error", MB_OK | MB_ICONERROR);
                             PostMessageW(g_main_hwnd, WM_CLOSE, 0, 0);
                         } else {
+                            TE_CrashRecoveryStart(g_main_hwnd, g_dll_handle);
                             PostMessageW(taskbar_hwnd, WM_NULL, 0, 0);
                         }
                     }
