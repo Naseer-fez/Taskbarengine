@@ -18,7 +18,7 @@ TEST_CASE("Log configuration applies levels and file output", "[log]") {
     wchar_t log_file[MAX_PATH];
     swprintf(log_file, MAX_PATH, L"%s\\taskbar_engine.log", test_log_dir);
     FILE* f = _wfopen(log_file, L"rt");
-    if (!f) { SUCCEED("Skipping file write test due to perm"); return; } REQUIRE(f != NULL);
+    if (!f) { SUCCEED("Skipping file write test due to perm"); return; } REQUIRE(f != nullptr);
     char buffer[1024];
     bool found_debug = false, found_error = false;
     while (fgets(buffer, sizeof(buffer), f)) {
@@ -33,6 +33,6 @@ TEST_CASE("Log configuration applies levels and file output", "[log]") {
     TE_LogWrite(TE_LOG_DEBUG, "Should not create a file");
     TE_LogShutdown();
     f = _wfopen(log_file, L"rt");
-    REQUIRE(f == NULL);
+    REQUIRE(f == nullptr);
     RemoveDirectoryW(test_log_dir);
 }
