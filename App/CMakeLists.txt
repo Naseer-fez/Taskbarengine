@@ -64,6 +64,7 @@ find_program(MT_EXECUTABLE mt.exe
 set(SETTINGS_BASE_MANIFEST "${CMAKE_CURRENT_SOURCE_DIR}/res/settings.manifest")
 set(WINAPPSDK_FOUNDATION_MANIFEST "${WINAPPSDK_ROOT}/manifests/Microsoft.WindowsAppSdk.Foundation.manifest")
 set(WINAPPSDK_WINUI_MANIFEST "${WINAPPSDK_ROOT}/manifests/manifests/Microsoft.WindowsAppSdk.WinUI.manifest")
+set(WINAPPSDK_INTERACTIVE_MANIFEST "${WINAPPSDK_ROOT}/manifests/Microsoft.InteractiveExperiences.manifest")
 set(SETTINGS_MERGED_MANIFEST "${CMAKE_CURRENT_SOURCE_DIR}/res/settings_merged.manifest")
 
 if(MT_EXECUTABLE)
@@ -73,11 +74,13 @@ if(MT_EXECUTABLE)
             -manifest "${SETTINGS_BASE_MANIFEST}"
                       "${WINAPPSDK_FOUNDATION_MANIFEST}"
                       "${WINAPPSDK_WINUI_MANIFEST}"
+                      "${WINAPPSDK_INTERACTIVE_MANIFEST}"
             -out:"${SETTINGS_MERGED_MANIFEST}"
         DEPENDS
             "${SETTINGS_BASE_MANIFEST}"
             "${WINAPPSDK_FOUNDATION_MANIFEST}"
             "${WINAPPSDK_WINUI_MANIFEST}"
+            "${WINAPPSDK_INTERACTIVE_MANIFEST}"
         COMMENT "Generating merged SxS manifest for TaskbarEngineSettings"
     )
 

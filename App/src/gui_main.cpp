@@ -4,11 +4,16 @@
 #include <winrt/Microsoft.UI.Xaml.Controls.h>
 #include <winrt/Microsoft.UI.Xaml.Hosting.h>
 #include <windows.h>
+#undef GetCurrentTime
 #include <string>
 #include <cJSON.h>
 #include "settings_page.h"
 #include "about_page.h"
 #include "gui_ipc_client.h"
+
+#include <winrt/Microsoft.UI.Xaml.Markup.h>
+#include <winrt/Microsoft.UI.Xaml.XamlTypeInfo.h>
+#include <winrt/Windows.UI.Xaml.Interop.h>
 
 using namespace winrt;
 using namespace winrt::Microsoft::UI::Xaml;
@@ -16,8 +21,33 @@ using namespace winrt::Microsoft::UI::Xaml::Controls;
 
 namespace winrt::TaskbarEngine {
 
-struct App : ApplicationT<App>
+struct App : ApplicationT<App, winrt::Microsoft::UI::Xaml::Markup::IXamlMetadataProvider>
 {
+    winrt::Microsoft::UI::Xaml::XamlTypeInfo::XamlControlsXamlMetaDataProvider m_provider;
+
+    App()
+    {
+        UnhandledException([this](winrt::Windows::Foundation::IInspectable const&, winrt::Microsoft::UI::Xaml::UnhandledExceptionEventArgs const& e) {
+            MessageBoxW(NULL, e.Message().c_str(), L"TaskbarEngine Unhandled XAML Exception", MB_ICONERROR);
+            e.Handled(true);
+        });
+    }
+
+    winrt::Microsoft::UI::Xaml::Markup::IXamlType GetXamlType(winrt::Windows::UI::Xaml::Interop::TypeName const& type)
+    {
+        return m_provider.GetXamlType(type);
+    }
+
+    winrt::Microsoft::UI::Xaml::Markup::IXamlType GetXamlType(winrt::hstring const& fullName)
+    {
+        return m_provider.GetXamlType(fullName);
+    }
+
+    winrt::com_array<winrt::Microsoft::UI::Xaml::Markup::XmlnsDefinition> GetXmlnsDefinitions()
+    {
+        return m_provider.GetXmlnsDefinitions();
+    }
+
     Window m_window{ nullptr };
 
     void OnLaunched(LaunchActivatedEventArgs const&)
