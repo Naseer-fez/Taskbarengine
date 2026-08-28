@@ -4,6 +4,7 @@ add_executable(TaskbarEngine WIN32
     src/ipc_client.c
     src/tray_menu.c
     src/crash_recovery.c
+    res/app.manifest
 )
 
 target_include_directories(TaskbarEngine PRIVATE
@@ -19,13 +20,6 @@ target_link_libraries(TaskbarEngine PRIVATE
 # MinGW needs -municode for wWinMain entry point
 if(NOT MSVC)
     target_link_options(TaskbarEngine PRIVATE -municode)
-endif()
-
-# Embed the manifest (MSVC only)
-if(MSVC)
-    set_target_properties(TaskbarEngine PROPERTIES
-        LINK_FLAGS "/MANIFEST:EMBED /MANIFESTINPUT:${CMAKE_CURRENT_SOURCE_DIR}/res/app.manifest"
-    )
 endif()
 
 
@@ -97,6 +91,7 @@ add_executable(TaskbarEngineSettings WIN32
     src/gui_ipc_client.cpp
     src/config_io.cpp
     res/settings.rc
+    ${SETTINGS_MERGED_MANIFEST}
 )
 
 target_compile_definitions(TaskbarEngineSettings PRIVATE
@@ -122,7 +117,6 @@ target_link_libraries(TaskbarEngineSettings PRIVATE
 
 set_target_properties(TaskbarEngineSettings PROPERTIES
     VS_PACKAGE_REFERENCES "Microsoft.WindowsAppSDK_1.5.240311000;Microsoft.Windows.CppWinRT_2.0.240111.5"
-    LINK_FLAGS "/MANIFEST:EMBED /MANIFESTINPUT:${SETTINGS_MERGED_MANIFEST}"
 )
 
 # Post-build: Copy Windows App SDK runtime DLLs and resources next to the executable

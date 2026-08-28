@@ -39,6 +39,8 @@ add_executable(te_tests
     test_crash_recovery.cpp
 )
 
+target_compile_definitions(te_tests PRIVATE _CRT_SECURE_NO_WARNINGS)
+
 target_link_libraries(te_tests PRIVATE
     te_core_testlib
     te_sdk
