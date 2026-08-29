@@ -137,11 +137,21 @@ struct App : ApplicationT<App, winrt::Microsoft::UI::Xaml::Markup::IXamlMetadata
 
 }
 
+#include <DispatcherQueue.h>
+
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
 {
-    init_apartment(winrt::apartment_type::single_threaded);
-
     try {
+        init_apartment(winrt::apartment_type::single_threaded);
+
+        DispatcherQueueOptions options = {
+            sizeof(DispatcherQueueOptions),
+            DQTYPE_THREAD_CURRENT,
+            DQTAT_COM_NONE
+        };
+        winrt::com_ptr<ABI::Windows::System::IDispatcherQueueController> controller;
+        CreateDispatcherQueueController(options, reinterpret_cast<ABI::Windows::System::IDispatcherQueueController**>(winrt::put_abi(controller)));
+
         winrt::Microsoft::UI::Xaml::Application::Start([](auto&&) {
             winrt::make<winrt::TaskbarEngine::App>();
         });

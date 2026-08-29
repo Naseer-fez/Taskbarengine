@@ -8,7 +8,7 @@ static HRESULT SendIpcCommand(TE_IpcMsgType type, const void* payload, uint32_t 
     if (payload_len > TE_IPC_MAX_PAYLOAD) return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
 
     HANDLE pipe = INVALID_HANDLE_VALUE;
-    const DWORD total_timeout_ms = 2000;
+    const DWORD total_timeout_ms = 50;
     DWORD start_tick = GetTickCount();
 
     for (int attempt = 0; attempt < 5; attempt++) {

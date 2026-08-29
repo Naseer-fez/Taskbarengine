@@ -96,6 +96,7 @@ add_executable(TaskbarEngineSettings WIN32
 
 target_compile_definitions(TaskbarEngineSettings PRIVATE
     MICROSOFT_WINDOWSAPPSDK_SELFCONTAINED=1
+    _CRT_SECURE_NO_WARNINGS
 )
 
 target_include_directories(TaskbarEngineSettings PRIVATE
@@ -113,6 +114,7 @@ target_link_libraries(TaskbarEngineSettings PRIVATE
     te_sdk
     windowsapp
     Microsoft.WindowsAppRuntime
+    CoreMessaging
 )
 
 set_target_properties(TaskbarEngineSettings PROPERTIES
