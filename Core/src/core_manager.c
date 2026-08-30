@@ -116,6 +116,11 @@ HRESULT TE_CoreManagerReloadConfig(void) {
     TE_ConfigDiffPlugins(g_core.config_root, new_root,
                          changed_names, &changed_count, TE_MAX_PLUGINS);
     
+    char* saved_names[TE_MAX_PLUGINS];
+    for (int i = 0; i < changed_count; i++) {
+        saved_names[i] = _strdup(changed_names[i]);
+    }
+    
     cJSON* old_root = g_core.config_root;
     g_core.config_root = new_root;
     if (old_root) {
@@ -124,9 +129,10 @@ HRESULT TE_CoreManagerReloadConfig(void) {
     
     for (int i = 0; i < changed_count; i++) {
         TE_ConfigChangedData data;
-        data.plugin_name = changed_names[i];
-        data.new_config = TE_ConfigGetPluginSection(g_core.config_root, changed_names[i]);
+        data.plugin_name = saved_names[i];
+        data.new_config = TE_ConfigGetPluginSection(g_core.config_root, saved_names[i]);
         TE_EventDispatchFire(TE_EVENT_CONFIG_CHANGED, &data);
+        free(saved_names[i]);
     }
     
     return TE_S_OK;

@@ -84,6 +84,7 @@ HRESULT TE_PluginLoaderScanAndLoad(const wchar_t* modules_dir) {
                     
                     HMODULE hMod = LoadLibraryW(dll_path);
                     if (hMod) {
+                        BOOL loaded = FALSE;
                         GetPluginInterfaceFunc get_interface = (GetPluginInterfaceFunc)(void*)GetProcAddress(hMod, "GetPluginInterface");
                         if (get_interface) {
                             const PluginInterface* iface = get_interface();
@@ -96,8 +97,12 @@ HRESULT TE_PluginLoaderScanAndLoad(const wchar_t* modules_dir) {
                                     g_plugins[g_plugin_count].plugin_id = (uint32_t)g_plugin_count + 1;
                                     wcsncpy_s(g_plugins[g_plugin_count].dll_path, MAX_PATH, dll_path, _TRUNCATE);
                                     g_plugin_count++;
+                                    loaded = TRUE;
                                 }
                             }
+                        }
+                        if (!loaded) {
+                            FreeLibrary(hMod);
                         }
                     }
                 } while (FindNextFileW(hDllFind, &dll_data));
