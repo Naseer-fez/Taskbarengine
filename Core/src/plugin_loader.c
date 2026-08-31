@@ -12,6 +12,7 @@
 static TE_PluginEntry g_plugins[TE_MAX_PLUGINS];
 static int g_plugin_count = 0;
 static uint32_t g_current_plugin_id = 0;
+static TE_PluginEntry* g_current_plugin_entry = NULL;
 
 static HRESULT TE_PluginSubscribeWrapper(uint32_t event_type, void (*callback)(uint32_t, const void*, void*), void* user_data) {
     return TE_EventDispatchSubscribe(event_type, (TE_EventCallback)callback, user_data, g_current_plugin_id);
@@ -49,6 +50,8 @@ static void TE_PluginRequestRedrawWrapper(void) {
 
 HRESULT TE_PluginLoaderInit(void) {
     g_plugin_count = 0;
+    g_current_plugin_id = 0;
+    g_current_plugin_entry = NULL;
     memset(g_plugins, 0, sizeof(g_plugins));
     return TE_S_OK;
 }
@@ -56,6 +59,8 @@ HRESULT TE_PluginLoaderInit(void) {
 void TE_PluginLoaderShutdown(void) {
     TE_PluginLoaderShutdownAll();
     g_plugin_count = 0;
+    g_current_plugin_id = 0;
+    g_current_plugin_entry = NULL;
 }
 
 HRESULT TE_PluginLoaderScanAndLoad(const wchar_t* modules_dir) {
@@ -127,8 +132,8 @@ HRESULT TE_PluginLoaderScanAndLoad(const wchar_t* modules_dir) {
 
 static PluginContext g_ctx;
 static HRESULT PluginInitFunc(void) {
-    if (g_plugins[g_current_plugin_id - 1].interface_ptr->Initialize) {
-        return g_plugins[g_current_plugin_id - 1].interface_ptr->Initialize(&g_ctx);
+    if (g_current_plugin_entry && g_current_plugin_entry->interface_ptr && g_current_plugin_entry->interface_ptr->Initialize) {
+        return g_current_plugin_entry->interface_ptr->Initialize(&g_ctx);
     }
     return TE_S_OK;
 }
@@ -154,6 +159,7 @@ HRESULT TE_PluginLoaderInitializeAll(HWND taskbar_hwnd, uint32_t dpi, const stru
         g_ctx.cancel_timer = TE_PluginCancelTimerWrapper;
         
         g_current_plugin_id = g_plugins[i].plugin_id;
+        g_current_plugin_entry = &g_plugins[i];
         
         HRESULT res = TE_FaultIsolatedCall(&g_plugins[i].fault_count, (char*)g_plugins[i].metadata->name, "Initialize", PluginInitFunc);
         if (SUCCEEDED(res)) {
@@ -164,8 +170,8 @@ HRESULT TE_PluginLoaderInitializeAll(HWND taskbar_hwnd, uint32_t dpi, const stru
 }
 
 static HRESULT PluginEnableFunc(void) {
-    if (g_plugins[g_current_plugin_id - 1].interface_ptr->Enable) {
-        return g_plugins[g_current_plugin_id - 1].interface_ptr->Enable();
+    if (g_current_plugin_entry && g_current_plugin_entry->interface_ptr && g_current_plugin_entry->interface_ptr->Enable) {
+        return g_current_plugin_entry->interface_ptr->Enable();
     }
     return TE_S_OK;
 }
@@ -174,6 +180,7 @@ HRESULT TE_PluginLoaderEnableAll(void) {
     for (int i = 0; i < g_plugin_count; i++) {
         if (g_plugins[i].initialized && !g_plugins[i].enabled) {
             g_current_plugin_id = g_plugins[i].plugin_id;
+            g_current_plugin_entry = &g_plugins[i];
             HRESULT res = TE_FaultIsolatedCall(&g_plugins[i].fault_count, (char*)g_plugins[i].metadata->name, "Enable", PluginEnableFunc);
             if (SUCCEEDED(res)) {
                 g_plugins[i].enabled = TRUE;
@@ -184,8 +191,8 @@ HRESULT TE_PluginLoaderEnableAll(void) {
 }
 
 static HRESULT PluginDisableFunc(void) {
-    if (g_plugins[g_current_plugin_id - 1].interface_ptr->Disable) {
-        g_plugins[g_current_plugin_id - 1].interface_ptr->Disable();
+    if (g_current_plugin_entry && g_current_plugin_entry->interface_ptr && g_current_plugin_entry->interface_ptr->Disable) {
+        return g_current_plugin_entry->interface_ptr->Disable();
     }
     return TE_S_OK;
 }
@@ -194,6 +201,7 @@ void TE_PluginLoaderDisableAll(void) {
     for (int i = g_plugin_count - 1; i >= 0; i--) {
         if (g_plugins[i].enabled) {
             g_current_plugin_id = g_plugins[i].plugin_id;
+            g_current_plugin_entry = &g_plugins[i];
             TE_FaultIsolatedCall(&g_plugins[i].fault_count, (char*)g_plugins[i].metadata->name, "Disable", PluginDisableFunc);
             g_plugins[i].enabled = FALSE;
         }
@@ -202,8 +210,9 @@ void TE_PluginLoaderDisableAll(void) {
 
 void TE_PluginLoaderShutdownAll(void) {
     for (int i = 0; i < g_plugin_count; i++) {
+        TE_EventDispatchRemoveByPlugin(g_plugins[i].plugin_id);
         if (g_plugins[i].initialized) {
-            if (g_plugins[i].interface_ptr->Shutdown) {
+            if (g_plugins[i].interface_ptr && g_plugins[i].interface_ptr->Shutdown) {
                 g_plugins[i].interface_ptr->Shutdown();
             }
             g_plugins[i].initialized = FALSE;
@@ -227,8 +236,9 @@ TE_PluginEntry* TE_PluginLoaderGetEntry(int index) {
 }
 
 TE_PluginEntry* TE_PluginLoaderFindByName(const char* name) {
+    if (!name) return NULL;
     for (int i = 0; i < g_plugin_count; i++) {
-        if (strcmp(g_plugins[i].metadata->name, name) == 0) {
+        if (g_plugins[i].metadata && g_plugins[i].metadata->name && strcmp(g_plugins[i].metadata->name, name) == 0) {
             return &g_plugins[i];
         }
     }
@@ -242,6 +252,7 @@ HRESULT TE_PluginLoaderEnablePluginByName(const char* name) {
     if (entry->enabled) return TE_S_OK;
     
     g_current_plugin_id = entry->plugin_id;
+    g_current_plugin_entry = entry;
     HRESULT res = TE_FaultIsolatedCall(&entry->fault_count, (char*)entry->metadata->name, "Enable", PluginEnableFunc);
     if (SUCCEEDED(res)) {
         entry->enabled = TRUE;
@@ -255,6 +266,7 @@ void TE_PluginLoaderDisablePluginByName(const char* name) {
     if (!entry->enabled) return;
     
     g_current_plugin_id = entry->plugin_id;
+    g_current_plugin_entry = entry;
     TE_FaultIsolatedCall(&entry->fault_count, (char*)entry->metadata->name, "Disable", PluginDisableFunc);
     entry->enabled = FALSE;
 }

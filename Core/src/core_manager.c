@@ -49,8 +49,24 @@ HRESULT TE_CoreManagerInit(HWND taskbar_hwnd) {
     if (GetModuleFileNameW(TE_EngineGetInstance(), dll_path, MAX_PATH)) {
         PathRemoveFileSpecW(dll_path);
         
-        swprintf(g_core.config_path, MAX_PATH, L"%s\\..\\Config\\default_config.jsonc", dll_path);
-        swprintf(g_core.config_dir, MAX_PATH, L"%s\\..\\Config", dll_path);
+        wchar_t appdata[MAX_PATH] = {0};
+        DWORD appdata_len = GetEnvironmentVariableW(L"LOCALAPPDATA", appdata, MAX_PATH);
+        BOOL user_config_found = FALSE;
+        if (appdata_len > 0 && appdata_len < MAX_PATH) {
+            wchar_t user_config[MAX_PATH];
+            swprintf(user_config, MAX_PATH, L"%s\\TaskbarEngine\\config.jsonc", appdata);
+            if (GetFileAttributesW(user_config) != INVALID_FILE_ATTRIBUTES) {
+                wcsncpy_s(g_core.config_path, MAX_PATH, user_config, _TRUNCATE);
+                swprintf(g_core.config_dir, MAX_PATH, L"%s\\TaskbarEngine", appdata);
+                user_config_found = TRUE;
+            }
+        }
+
+        if (!user_config_found) {
+            swprintf(g_core.config_path, MAX_PATH, L"%s\\..\\Config\\default_config.jsonc", dll_path);
+            swprintf(g_core.config_dir, MAX_PATH, L"%s\\..\\Config", dll_path);
+        }
+
         swprintf(g_core.log_dir, MAX_PATH, L"%s\\..\\Logs", dll_path);
         swprintf(g_core.modules_dir, MAX_PATH, L"%s\\..\\Modules", dll_path);
     }
@@ -167,4 +183,14 @@ HWND TE_CoreManagerGetTaskbarHwnd(void) {
 
 BOOL TE_CoreManagerIsInitialized(void) {
     return g_core.initialized;
+}
+
+uint32_t TE_CoreManagerGetDpi(void) {
+    return g_core.dpi ? g_core.dpi : 96;
+}
+
+void TE_CoreManagerSetDpi(uint32_t dpi) {
+    if (dpi > 0) {
+        g_core.dpi = dpi;
+    }
 }

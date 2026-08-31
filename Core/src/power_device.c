@@ -8,7 +8,7 @@ void TE_PowerProcess(WPARAM wParam, LPARAM lParam) {
     if (wParam == PBT_APMSUSPEND) {
         TE_PowerData data = { TRUE };
         TE_EventDispatchFire(TE_EVENT_POWER, &data);
-    } else if (wParam == PBT_APMRESUMEAUTOMATIC) {
+    } else if (wParam == PBT_APMRESUMEAUTOMATIC || wParam == PBT_APMRESUMESUSPEND) {
         TE_PowerData data = { FALSE };
         TE_EventDispatchFire(TE_EVENT_POWER, &data);
     }

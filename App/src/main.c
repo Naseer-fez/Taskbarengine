@@ -1,6 +1,7 @@
 #include "app/tray.h"
 #include "app/tray_menu.h"
 #include "app/crash_recovery.h"
+#include "app/ipc_client.h"
 #include <windows.h>
 #include <strsafe.h>
 
@@ -28,6 +29,7 @@ static LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT msg, WPARAM wparam, LPARA
             return 0;
 
         case WM_CLOSE:
+            TE_IpcClientSendCommand(TE_IPC_MSG_SHUTDOWN, NULL, 0);
             DestroyWindow(hwnd);
             return 0;
 
@@ -122,6 +124,9 @@ int WINAPI wWinMain(HINSTANCE hinstance, HINSTANCE hprev_instance, PWSTR cmd_lin
                         } else {
                             TE_CrashRecoveryStart(g_main_hwnd, g_dll_handle);
                             PostMessageW(taskbar_hwnd, WM_NULL, 0, 0);
+                            Sleep(50);
+                            UnhookWindowsHookEx(g_hook);
+                            g_hook = NULL;
                         }
                     }
                 }

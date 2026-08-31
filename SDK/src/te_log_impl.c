@@ -9,6 +9,7 @@
 #define RING_BUFFER_MASK (RING_BUFFER_SIZE - 1)
 
 typedef struct LogEntry {
+    volatile LONG ready;
     TE_LogLevel level;
     SYSTEMTIME timestamp;
     char module[32];
@@ -22,6 +23,8 @@ static volatile LONG g_read_pos = 0;
 static HANDLE g_flush_event = NULL;
 static HANDLE g_shutdown_event = NULL;
 static HANDLE g_flush_thread = NULL;
+static CRITICAL_SECTION g_flush_cs;
+static BOOL g_flush_cs_init = FALSE;
 
 static TE_LogLevel g_min_level = TE_LOG_DEBUG;
 static TE_LogFunc g_log_callback = NULL;
@@ -92,17 +95,23 @@ static void WriteEntryToFile(const LogEntry* entry) {
 }
 
 static void FlushPendingEntries(void) {
+    EnterCriticalSection(&g_flush_cs);
+
     LONG current_read = g_read_pos;
     LONG current_write = g_write_pos;
     
     // If the buffer has wrapped around and overwritten read_pos, fast-forward read_pos
     if (current_write - current_read > RING_BUFFER_SIZE) {
         current_read = current_write - RING_BUFFER_SIZE;
-        g_read_pos = current_read; // Approximate update
+        g_read_pos = current_read;
     }
 
     while (current_read < current_write) {
         LONG index = current_read & RING_BUFFER_MASK;
+        if (InterlockedCompareExchange(&g_ring_buffer[index].ready, 0, 1) != 1) {
+            // Slot is currently being written by a producer thread; wait for next flush
+            break;
+        }
         WriteEntryToFile(&g_ring_buffer[index]);
         current_read++;
         g_read_pos = current_read;
@@ -111,6 +120,8 @@ static void FlushPendingEntries(void) {
     if (g_log_file) {
         fflush(g_log_file);
     }
+
+    LeaveCriticalSection(&g_flush_cs);
 }
 
 static DWORD WINAPI FlushThreadProc(LPVOID lpParam) {
@@ -140,12 +151,21 @@ HRESULT TE_LogInit(const wchar_t* log_dir, TE_LogLevel min_level) {
     wcsncpy_s(g_log_dir, MAX_PATH, log_dir, _TRUNCATE);
     g_min_level = min_level;
 
+    if (!g_flush_cs_init) {
+        InitializeCriticalSection(&g_flush_cs);
+        g_flush_cs_init = TRUE;
+    }
+
+    memset(g_ring_buffer, 0, sizeof(g_ring_buffer));
+    g_write_pos = 0;
+    g_read_pos = 0;
+
     g_flush_event = CreateEventW(NULL, TRUE, FALSE, NULL);
     g_shutdown_event = CreateEventW(NULL, TRUE, FALSE, NULL);
 
     if (!g_flush_event || !g_shutdown_event) {
-        if (g_flush_event) CloseHandle(g_flush_event);
-        if (g_shutdown_event) CloseHandle(g_shutdown_event);
+        if (g_flush_event) { CloseHandle(g_flush_event); g_flush_event = NULL; }
+        if (g_shutdown_event) { CloseHandle(g_shutdown_event); g_shutdown_event = NULL; }
         return TE_E_FAIL;
     }
 
@@ -153,6 +173,8 @@ HRESULT TE_LogInit(const wchar_t* log_dir, TE_LogLevel min_level) {
     if (!g_flush_thread) {
         CloseHandle(g_flush_event);
         CloseHandle(g_shutdown_event);
+        g_flush_event = NULL;
+        g_shutdown_event = NULL;
         return TE_E_FAIL;
     }
 
@@ -176,15 +198,21 @@ void TE_LogShutdown(void) {
         CloseHandle(g_flush_event);
         g_flush_event = NULL;
     }
-    if (g_log_file) {
-        fclose(g_log_file);
-        g_log_file = NULL;
+    if (g_flush_cs_init) {
+        EnterCriticalSection(&g_flush_cs);
+        if (g_log_file) {
+            fclose(g_log_file);
+            g_log_file = NULL;
+        }
+        LeaveCriticalSection(&g_flush_cs);
+        DeleteCriticalSection(&g_flush_cs);
+        g_flush_cs_init = FALSE;
     }
 }
 
 void TE_LogFlush(void) {
-    if (g_flush_event) {
-        SetEvent(g_flush_event);
+    if (g_flush_cs_init) {
+        FlushPendingEntries();
     }
 }
 
@@ -199,20 +227,18 @@ void TE_LogWrite(TE_LogLevel level, const char* module, const char* message) {
         g_log_callback(level, module, message);
     }
 
-    LONG pos;
-    LONG next_pos;
-    do {
-        pos = g_write_pos;
-        next_pos = pos + 1;
-    } while (InterlockedCompareExchange(&g_write_pos, next_pos, pos) != pos);
-
+    LONG pos = InterlockedIncrement(&g_write_pos) - 1;
     LONG index = pos & RING_BUFFER_MASK;
     LogEntry* entry = &g_ring_buffer[index];
+
+    InterlockedExchange(&entry->ready, 0);
 
     entry->level = level;
     GetLocalTime(&entry->timestamp);
     strncpy_s(entry->module, sizeof(entry->module), module ? module : "Unknown", _TRUNCATE);
     strncpy_s(entry->message, sizeof(entry->message), message ? message : "", _TRUNCATE);
+
+    InterlockedExchange(&entry->ready, 1);
 
     if (g_flush_event) {
         SetEvent(g_flush_event);

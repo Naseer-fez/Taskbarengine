@@ -8,10 +8,10 @@ static HRESULT SendIpcCommand(TE_IpcMsgType type, const void* payload, uint32_t 
     if (payload_len > TE_IPC_MAX_PAYLOAD) return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
 
     HANDLE pipe = INVALID_HANDLE_VALUE;
-    const DWORD total_timeout_ms = 50;
+    const DWORD total_timeout_ms = 500;
     DWORD start_tick = GetTickCount();
 
-    for (int attempt = 0; attempt < 5; attempt++) {
+    for (int attempt = 0; attempt < 8; attempt++) {
         pipe = CreateFileW(
             TE_PIPE_NAME,
             GENERIC_READ | GENERIC_WRITE,
@@ -37,7 +37,7 @@ static HRESULT SendIpcCommand(TE_IpcMsgType type, const void* payload, uint32_t 
         }
 
         DWORD remaining = total_timeout_ms - elapsed;
-        DWORD wait_chunk = remaining > 200 ? 200 : remaining;
+        DWORD wait_chunk = remaining > 100 ? 100 : remaining;
         if (!WaitNamedPipeW(TE_PIPE_NAME, wait_chunk)) {
             DWORD wait_err = GetLastError();
             if (wait_err != ERROR_SEM_TIMEOUT && wait_err != ERROR_FILE_NOT_FOUND) {

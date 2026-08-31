@@ -75,7 +75,11 @@ static LRESULT CALLBACK ResizeSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, L
         case WM_WINDOWPOSCHANGING: {
             WINDOWPOS* wp = (WINDOWPOS*)lParam;
             if (!(wp->flags & SWP_NOSIZE)) {
-                wp->cy = TE_ScaleDPI(g_config.height, g_current_dpi);
+                int new_cy = TE_ScaleDPI(g_config.height, g_current_dpi);
+                if (!(wp->flags & SWP_NOMOVE) && wp->cy > 0) {
+                    wp->y += (wp->cy - new_cy);
+                }
+                wp->cy = new_cy;
             }
             break;
         }

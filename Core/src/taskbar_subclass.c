@@ -51,9 +51,10 @@ LRESULT CALLBACK TE_TaskbarSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             
         case WM_DPICHANGED: {
             TE_DpiChangedData data;
-            data.old_dpi = LOWORD(wParam);
+            data.old_dpi = TE_CoreManagerGetDpi();
             data.new_dpi = HIWORD(wParam);
             data.hwnd = hwnd;
+            TE_CoreManagerSetDpi(data.new_dpi);
             TE_EventDispatchFire(TE_EVENT_DPI_CHANGED, &data);
             break;
         }
@@ -70,6 +71,7 @@ LRESULT CALLBACK TE_TaskbarSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
         case WM_DESTROY:
         case WM_ENDSESSION:
             TE_CoreManagerShutdown();
+            TE_TaskbarSubclassRemove(hwnd);
             break;
             
         case WM_POWERBROADCAST:

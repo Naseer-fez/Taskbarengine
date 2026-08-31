@@ -20,12 +20,7 @@ std::wstring ConfigIO_GetConfigPath()
 cJSON* ConfigIO_Load(const std::wstring& path)
 {
     cJSON* root = nullptr;
-    int size_needed = WideCharToMultiByte(CP_UTF8, 0, path.c_str(), -1, NULL, 0, NULL, NULL);
-    std::string narrow_path(size_needed, 0);
-    WideCharToMultiByte(CP_UTF8, 0, path.c_str(), -1, narrow_path.data(), size_needed, NULL, NULL);
-    
-    // c_str() points to null-terminated UTF-8
-    if (SUCCEEDED(TE_JsoncParse(narrow_path.c_str(), &root))) {
+    if (SUCCEEDED(TE_JsoncParseFile(path.c_str(), &root))) {
         return root;
     }
     return nullptr;
@@ -87,7 +82,7 @@ cJSON* ConfigIO_GetPluginValue(cJSON* root, const char* plugin_name, const char*
 {
     if (!root || !plugin_name || !key) return nullptr;
 
-    cJSON* plugin_section = cJSON_GetObjectItemCaseSensitive(root, "plugin");
+    cJSON* plugin_section = cJSON_GetObjectItemCaseSensitive(root, "plugins");
     if (!plugin_section || !cJSON_IsObject(plugin_section)) return nullptr;
 
     cJSON* specific_plugin = cJSON_GetObjectItemCaseSensitive(plugin_section, plugin_name);
@@ -108,14 +103,14 @@ HRESULT ConfigIO_SetPluginValue(cJSON* root, const char* plugin_name, const char
         return E_INVALIDARG;
     }
 
-    cJSON* plugin_section = cJSON_GetObjectItemCaseSensitive(root, "plugin");
+    cJSON* plugin_section = cJSON_GetObjectItemCaseSensitive(root, "plugins");
     if (plugin_section && !cJSON_IsObject(plugin_section)) {
         cJSON_Delete(value);
         return E_INVALIDARG;
     }
     if (!plugin_section) {
         plugin_section = cJSON_CreateObject();
-        if (plugin_section && !cJSON_AddItemToObject(root, "plugin", plugin_section)) {
+        if (plugin_section && !cJSON_AddItemToObject(root, "plugins", plugin_section)) {
             cJSON_Delete(plugin_section);
             cJSON_Delete(value);
             return E_OUTOFMEMORY;

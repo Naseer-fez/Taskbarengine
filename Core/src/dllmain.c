@@ -16,22 +16,14 @@ BOOL TE_IsExplorerProcess(void)
     DWORD len = GetModuleFileNameW(NULL, path, MAX_PATH);
     if (len == 0) return FALSE;
     
-    /* Find the last backslash */
-    const wchar_t* filename = path;
-    for (DWORD i = len - 1; i > 0; i--) {
-        if (path[i] == L'\\') {
-            filename = &path[i + 1];
-            break;
-        }
-    }
+    const wchar_t* filename = wcsrchr(path, L'\\');
+    filename = filename ? filename + 1 : path;
     
     return (_wcsicmp(filename, L"explorer.exe") == 0);
 }
 
 BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
 {
-    (void)lpvReserved;
-
     switch (fdwReason) {
         case DLL_PROCESS_ATTACH:
         {
@@ -57,8 +49,14 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
             if (TE_IsExplorerProcess()) {
                 if (g_taskbarHwnd) {
                     TE_TaskbarSubclassRemove(g_taskbarHwnd);
+                    g_taskbarHwnd = NULL;
                 }
-                TE_ShutdownEngine();
+                /* If lpvReserved != NULL, the process is terminating and worker
+                 * threads are already terminated by the OS; waiting on them under
+                 * loader lock causes an unrecoverable deadlock. */
+                if (lpvReserved == NULL) {
+                    TE_ShutdownEngine();
+                }
             }
             break;
         }

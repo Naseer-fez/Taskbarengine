@@ -10,7 +10,6 @@ static HWND g_taskbar_hwnd = NULL;
 static DWORD WINAPI WatcherThread(LPVOID param) {
     (void)param;
     DWORD align_buf[1024 / sizeof(DWORD)];
-    DWORD bytes = 0;
     
     OVERLAPPED ol = {0};
     ol.hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
@@ -79,7 +78,20 @@ HRESULT TE_ConfigWatcherStart(const wchar_t* config_dir, HWND taskbar_hwnd) {
     }
     
     g_stop_event = CreateEventW(NULL, TRUE, FALSE, NULL);
+    if (!g_stop_event) {
+        CloseHandle(g_hDir);
+        g_hDir = INVALID_HANDLE_VALUE;
+        return TE_E_FAIL;
+    }
+
     g_thread = CreateThread(NULL, 0, WatcherThread, NULL, 0, NULL);
+    if (!g_thread) {
+        CloseHandle(g_stop_event);
+        CloseHandle(g_hDir);
+        g_stop_event = NULL;
+        g_hDir = INVALID_HANDLE_VALUE;
+        return TE_E_FAIL;
+    }
     
     return TE_S_OK;
 }

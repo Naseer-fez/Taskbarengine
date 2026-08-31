@@ -60,6 +60,18 @@ HWND TE_CoreManagerGetTaskbarHwnd(void);
  */
 BOOL TE_CoreManagerIsInitialized(void);
 
+/**
+ * Get the current cached taskbar DPI scaling value.
+ * @return Current DPI (e.g., 96, 120, 144, 192).
+ */
+uint32_t TE_CoreManagerGetDpi(void);
+
+/**
+ * Update the cached taskbar DPI scaling value.
+ * @param dpi New DPI value.
+ */
+void TE_CoreManagerSetDpi(uint32_t dpi);
+
 #ifdef __cplusplus
 }
 #endif

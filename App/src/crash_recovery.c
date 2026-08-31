@@ -41,6 +41,8 @@ static unsigned int __stdcall MonitorThread(void* arg) {
                             HHOOK hook = SetWindowsHookExW(WH_CBT, hook_proc, g_dll_handle, new_tid);
                             if (hook) {
                                 PostMessageW(new_taskbar, WM_NULL, 0, 0);
+                                Sleep(50);
+                                UnhookWindowsHookEx(hook);
                             }
                         }
                     }
