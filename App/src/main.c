@@ -57,6 +57,13 @@ int WINAPI wWinMain(HINSTANCE hinstance, HINSTANCE hprev_instance, PWSTR cmd_lin
     (void)cmd_line;
     (void)cmd_show;
 
+    /* Attach to the interactive user desktop if started from background */
+    HDESK hDesk = OpenInputDesktop(0, FALSE, GENERIC_ALL);
+    if (hDesk) {
+        SetThreadDesktop(hDesk);
+        CloseDesktop(hDesk);
+    }
+
     WNDCLASSW wc = {0};
     wc.lpfnWndProc = MainWindowProc;
     wc.hInstance = hinstance;
@@ -90,7 +97,13 @@ int WINAPI wWinMain(HINSTANCE hinstance, HINSTANCE hprev_instance, PWSTR cmd_lin
         return 1;
     }
 
-    HWND taskbar_hwnd = FindWindowW(L"Shell_TrayWnd", NULL);
+    HWND taskbar_hwnd = NULL;
+    for (int retry = 0; retry < 10; retry++) {
+        taskbar_hwnd = FindWindowW(L"Shell_TrayWnd", NULL);
+        if (taskbar_hwnd) break;
+        Sleep(200);
+    }
+
     if (!taskbar_hwnd) {
         MessageBoxW(NULL, L"Failed to find Shell_TrayWnd.", L"TaskbarEngine Error", MB_OK | MB_ICONERROR);
         PostMessageW(g_main_hwnd, WM_CLOSE, 0, 0);
@@ -112,21 +125,21 @@ int WINAPI wWinMain(HINSTANCE hinstance, HINSTANCE hprev_instance, PWSTR cmd_lin
                     MessageBoxW(NULL, L"Failed to load EngineDLL.dll.", L"TaskbarEngine Error", MB_OK | MB_ICONERROR);
                     PostMessageW(g_main_hwnd, WM_CLOSE, 0, 0);
                 } else {
-                    HOOKPROC hook_proc = (HOOKPROC)GetProcAddress(g_dll_handle, "TE_CBTHookProc");
+                    HOOKPROC hook_proc = (HOOKPROC)GetProcAddress(g_dll_handle, "TE_GetMsgHookProc");
                     if (!hook_proc) {
-                        MessageBoxW(NULL, L"Failed to find TE_CBTHookProc in EngineDLL.dll.", L"TaskbarEngine Error", MB_OK | MB_ICONERROR);
+                        hook_proc = (HOOKPROC)GetProcAddress(g_dll_handle, "TE_CBTHookProc");
+                    }
+                    if (!hook_proc) {
+                        MessageBoxW(NULL, L"Failed to find hook procedure in EngineDLL.dll.", L"TaskbarEngine Error", MB_OK | MB_ICONERROR);
                         PostMessageW(g_main_hwnd, WM_CLOSE, 0, 0);
                     } else {
-                        g_hook = SetWindowsHookExW(WH_CBT, hook_proc, g_dll_handle, explorer_thread_id);
+                        g_hook = SetWindowsHookExW(WH_GETMESSAGE, hook_proc, g_dll_handle, explorer_thread_id);
                         if (!g_hook) {
-                            MessageBoxW(NULL, L"Failed to install WH_CBT hook.", L"TaskbarEngine Error", MB_OK | MB_ICONERROR);
+                            MessageBoxW(NULL, L"Failed to install WH_GETMESSAGE hook.", L"TaskbarEngine Error", MB_OK | MB_ICONERROR);
                             PostMessageW(g_main_hwnd, WM_CLOSE, 0, 0);
                         } else {
                             TE_CrashRecoveryStart(g_main_hwnd, g_dll_handle);
                             PostMessageW(taskbar_hwnd, WM_NULL, 0, 0);
-                            Sleep(50);
-                            UnhookWindowsHookEx(g_hook);
-                            g_hook = NULL;
                         }
                     }
                 }

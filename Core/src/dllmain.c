@@ -31,6 +31,9 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
                 return TRUE;
             }
             
+            HMODULE hPin = NULL;
+            GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN, (LPCWSTR)DllMain, &hPin);
+
             DisableThreadLibraryCalls(hinstDLL);
             g_hinstDLL = hinstDLL;
             
@@ -64,10 +67,15 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
     return TRUE;
 }
 
+LRESULT CALLBACK TE_GetMsgHookProc(int nCode, WPARAM wParam, LPARAM lParam)
+{
+    /* WH_GETMESSAGE hook proc: called on Explorer's message loop */
+    return CallNextHookEx(NULL, nCode, wParam, lParam);
+}
+
 LRESULT CALLBACK TE_CBTHookProc(int nCode, WPARAM wParam, LPARAM lParam)
 {
-    /* The hook proc must call CallNextHookEx to pass the hook to the next handler.
-     * The actual work happens in DllMain when the DLL loads into the target process. */
+    /* WH_CBT hook proc: kept for compatibility */
     return CallNextHookEx(NULL, nCode, wParam, lParam);
 }
 

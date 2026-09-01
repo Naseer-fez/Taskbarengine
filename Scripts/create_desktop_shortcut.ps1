@@ -8,7 +8,13 @@ $buildConfig = "$repoRoot\build_msvc\Config"
 
 # 1. Copy EngineDLL.dll into build_msvc\App
 if (Test-Path "$buildCore\EngineDLL.dll") {
-    Copy-Item "$buildCore\EngineDLL.dll" "$buildApp\EngineDLL.dll" -Force
+    try {
+        Copy-Item "$buildCore\EngineDLL.dll" "$buildApp\EngineDLL.dll" -Force
+    } catch {
+        $tempOld = "$buildApp\EngineDLL.dll.old." + (Get-Random)
+        Move-Item "$buildApp\EngineDLL.dll" $tempOld -Force
+        Copy-Item "$buildCore\EngineDLL.dll" "$buildApp\EngineDLL.dll" -Force
+    }
     Write-Host "Copied EngineDLL.dll to $buildApp" -ForegroundColor Green
 }
 

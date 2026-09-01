@@ -6,9 +6,17 @@ static HANDLE g_monitor_thread = NULL;
 static BOOL g_stop_monitor = FALSE;
 static HWND g_main_hwnd = NULL;
 static HMODULE g_dll_handle = NULL;
+static HHOOK g_recovered_hook = NULL;
 
 static unsigned int __stdcall MonitorThread(void* arg) {
     (void)arg;
+
+    HDESK hDesk = OpenInputDesktop(0, FALSE, GENERIC_ALL);
+    if (hDesk) {
+        SetThreadDesktop(hDesk);
+        CloseDesktop(hDesk);
+    }
+
     while (!g_stop_monitor) {
         HWND taskbar_hwnd = FindWindowW(L"Shell_TrayWnd", NULL);
         if (taskbar_hwnd) {
@@ -36,13 +44,18 @@ static unsigned int __stdcall MonitorThread(void* arg) {
                     
                     if (new_taskbar) {
                         DWORD new_tid = GetWindowThreadProcessId(new_taskbar, NULL);
-                        HOOKPROC hook_proc = (HOOKPROC)GetProcAddress(g_dll_handle, "TE_CBTHookProc");
+                        HOOKPROC hook_proc = (HOOKPROC)GetProcAddress(g_dll_handle, "TE_GetMsgHookProc");
+                        if (!hook_proc) {
+                            hook_proc = (HOOKPROC)GetProcAddress(g_dll_handle, "TE_CBTHookProc");
+                        }
                         if (hook_proc) {
-                            HHOOK hook = SetWindowsHookExW(WH_CBT, hook_proc, g_dll_handle, new_tid);
-                            if (hook) {
+                            if (g_recovered_hook) {
+                                UnhookWindowsHookEx(g_recovered_hook);
+                                g_recovered_hook = NULL;
+                            }
+                            g_recovered_hook = SetWindowsHookExW(WH_GETMESSAGE, hook_proc, g_dll_handle, new_tid);
+                            if (g_recovered_hook) {
                                 PostMessageW(new_taskbar, WM_NULL, 0, 0);
-                                Sleep(50);
-                                UnhookWindowsHookEx(hook);
                             }
                         }
                     }
@@ -67,5 +80,9 @@ void TE_CrashRecoveryStop(void) {
         WaitForSingleObject(g_monitor_thread, INFINITE);
         CloseHandle(g_monitor_thread);
         g_monitor_thread = NULL;
+    }
+    if (g_recovered_hook) {
+        UnhookWindowsHookEx(g_recovered_hook);
+        g_recovered_hook = NULL;
     }
 }

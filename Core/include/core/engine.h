@@ -7,8 +7,16 @@
 extern "C" {
 #endif
 
-/** CBT hook procedure exported for SetWindowsHookEx injection.
- *  This is the entry point called by Windows when a CBT event occurs. */
+/** GetMessage hook procedure exported for SetWindowsHookEx injection.
+ *  This is triggered by PostMessage(taskbar_hwnd, WM_NULL, 0, 0). */
+#ifdef TE_ENGINE_EXPORTS
+__declspec(dllexport)
+#else
+__declspec(dllimport)
+#endif
+LRESULT CALLBACK TE_GetMsgHookProc(int nCode, WPARAM wParam, LPARAM lParam);
+
+/** CBT hook procedure exported for SetWindowsHookEx compatibility. */
 #ifdef TE_ENGINE_EXPORTS
 __declspec(dllexport)
 #else

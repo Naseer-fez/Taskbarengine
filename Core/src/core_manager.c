@@ -63,12 +63,38 @@ HRESULT TE_CoreManagerInit(HWND taskbar_hwnd) {
         }
 
         if (!user_config_found) {
-            swprintf(g_core.config_path, MAX_PATH, L"%s\\..\\Config\\default_config.jsonc", dll_path);
-            swprintf(g_core.config_dir, MAX_PATH, L"%s\\..\\Config", dll_path);
+            wchar_t candidate[MAX_PATH];
+            swprintf(candidate, MAX_PATH, L"%s\\..\\Config\\default_config.jsonc", dll_path);
+            if (GetFileAttributesW(candidate) != INVALID_FILE_ATTRIBUTES) {
+                wcsncpy_s(g_core.config_path, MAX_PATH, candidate, _TRUNCATE);
+                swprintf(g_core.config_dir, MAX_PATH, L"%s\\..\\Config", dll_path);
+            } else {
+                swprintf(candidate, MAX_PATH, L"%s\\Config\\default_config.jsonc", dll_path);
+                if (GetFileAttributesW(candidate) != INVALID_FILE_ATTRIBUTES) {
+                    wcsncpy_s(g_core.config_path, MAX_PATH, candidate, _TRUNCATE);
+                    swprintf(g_core.config_dir, MAX_PATH, L"%s\\Config", dll_path);
+                } else {
+                    swprintf(candidate, MAX_PATH, L"%s\\..\\..\\Config\\default_config.jsonc", dll_path);
+                    wcsncpy_s(g_core.config_path, MAX_PATH, candidate, _TRUNCATE);
+                    swprintf(g_core.config_dir, MAX_PATH, L"%s\\..\\..\\Config", dll_path);
+                }
+            }
         }
 
         swprintf(g_core.log_dir, MAX_PATH, L"%s\\..\\Logs", dll_path);
-        swprintf(g_core.modules_dir, MAX_PATH, L"%s\\..\\Modules", dll_path);
+        
+        wchar_t candidate_mod[MAX_PATH];
+        swprintf(candidate_mod, MAX_PATH, L"%s\\..\\Modules", dll_path);
+        if (GetFileAttributesW(candidate_mod) != INVALID_FILE_ATTRIBUTES) {
+            wcsncpy_s(g_core.modules_dir, MAX_PATH, candidate_mod, _TRUNCATE);
+        } else {
+            swprintf(candidate_mod, MAX_PATH, L"%s\\Modules", dll_path);
+            if (GetFileAttributesW(candidate_mod) != INVALID_FILE_ATTRIBUTES) {
+                wcsncpy_s(g_core.modules_dir, MAX_PATH, candidate_mod, _TRUNCATE);
+            } else {
+                swprintf(g_core.modules_dir, MAX_PATH, L"%s\\..\\..\\Modules", dll_path);
+            }
+        }
     }
     
     CreateDirectoryW(g_core.log_dir, NULL);
