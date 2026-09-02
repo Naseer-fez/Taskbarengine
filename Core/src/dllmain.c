@@ -22,6 +22,26 @@ BOOL TE_IsExplorerProcess(void)
     return (_wcsicmp(filename, L"explorer.exe") == 0);
 }
 
+#include <stdio.h>
+
+static void TE_WriteStartupError(HINSTANCE hInst, const char* msg) {
+    wchar_t path[MAX_PATH];
+    if (GetModuleFileNameW(hInst, path, MAX_PATH)) {
+        wchar_t* last_slash = wcsrchr(path, L'\\');
+        if (last_slash) {
+            *(last_slash + 1) = L'\0';
+            wcscat_s(path, MAX_PATH, L"startup_error.log");
+            FILE* f = _wfopen(path, L"a");
+            if (f) {
+                SYSTEMTIME st;
+                GetLocalTime(&st);
+                fprintf(f, "[%04d-%02d-%02d %02d:%02d:%02d] %s\n", st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, msg);
+                fclose(f);
+            }
+        }
+    }
+}
+
 BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
 {
     switch (fdwReason) {
@@ -44,6 +64,8 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
                  * WM_TE_INIT will trigger TE_CoreManagerInit() on the UI thread. */
                 TE_TaskbarSubclassInstall(taskbar_hwnd);
                 PostMessage(taskbar_hwnd, WM_TE_INIT, 0, 0);
+            } else {
+                TE_WriteStartupError(hinstDLL, "CRITICAL ERROR: Shell_TrayWnd not found in Explorer process. Cannot initialize Core Manager.");
             }
             break;
         }

@@ -113,7 +113,9 @@ HRESULT TE_CoreManagerInit(HWND taskbar_hwnd) {
     TE_PluginLoaderEnableAll();
     
     TE_ConfigWatcherStart(g_core.config_dir, g_core.taskbar_hwnd);
-    TE_IpcServerStart(g_core.taskbar_hwnd);
+    if (FAILED(TE_IpcServerStart(g_core.taskbar_hwnd))) {
+        TE_LogWrite(TE_LOG_ERROR, "CoreManager", "CRITICAL ERROR: IPC Server failed to start");
+    }
     TE_ShellHookInit(g_core.taskbar_hwnd);
     TE_VDesktopInit();
     
