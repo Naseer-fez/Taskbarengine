@@ -121,6 +121,10 @@ set_target_properties(TaskbarEngineSettings PROPERTIES
     VS_PACKAGE_REFERENCES "Microsoft.WindowsAppSDK_1.5.240311000;Microsoft.Windows.CppWinRT_2.0.240111.5"
 )
 
+if(MT_EXECUTABLE)
+    target_link_options(TaskbarEngineSettings PRIVATE "/MANIFESTINPUT:${SETTINGS_MERGED_MANIFEST}")
+endif()
+
 # Post-build: Copy Windows App SDK runtime DLLs and resources next to the executable
 add_custom_command(TARGET TaskbarEngineSettings POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E echo "Deploying self-contained Windows App SDK runtime binaries to bin folder..."

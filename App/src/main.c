@@ -78,9 +78,9 @@ int WINAPI wWinMain(HINSTANCE hinstance, HINSTANCE hprev_instance, PWSTR cmd_lin
         0,
         L"TaskbarEngineHost",
         L"TaskbarEngine",
-        0,
+        WS_OVERLAPPED,
         0, 0, 0, 0,
-        HWND_MESSAGE,
+        NULL,
         NULL,
         hinstance,
         NULL

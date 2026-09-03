@@ -25,6 +25,12 @@ if (-not (Test-Path $buildConfig)) {
 Copy-Item "$repoRoot\Config\default_config.jsonc" "$buildConfig\default_config.jsonc" -Force
 Write-Host "Copied default_config.jsonc to $buildConfig" -ForegroundColor Green
 
+# Copy app.ico to buildApp
+if (Test-Path "$repoRoot\App\res\app.ico") {
+    Copy-Item "$repoRoot\App\res\app.ico" "$buildApp\app.ico" -Force
+    Write-Host "Copied app.ico to $buildApp" -ForegroundColor Green
+}
+
 # 3. Create Desktop Shortcuts
 $desktop = [Environment]::GetFolderPath("Desktop")
 $wsh = New-Object -ComObject WScript.Shell

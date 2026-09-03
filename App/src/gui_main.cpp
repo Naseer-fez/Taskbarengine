@@ -4,6 +4,7 @@
 #include <winrt/Microsoft.UI.Xaml.Controls.h>
 #include <winrt/Microsoft.UI.Xaml.Hosting.h>
 #include <windows.h>
+#include <microsoft.ui.xaml.window.h>
 #undef GetCurrentTime
 #include <string>
 #include <cJSON.h>
@@ -19,6 +20,28 @@ using namespace winrt;
 using namespace winrt::Microsoft::UI::Xaml;
 using namespace winrt::Microsoft::UI::Xaml::Controls;
 
+#include <fstream>
+
+static void LogGui(const std::string& msg)
+{
+    wchar_t path[MAX_PATH];
+    if (GetModuleFileNameW(NULL, path, MAX_PATH)) {
+        wchar_t* last = wcsrchr(path, L'\\');
+        if (last) {
+            *(last + 1) = L'\0';
+            wcscat_s(path, MAX_PATH, L"te_settings.log");
+            std::ofstream ofs(path, std::ios::app);
+            if (ofs.is_open()) {
+                SYSTEMTIME st;
+                GetLocalTime(&st);
+                char buf[64];
+                snprintf(buf, sizeof(buf), "[%02d:%02d:%02d.%03d] ", st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
+                ofs << buf << msg << std::endl;
+            }
+        }
+    }
+}
+
 namespace winrt::TaskbarEngine {
 
 struct App : ApplicationT<App, winrt::Microsoft::UI::Xaml::Markup::IXamlMetadataProvider>
@@ -27,7 +50,9 @@ struct App : ApplicationT<App, winrt::Microsoft::UI::Xaml::Markup::IXamlMetadata
 
     App()
     {
+        LogGui("App() constructor entered");
         UnhandledException([this](winrt::Windows::Foundation::IInspectable const&, winrt::Microsoft::UI::Xaml::UnhandledExceptionEventArgs const& e) {
+            LogGui(std::string("UnhandledException: ") + to_string(e.Message()));
             MessageBoxW(NULL, e.Message().c_str(), L"TaskbarEngine Unhandled XAML Exception", MB_ICONERROR);
             e.Handled(true);
         });
@@ -52,6 +77,7 @@ struct App : ApplicationT<App, winrt::Microsoft::UI::Xaml::Markup::IXamlMetadata
 
     void OnLaunched(LaunchActivatedEventArgs const&)
     {
+        LogGui("OnLaunched entered");
         winrt::Microsoft::UI::Xaml::Controls::XamlControlsResources resources;
         Resources().MergedDictionaries().Append(resources);
         
@@ -131,7 +157,28 @@ struct App : ApplicationT<App, winrt::Microsoft::UI::Xaml::Markup::IXamlMetadata
         nav.SelectedItem(aboutItem);
         
         m_window.Content(nav);
+        LogGui("Activating window...");
         m_window.Activate();
+        LogGui("m_window.Activate() completed");
+
+        HWND hwnd = nullptr;
+        try {
+            auto windowNative = m_window.as<IWindowNative>();
+            if (windowNative) {
+                windowNative->get_WindowHandle(&hwnd);
+                char buf[128];
+                snprintf(buf, sizeof(buf), "HWND retrieved: 0x%p", (void*)hwnd);
+                LogGui(buf);
+                if (hwnd) {
+                    ShowWindow(hwnd, SW_SHOW);
+                    SetForegroundWindow(hwnd);
+                    UpdateWindow(hwnd);
+                    LogGui("Explicit ShowWindow(SW_SHOW) called");
+                }
+            }
+        } catch (...) {
+            LogGui("Failed to get HWND via IWindowNative");
+        }
     }
 };
 
@@ -141,8 +188,10 @@ struct App : ApplicationT<App, winrt::Microsoft::UI::Xaml::Markup::IXamlMetadata
 
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
 {
+    LogGui("wWinMain started");
     try {
         init_apartment(winrt::apartment_type::single_threaded);
+        LogGui("init_apartment completed");
 
         DispatcherQueueOptions options = {
             sizeof(DispatcherQueueOptions),
@@ -150,16 +199,31 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
             DQTAT_COM_NONE
         };
         winrt::com_ptr<ABI::Windows::System::IDispatcherQueueController> controller;
-        CreateDispatcherQueueController(options, reinterpret_cast<ABI::Windows::System::IDispatcherQueueController**>(winrt::put_abi(controller)));
+        HRESULT hrDq = CreateDispatcherQueueController(options, reinterpret_cast<ABI::Windows::System::IDispatcherQueueController**>(winrt::put_abi(controller)));
+        char buf[128];
+        snprintf(buf, sizeof(buf), "CreateDispatcherQueueController result: 0x%08X", (unsigned int)hrDq);
+        LogGui(buf);
 
+        LogGui("Calling Application::Start...");
         winrt::Microsoft::UI::Xaml::Application::Start([](auto&&) {
+            LogGui("Application::Start callback: creating App...");
             winrt::make<winrt::TaskbarEngine::App>();
+            LogGui("Application::Start callback: App created");
         });
+        LogGui("Application::Start returned");
     } catch (winrt::hresult_error const& e) {
+        std::string err = "winrt::hresult_error: " + to_string(e.message()) + " (0x" + std::to_string(e.code().value) + ")";
+        LogGui(err);
         MessageBoxW(NULL, e.message().c_str(), L"TaskbarEngine Error", MB_ICONERROR);
+    } catch (std::exception const& e) {
+        std::string err = std::string("std::exception: ") + e.what();
+        LogGui(err);
+        MessageBoxA(NULL, e.what(), "TaskbarEngine Error", MB_ICONERROR);
     } catch (...) {
+        LogGui("Unknown exception in wWinMain");
         MessageBoxW(NULL, L"Unknown WinUI 3 error occurred.", L"TaskbarEngine Error", MB_ICONERROR);
     }
 
+    LogGui("wWinMain exiting");
     return 0;
 }
