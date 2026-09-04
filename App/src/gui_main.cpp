@@ -170,10 +170,10 @@ struct App : ApplicationT<App, winrt::Microsoft::UI::Xaml::Markup::IXamlMetadata
                 snprintf(buf, sizeof(buf), "HWND retrieved: 0x%p", (void*)hwnd);
                 LogGui(buf);
                 if (hwnd) {
-                    ShowWindow(hwnd, SW_SHOW);
+                    ShowWindow(hwnd, SW_RESTORE);
                     SetForegroundWindow(hwnd);
                     UpdateWindow(hwnd);
-                    LogGui("Explicit ShowWindow(SW_SHOW) called");
+                    LogGui("Explicit ShowWindow(SW_RESTORE) called");
                 }
             }
         } catch (...) {
@@ -186,8 +186,48 @@ struct App : ApplicationT<App, winrt::Microsoft::UI::Xaml::Markup::IXamlMetadata
 
 #include <DispatcherQueue.h>
 
+static LONG WINAPI CrashHandler(PEXCEPTION_POINTERS pExcept)
+{
+    DWORD code = pExcept->ExceptionRecord->ExceptionCode;
+    if (code == 0x40010006) { // OutputDebugStringA
+        size_t len = pExcept->ExceptionRecord->ExceptionInformation[0];
+        const char* str = (const char*)pExcept->ExceptionRecord->ExceptionInformation[1];
+        if (str && len > 0) {
+            std::string s(str, len > 1024 ? 1024 : len);
+            LogGui("DEBUG_STRING: " + s);
+        }
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    if (code == 0x4001000A) { // OutputDebugStringW
+        const wchar_t* wstr = (const wchar_t*)pExcept->ExceptionRecord->ExceptionInformation[1];
+        if (wstr) {
+            std::wstring ws(wstr);
+            LogGui("DEBUG_STRING_W: " + to_string(ws));
+        }
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    if (code == 0x406D1388 || code == 0x000006BA || code == 0x40080201) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    char buf[256];
+    snprintf(buf, sizeof(buf), "EXCEPTION DETECTED: Code=0x%08X at Address=0x%p", code, pExcept->ExceptionRecord->ExceptionAddress);
+    LogGui(buf);
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
 {
+    AddVectoredExceptionHandler(1, CrashHandler);
+
+    /* Attach to the interactive user desktop if started from background / sandbox */
+    HDESK hDesk = OpenInputDesktop(0, FALSE, GENERIC_ALL);
+    if (!hDesk) {
+        hDesk = OpenDesktopW(L"Default", 0, FALSE, GENERIC_ALL);
+    }
+    if (hDesk) {
+        SetThreadDesktop(hDesk);
+    }
+
     LogGui("wWinMain started");
     try {
         init_apartment(winrt::apartment_type::single_threaded);

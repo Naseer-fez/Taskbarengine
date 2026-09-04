@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <windows.h>
+#include <share.h>
 
 #define MAX_LOG_FILES 5
 #define MAX_FILE_SIZE (5 * 1024 * 1024)
@@ -79,7 +80,7 @@ static void WriteEntryToFile(const LogEntry* entry) {
     if (!g_log_file) {
         wchar_t path[MAX_PATH];
         _snwprintf_s(path, MAX_PATH, _TRUNCATE, L"%s\\taskbarengine.log", g_log_dir);
-        _wfopen_s(&g_log_file, path, L"a");
+        g_log_file = _wfsopen(path, L"a", _SH_DENYNO);
         if (!g_log_file) return;
     }
 
@@ -90,6 +91,7 @@ static void WriteEntryToFile(const LogEntry* entry) {
             GetLevelString(entry->level),
             entry->module,
             entry->message);
+    fflush(g_log_file);
     
     CheckRotation();
 }

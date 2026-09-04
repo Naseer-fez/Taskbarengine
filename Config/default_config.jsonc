@@ -15,7 +15,7 @@
         // Taskbar resize plugin — adjusts taskbar height and spacing
         "taskbar_resize": {
             "enabled": true,
-            "height": 48,
+            "height": 24,
             "padding_top": 0,
             "padding_bottom": 0,
             "icon_spacing": 4
