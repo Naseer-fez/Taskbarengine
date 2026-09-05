@@ -27,6 +27,23 @@ target_link_libraries(te_core_testlib PUBLIC
     shlwapi
 )
 
+add_library(te_resize_testlib STATIC
+    ${CMAKE_SOURCE_DIR}/Modules/taskbar_resize/taskbar_resize.c
+)
+
+target_include_directories(te_resize_testlib PUBLIC
+    ${CMAKE_SOURCE_DIR}/Modules/taskbar_resize
+    ${CMAKE_SOURCE_DIR}/SDK/include
+    ${CMAKE_SOURCE_DIR}/ThirdParty/cJSON
+)
+
+target_link_libraries(te_resize_testlib PUBLIC
+    te_sdk
+    cjson
+    comctl32
+    user32
+)
+
 add_executable(te_tests
     test_jsonc.cpp
     test_plugin_loader.cpp
@@ -43,6 +60,7 @@ target_compile_definitions(te_tests PRIVATE _CRT_SECURE_NO_WARNINGS)
 
 target_link_libraries(te_tests PRIVATE
     te_core_testlib
+    te_resize_testlib
     te_sdk
     cjson
     Catch2::Catch2WithMain

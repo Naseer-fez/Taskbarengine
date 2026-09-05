@@ -95,11 +95,32 @@ HRESULT TE_CoreManagerInit(HWND taskbar_hwnd) {
                 swprintf(g_core.modules_dir, MAX_PATH, L"%s\\..\\..\\Modules", dll_path);
             }
         }
+        wchar_t canon[MAX_PATH];
+        if (GetFullPathNameW(g_core.config_path, MAX_PATH, canon, NULL)) {
+            wcsncpy_s(g_core.config_path, MAX_PATH, canon, _TRUNCATE);
+        }
+        if (GetFullPathNameW(g_core.config_dir, MAX_PATH, canon, NULL)) {
+            wcsncpy_s(g_core.config_dir, MAX_PATH, canon, _TRUNCATE);
+        }
+        if (GetFullPathNameW(g_core.log_dir, MAX_PATH, canon, NULL)) {
+            wcsncpy_s(g_core.log_dir, MAX_PATH, canon, _TRUNCATE);
+        }
+        if (GetFullPathNameW(g_core.modules_dir, MAX_PATH, canon, NULL)) {
+            wcsncpy_s(g_core.modules_dir, MAX_PATH, canon, _TRUNCATE);
+        }
     }
     
     CreateDirectoryW(g_core.log_dir, NULL);
     TE_LogInit(g_core.log_dir, TE_LOG_INFO);
     TE_LogWrite(TE_LOG_INFO, "CoreManager", "Core Manager initializing");
+    
+    char log_buf[512];
+    snprintf(log_buf, sizeof(log_buf), "Config path: %ls", g_core.config_path);
+    TE_LogWrite(TE_LOG_INFO, "CoreManager", log_buf);
+    snprintf(log_buf, sizeof(log_buf), "Config dir:  %ls", g_core.config_dir);
+    TE_LogWrite(TE_LOG_INFO, "CoreManager", log_buf);
+    snprintf(log_buf, sizeof(log_buf), "Modules dir: %ls", g_core.modules_dir);
+    TE_LogWrite(TE_LOG_INFO, "CoreManager", log_buf);
     
     TE_EventDispatchInit();
     

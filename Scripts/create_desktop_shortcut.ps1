@@ -25,6 +25,22 @@ if (-not (Test-Path $buildConfig)) {
 Copy-Item "$repoRoot\Config\default_config.jsonc" "$buildConfig\default_config.jsonc" -Force
 Write-Host "Copied default_config.jsonc to $buildConfig" -ForegroundColor Green
 
+# 2a. Sync to LocalAppData\TaskbarEngine if present
+$appDataDir = "$env:LOCALAPPDATA\TaskbarEngine"
+if (Test-Path $appDataDir) {
+    Copy-Item "$repoRoot\Config\default_config.jsonc" "$appDataDir\config.jsonc" -Force
+    Write-Host "Synced config.jsonc to $appDataDir" -ForegroundColor Green
+}
+
+# 2b. Verify and deploy TaskbarResize plugin
+$buildPlugin = "$repoRoot\build_msvc\Modules\taskbar_resize"
+if (-not (Test-Path $buildPlugin)) {
+    New-Item -ItemType Directory -Path $buildPlugin -Force | Out-Null
+}
+if (Test-Path "$buildPlugin\taskbar_resize.dll") {
+    Write-Host "Verified taskbar_resize.dll in $buildPlugin" -ForegroundColor Green
+}
+
 # Copy app.ico to buildApp
 if (Test-Path "$repoRoot\App\res\app.ico") {
     Copy-Item "$repoRoot\App\res\app.ico" "$buildApp\app.ico" -Force

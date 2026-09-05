@@ -15,10 +15,10 @@
         // Taskbar resize plugin — adjusts taskbar height and spacing
         "taskbar_resize": {
             "enabled": true,
-            "height": 24,
-            "padding_top": 0,
-            "padding_bottom": 0,
-            "icon_spacing": 4
+            "height": 32,            // Calibrated heights: 32 (recommended sweet spot), 36 (relaxed), 30 (compact), 24 (ultra)
+            "padding_top": 0,        // Fine-tune vertical offset in logical pixels (-20 to 20)
+            "padding_bottom": 0,     // Fine-tune vertical offset in logical pixels (-20 to 20)
+            "icon_spacing": 4        // Horizontal spacing between icons (0 to 32)
         },
 
         // Icon hover plugin — macOS Dock-style magnification
