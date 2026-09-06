@@ -44,6 +44,17 @@ target_link_libraries(te_resize_testlib PUBLIC
     user32
 )
 
+# Static test library for magnification math (pure C, no Win32 deps)
+add_library(te_magnify_testlib STATIC
+    ${CMAKE_SOURCE_DIR}/Modules/icon_hover/magnification.c
+)
+
+target_include_directories(te_magnify_testlib PUBLIC
+    ${CMAKE_SOURCE_DIR}/Modules/icon_hover
+)
+
+target_compile_definitions(te_magnify_testlib PRIVATE _USE_MATH_DEFINES)
+
 add_executable(te_tests
     test_jsonc.cpp
     test_plugin_loader.cpp
@@ -54,6 +65,8 @@ add_executable(te_tests
     test_ipc_protocol.cpp
     test_taskbar_resize.cpp
     test_crash_recovery.cpp
+    test_magnification.cpp
+    test_state_store.cpp
 )
 
 target_compile_definitions(te_tests PRIVATE _CRT_SECURE_NO_WARNINGS)
@@ -61,6 +74,7 @@ target_compile_definitions(te_tests PRIVATE _CRT_SECURE_NO_WARNINGS)
 target_link_libraries(te_tests PRIVATE
     te_core_testlib
     te_resize_testlib
+    te_magnify_testlib
     te_sdk
     cjson
     Catch2::Catch2WithMain

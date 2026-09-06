@@ -23,10 +23,12 @@ add_executable(te_benchmarks
     bench_event_dispatch.cpp
     bench_state_store.cpp
     bench_config_parse.cpp
+    bench_magnification.cpp
     ${CMAKE_SOURCE_DIR}/Core/src/event_dispatch.c
     ${CMAKE_SOURCE_DIR}/Core/src/fault_isolation.c
     ${CMAKE_SOURCE_DIR}/Core/src/state_store.c
     ${CMAKE_SOURCE_DIR}/SDK/src/te_jsonc.c
+    ${CMAKE_SOURCE_DIR}/Modules/icon_hover/magnification.c
 )
 
 target_include_directories(te_benchmarks PRIVATE
@@ -41,3 +43,5 @@ target_link_libraries(te_benchmarks PRIVATE
     benchmark::benchmark_main
     te_sdk
 )
+
+target_compile_definitions(te_benchmarks PRIVATE _USE_MATH_DEFINES)

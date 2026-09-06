@@ -44,6 +44,7 @@ add_subdirectory(SDK)
 add_subdirectory(Core)
 add_subdirectory(Modules/dummy)
 add_subdirectory(Modules/taskbar_resize)
+add_subdirectory(Modules/icon_hover)
 add_subdirectory(App)
 add_subdirectory(Benchmarks)
 

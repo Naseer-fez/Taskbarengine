@@ -364,6 +364,14 @@ static void OnConfigChanged(uint32_t type, const void* data, void* user_data) {
     ResizeLog(TE_LOG_INFO, "OnConfigChanged: new height=%d, padding_top=%d, padding_bottom=%d, icon_spacing=%d",
               g_config.height, g_config.padding_top, g_config.padding_bottom, g_config.icon_spacing);
     ApplyTaskbarSize(g_ctx->taskbar_hwnd);
+
+    /* Re-publish updated height to shared state store */
+    if (g_ctx->publish_state) {
+        StateValue height_val;
+        height_val.type = TE_STATE_INT;
+        height_val.data.int_val = g_config.height;
+        g_ctx->publish_state("taskbar_resize.height", &height_val);
+    }
 }
 
 static void OnDpiChanged(uint32_t type, const void* data, void* user_data) {
@@ -389,6 +397,14 @@ static HRESULT Enable(void) {
     g_ctx->subscribe(TE_EVENT_DPI_CHANGED, OnDpiChanged, NULL);
     
     ApplyTaskbarSize(g_ctx->taskbar_hwnd);
+
+    /* Publish current height to shared state store for inter-plugin communication */
+    if (g_ctx->publish_state) {
+        StateValue height_val;
+        height_val.type = TE_STATE_INT;
+        height_val.data.int_val = g_config.height;
+        g_ctx->publish_state("taskbar_resize.height", &height_val);
+    }
     
     return TE_S_OK;
 }

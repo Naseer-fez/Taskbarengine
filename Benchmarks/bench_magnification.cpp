@@ -1,5 +1,5 @@
 #include <benchmark/benchmark.h>
-#include "../Modules/icon_hover/magnification.h"
+#include "magnification.h"
 #include <vector>
 
 static void BM_MagnifyComputeScales(benchmark::State& state) {
