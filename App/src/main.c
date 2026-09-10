@@ -172,7 +172,13 @@ int WINAPI wWinMain(HINSTANCE hinstance, HINSTANCE hprev_instance, PWSTR cmd_lin
                     LogHost("EngineDLL.dll loaded");
                     HOOKPROC hook_proc = (HOOKPROC)GetProcAddress(g_dll_handle, "TE_GetMsgHookProc");
                     if (!hook_proc) {
+                        hook_proc = (HOOKPROC)GetProcAddress(g_dll_handle, "_TE_GetMsgHookProc@12");
+                    }
+                    if (!hook_proc) {
                         hook_proc = (HOOKPROC)GetProcAddress(g_dll_handle, "TE_CBTHookProc");
+                        if (!hook_proc) {
+                            hook_proc = (HOOKPROC)GetProcAddress(g_dll_handle, "_TE_CBTHookProc@12");
+                        }
                     }
                     if (!hook_proc) {
                         LogHost("Failed to find hook procedure");
