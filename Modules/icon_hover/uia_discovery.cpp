@@ -22,7 +22,7 @@
 #include <wchar.h>
 
 /** Minimum interval between UIA queries in QPC ticks (~500ms). */
-static LARGE_INTEGER s_rate_limit_interval = { 0 };
+static LARGE_INTEGER s_rate_limit_interval = {};
 
 /** Module log tag. */
 static const char* LOG_TAG = "UiaDiscovery";
@@ -82,6 +82,8 @@ HRESULT TE_UiaDiscoverIcons(HWND taskbar_hwnd, TE_IconElementCache* out_cache)
         return TE_S_OK;
     }
 
+    HRESULT hr_co = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+
     HRESULT hr = S_OK;
     IUIAutomation* uia = NULL;
     IUIAutomationElement* taskbar_elem = NULL;
@@ -95,6 +97,7 @@ HRESULT TE_UiaDiscoverIcons(HWND taskbar_hwnd, TE_IconElementCache* out_cache)
     );
     if (FAILED(hr) || !uia) {
         TE_LogWrite(TE_LOG_ERROR, LOG_TAG, "Failed to create IUIAutomation instance");
+        if (SUCCEEDED(hr_co)) CoUninitialize();
         return TE_E_FAIL;
     }
 
@@ -103,6 +106,7 @@ HRESULT TE_UiaDiscoverIcons(HWND taskbar_hwnd, TE_IconElementCache* out_cache)
     if (FAILED(hr) || !taskbar_elem) {
         TE_LogWrite(TE_LOG_ERROR, LOG_TAG, "Failed to get UIA element from taskbar HWND");
         uia->Release();
+        if (SUCCEEDED(hr_co)) CoUninitialize();
         return TE_E_FAIL;
     }
 
@@ -115,6 +119,7 @@ HRESULT TE_UiaDiscoverIcons(HWND taskbar_hwnd, TE_IconElementCache* out_cache)
         TE_LogWrite(TE_LOG_ERROR, LOG_TAG, "Failed to create UIA property condition");
         taskbar_elem->Release();
         uia->Release();
+        if (SUCCEEDED(hr_co)) CoUninitialize();
         return TE_E_FAIL;
     }
 
@@ -129,6 +134,7 @@ HRESULT TE_UiaDiscoverIcons(HWND taskbar_hwnd, TE_IconElementCache* out_cache)
         LARGE_INTEGER now;
         QueryPerformanceCounter(&now);
         out_cache->last_update_qpc = (uint64_t)now.QuadPart;
+        if (SUCCEEDED(hr_co)) CoUninitialize();
         return TE_S_OK;
     }
 
@@ -144,7 +150,8 @@ HRESULT TE_UiaDiscoverIcons(HWND taskbar_hwnd, TE_IconElementCache* out_cache)
         if (FAILED(hr) || !btn) continue;
 
         /* Extract bounding rectangle */
-        RECT bounds = { 0 };
+        RECT bounds;
+        memset(&bounds, 0, sizeof(bounds));
         hr = btn->get_CurrentBoundingRectangle(&bounds);
         if (FAILED(hr) || (bounds.right - bounds.left) <= 0 || (bounds.bottom - bounds.top) <= 0) {
             btn->Release();
@@ -190,6 +197,8 @@ HRESULT TE_UiaDiscoverIcons(HWND taskbar_hwnd, TE_IconElementCache* out_cache)
     button_cond->Release();
     taskbar_elem->Release();
     uia->Release();
+
+    if (SUCCEEDED(hr_co)) CoUninitialize();
 
     return TE_S_OK;
 }

@@ -28,3 +28,10 @@ target_link_libraries(EngineDLL PRIVATE
 
 # Export the CBT hook procedure
 target_compile_definitions(EngineDLL PRIVATE TE_ENGINE_EXPORTS)
+
+# Copy EngineDLL to the App directory next to TaskbarEngine.exe
+add_custom_command(TARGET EngineDLL POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy
+    $<TARGET_FILE:EngineDLL>
+    ${CMAKE_BINARY_DIR}/App/$<TARGET_FILE_NAME:EngineDLL>
+)

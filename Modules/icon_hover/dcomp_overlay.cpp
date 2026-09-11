@@ -25,9 +25,11 @@
 #include <stdio.h>
 #include <d3d11.h>
 
+#ifdef _MSC_VER
 #pragma comment(lib, "dcomp.lib")
 #pragma comment(lib, "d2d1.lib")
 #pragma comment(lib, "d3d11.lib")
+#endif
 
 static const char* LOG_TAG = "DCompOverlay";
 static const wchar_t* OVERLAY_CLASS_NAME = L"TE_IconHoverOverlay";
@@ -38,6 +40,7 @@ static ID3D11Device* s_d3d_device = nullptr;
 static IDCompositionDevice* s_dcomp_device = nullptr;
 static IDCompositionTarget* s_dcomp_target = nullptr;
 static IDCompositionVisual* s_root_visual = nullptr;
+static IDCompositionEffectGroup* s_root_effect = nullptr;
 
 /** Per-icon visual array. */
 static IDCompositionVisual* s_icon_visuals[TE_HOVER_MAX_ICONS] = {};
@@ -45,18 +48,28 @@ static IDCompositionScaleTransform* s_scale_transforms[TE_HOVER_MAX_ICONS] = {};
 static IDCompositionTranslateTransform* s_translate_transforms[TE_HOVER_MAX_ICONS] = {};
 static IDCompositionSurface* s_icon_surfaces[TE_HOVER_MAX_ICONS] = {};
 static int s_visual_count = 0;
+#ifndef WS_EX_NOREDIRECTIONBITMAP
+#define WS_EX_NOREDIRECTIONBITMAP 0x00200000L
+#endif
+
 static HWND s_overlay_hwnd_ref = NULL;
 
 /** Window class registration flag. */
 static BOOL s_class_registered = FALSE;
 
-/** Overlay window procedure — no-op, all input passes through. */
+/** Overlay window procedure — transparent to all mouse input. */
 static LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
+    if (msg == WM_NCHITTEST) {
+        return HTTRANSPARENT;
+    }
+    if (msg == WM_ERASEBKGND) {
+        return 1;
+    }
     return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
-HWND TE_DCompCreateOverlayWindow(HWND taskbar_hwnd, int width, int height)
+HWND TE_DCompCreateOverlayWindow(HWND taskbar_hwnd, int x, int y, int width, int height)
 {
     if (!taskbar_hwnd) return NULL;
 
@@ -85,11 +98,11 @@ HWND TE_DCompCreateOverlayWindow(HWND taskbar_hwnd, int width, int height)
     }
 
     HWND overlay = CreateWindowExW(
-        WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST,
+        WS_EX_NOREDIRECTIONBITMAP | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
         OVERLAY_CLASS_NAME,
         NULL,
-        WS_CHILD | WS_VISIBLE,
-        0, 0, width, height,
+        WS_POPUP | WS_VISIBLE,
+        x, y, width, height,
         taskbar_hwnd,
         NULL,
         hinstance,
@@ -101,14 +114,19 @@ HWND TE_DCompCreateOverlayWindow(HWND taskbar_hwnd, int width, int height)
         return NULL;
     }
 
-    /* Set initial alpha to 0 (fully transparent = zero GPU cost) */
-    SetLayeredWindowAttributes(overlay, 0, 0, LWA_ALPHA);
-
     char msg[128];
-    snprintf(msg, sizeof(msg), "Overlay window created: %dx%d", width, height);
+    snprintf(msg, sizeof(msg), "Overlay window created: %dx%d at (%d,%d)", width, height, x, y);
     TE_LogWrite(TE_LOG_INFO, LOG_TAG, msg);
 
     return overlay;
+}
+
+void TE_DCompMoveOverlayWindow(HWND overlay_hwnd, int x, int y, int width, int height)
+{
+    if (overlay_hwnd && IsWindow(overlay_hwnd)) {
+        SetWindowPos(overlay_hwnd, HWND_TOPMOST, x, y, width, height,
+                     SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_SHOWWINDOW);
+    }
 }
 
 void TE_DCompDestroyOverlayWindow(HWND overlay_hwnd)
@@ -193,6 +211,14 @@ HRESULT TE_DCompInitDevice(HWND overlay_hwnd)
         return TE_E_FAIL;
     }
 
+    /* Create root effect group for opacity */
+    hr = s_dcomp_device->CreateEffectGroup(&s_root_effect);
+    if (SUCCEEDED(hr) && s_root_effect) {
+        s_root_effect->SetOpacity(0.0f);
+        s_root_visual->SetEffect(s_root_effect);
+    }
+    s_dcomp_device->Commit();
+
     TE_LogWrite(TE_LOG_INFO, LOG_TAG, "DComp device initialized successfully");
     return TE_S_OK;
 }
@@ -202,6 +228,10 @@ HRESULT TE_DCompInitDevice(HWND overlay_hwnd)
  */
 static void ReleaseVisualTree(void)
 {
+    if (s_root_visual) {
+        s_root_visual->RemoveAllVisuals();
+    }
+
     for (int i = 0; i < s_visual_count; i++) {
         if (s_icon_surfaces[i]) { s_icon_surfaces[i]->Release(); s_icon_surfaces[i] = nullptr; }
         if (s_translate_transforms[i]) { s_translate_transforms[i]->Release(); s_translate_transforms[i] = nullptr; }
@@ -215,6 +245,7 @@ void TE_DCompDestroyDevice(void)
 {
     ReleaseVisualTree();
 
+    if (s_root_effect) { s_root_effect->Release(); s_root_effect = nullptr; }
     if (s_root_visual) { s_root_visual->Release(); s_root_visual = nullptr; }
     if (s_dcomp_target) { s_dcomp_target->Release(); s_dcomp_target = nullptr; }
     if (s_dcomp_device) { s_dcomp_device->Release(); s_dcomp_device = nullptr; }
@@ -366,6 +397,10 @@ HRESULT TE_DCompBuildVisualTree(int count, const RECT* bounds, const HBITMAP* bi
     snprintf(msg, sizeof(msg), "Built visual tree with %d icon visuals", s_visual_count);
     TE_LogWrite(TE_LOG_INFO, LOG_TAG, msg);
 
+    if (s_dcomp_device) {
+        s_dcomp_device->Commit();
+    }
+
     return TE_S_OK;
 }
 
@@ -391,14 +426,25 @@ HRESULT TE_DCompUpdateTransforms(int count, const float* scales,
 
 HRESULT TE_DCompSetOverlayAlpha(float alpha)
 {
-    if (!s_overlay_hwnd_ref) return TE_E_FAIL;
-
     /* Clamp alpha to [0, 1] */
     if (alpha < 0.0f) alpha = 0.0f;
     if (alpha > 1.0f) alpha = 1.0f;
 
-    BYTE byte_alpha = (BYTE)(alpha * 255.0f);
-    SetLayeredWindowAttributes(s_overlay_hwnd_ref, 0, byte_alpha, LWA_ALPHA);
+    if (s_root_effect) {
+        s_root_effect->SetOpacity(alpha);
+    }
+
+    if (s_overlay_hwnd_ref && IsWindow(s_overlay_hwnd_ref)) {
+        if (alpha <= 0.0f) {
+            ShowWindow(s_overlay_hwnd_ref, SW_HIDE);
+        } else {
+            ShowWindow(s_overlay_hwnd_ref, SW_SHOWNOACTIVATE);
+        }
+    }
+
+    if (s_dcomp_device) {
+        s_dcomp_device->Commit();
+    }
     return TE_S_OK;
 }
 

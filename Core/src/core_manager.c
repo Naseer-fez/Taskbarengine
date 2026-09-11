@@ -115,11 +115,11 @@ HRESULT TE_CoreManagerInit(HWND taskbar_hwnd) {
     TE_LogWrite(TE_LOG_INFO, "CoreManager", "Core Manager initializing");
     
     char log_buf[512];
-    snprintf(log_buf, sizeof(log_buf), "Config path: %ls", g_core.config_path);
+    snprintf(log_buf, sizeof(log_buf), "Config path: %.256ls", g_core.config_path);
     TE_LogWrite(TE_LOG_INFO, "CoreManager", log_buf);
-    snprintf(log_buf, sizeof(log_buf), "Config dir:  %ls", g_core.config_dir);
+    snprintf(log_buf, sizeof(log_buf), "Config dir:  %.256ls", g_core.config_dir);
     TE_LogWrite(TE_LOG_INFO, "CoreManager", log_buf);
-    snprintf(log_buf, sizeof(log_buf), "Modules dir: %ls", g_core.modules_dir);
+    snprintf(log_buf, sizeof(log_buf), "Modules dir: %.256ls", g_core.modules_dir);
     TE_LogWrite(TE_LOG_INFO, "CoreManager", log_buf);
     
     TE_EventDispatchInit();

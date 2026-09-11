@@ -199,9 +199,10 @@ static void RebuildIconData(void) {
     /* Capture icon bitmaps */
     HBITMAP bitmaps[TE_HOVER_MAX_ICONS] = { 0 };
     for (uint32_t i = 0; i < count; i++) {
-        TE_IconCaptureGetBitmap(
+        TE_IconCaptureGetBitmapWithBounds(
             g_hover_state.icon_cache.items[i].app_id,
             g_hover_state.icon_cache.items[i].icon_index,
+            &g_hover_state.icon_cache.items[i].bounds,
             &bitmaps[i]
         );
     }
@@ -235,11 +236,23 @@ static void RebuildIconData(void) {
  * Triggers icon re-discovery.
  */
 static void OnShellHook(uint32_t type, const void* data, void* user_data) {
-    (void)type; (void)data; (void)user_data;
+    (void)type; (void)user_data;
 
     if (!g_hover_state.enabled) return;
 
-    HoverLog(TE_LOG_DEBUG, "Shell hook received, invalidating icon cache");
+    const TE_ShellHookData* hook_data = (const TE_ShellHookData*)data;
+    if (hook_data) {
+        int msg = hook_data->shell_msg & 0x7FFF;
+        /* Only rebuild icon cache when windows are actually created, destroyed, or replaced */
+        if (msg != HSHELL_WINDOWCREATED &&
+            msg != HSHELL_WINDOWDESTROYED &&
+            msg != HSHELL_WINDOWREPLACED) {
+            return;
+        }
+    }
+
+    HoverLog(TE_LOG_INFO, "Shell hook window change received (%d), rebuilding icon cache",
+             hook_data ? hook_data->shell_msg : 0);
     TE_IconCaptureInvalidate();
     RebuildIconData();
 }
@@ -257,11 +270,86 @@ static void OnConfigChanged(uint32_t type, const void* data, void* user_data) {
              (int)g_hover_state.config.curve, g_hover_state.config.speed_ms);
 }
 
+/**
+ * Taskbar mouse movement / leave event handler.
+ */
+static void OnTaskbarMouse(uint32_t type, const void* data, void* user_data) {
+    (void)type; (void)user_data;
+    if (!g_hover_state.enabled) return;
+
+    const TE_TaskbarMouseData* mouse_data = (const TE_TaskbarMouseData*)data;
+    if (!mouse_data) return;
+
+    if (mouse_data->is_in_taskbar) {
+        TE_FrameLoopOnMouseMove((float)mouse_data->cursor_pos.x, (float)mouse_data->cursor_pos.y);
+    } else {
+        TE_FrameLoopOnMouseLeave();
+    }
+}
+
+/**
+ * Display DPI change event handler.
+ */
+static void OnDpiChanged(uint32_t type, const void* data, void* user_data) {
+    (void)type; (void)user_data;
+    if (!g_hover_state.enabled) return;
+
+    const TE_DpiChangedData* dpi_data = (const TE_DpiChangedData*)data;
+    if (!dpi_data) return;
+
+    HoverLog(TE_LOG_INFO, "DPI changed from %u to %u", dpi_data->old_dpi, dpi_data->new_dpi);
+    g_hover_state.current_dpi = dpi_data->new_dpi;
+    g_hover_state.headroom_y = (int)(64.0f * (float)g_hover_state.current_dpi / 96.0f);
+
+    HWND taskbar_hwnd = g_hover_state.ctx->taskbar_hwnd;
+    if (taskbar_hwnd && IsWindow(taskbar_hwnd)) {
+        GetWindowRect(taskbar_hwnd, &g_hover_state.taskbar_rect);
+        int tb_width = g_hover_state.taskbar_rect.right - g_hover_state.taskbar_rect.left;
+        int tb_height = g_hover_state.taskbar_rect.bottom - g_hover_state.taskbar_rect.top;
+        int overlay_x = g_hover_state.taskbar_rect.left;
+        int overlay_y = g_hover_state.taskbar_rect.top - g_hover_state.headroom_y;
+        int overlay_w = tb_width;
+        int overlay_h = tb_height + g_hover_state.headroom_y;
+
+        TE_DCompMoveOverlayWindow(g_hover_state.overlay_hwnd, overlay_x, overlay_y, overlay_w, overlay_h);
+    }
+
+    TE_IconCaptureInvalidate();
+    RebuildIconData();
+}
+
+/**
+ * Taskbar geometry change event handler.
+ */
+static void OnTaskbarGeometry(uint32_t type, const void* data, void* user_data) {
+    (void)type; (void)user_data;
+    if (!g_hover_state.enabled) return;
+
+    const TE_TaskbarGeometryData* geom_data = (const TE_TaskbarGeometryData*)data;
+    if (!geom_data) return;
+
+    g_hover_state.taskbar_rect = geom_data->new_rect;
+    int tb_width = g_hover_state.taskbar_rect.right - g_hover_state.taskbar_rect.left;
+    int tb_height = g_hover_state.taskbar_rect.bottom - g_hover_state.taskbar_rect.top;
+    int overlay_x = g_hover_state.taskbar_rect.left;
+    int overlay_y = g_hover_state.taskbar_rect.top - g_hover_state.headroom_y;
+    int overlay_w = tb_width;
+    int overlay_h = tb_height + g_hover_state.headroom_y;
+
+    TE_DCompMoveOverlayWindow(g_hover_state.overlay_hwnd, overlay_x, overlay_y, overlay_w, overlay_h);
+    RebuildIconData();
+}
+
 /* ── Plugin Lifecycle ─────────────────────────────────────────────── */
 
 static HRESULT Initialize(const PluginContext* ctx) {
     memset(&g_hover_state, 0, sizeof(g_hover_state));
     g_hover_state.ctx = ctx;
+    InitializeSRWLock(&g_hover_state.state_lock);
+
+    if (ctx && ctx->log) {
+        TE_LogSetCallback(ctx->log);
+    }
 
     /* Set defaults */
     g_hover_state.config.max_scale = 1.3f;
@@ -270,7 +358,13 @@ static HRESULT Initialize(const PluginContext* ctx) {
     g_hover_state.config.speed_ms = 150;
     g_hover_state.taskbar_height = 48; /* Default until state store provides real value */
 
-    ParseConfig(ctx->config);
+    g_hover_state.current_dpi = (ctx && ctx->dpi) ? ctx->dpi : 96;
+    g_hover_state.headroom_y = (int)(64.0f * (float)g_hover_state.current_dpi / 96.0f);
+    if (ctx && ctx->taskbar_hwnd) {
+        GetWindowRect(ctx->taskbar_hwnd, &g_hover_state.taskbar_rect);
+    }
+
+    ParseConfig(ctx ? ctx->config : NULL);
     HoverLog(TE_LOG_INFO, "Initialize: max_scale=%.2f, radius=%d, curve=%d, speed_ms=%d",
              g_hover_state.config.max_scale, g_hover_state.config.radius,
              (int)g_hover_state.config.curve, g_hover_state.config.speed_ms);
@@ -290,15 +384,22 @@ static HRESULT Enable(void) {
         HoverLog(TE_LOG_WARNING, "Icon capture init failed (non-fatal)");
     }
 
-    /* Get taskbar dimensions for overlay */
+    /* Get taskbar dimensions and position for overlay */
     HWND taskbar_hwnd = g_hover_state.ctx->taskbar_hwnd;
-    RECT taskbar_rect;
-    GetWindowRect(taskbar_hwnd, &taskbar_rect);
-    int tb_width = taskbar_rect.right - taskbar_rect.left;
-    int tb_height = taskbar_rect.bottom - taskbar_rect.top;
+    GetWindowRect(taskbar_hwnd, &g_hover_state.taskbar_rect);
+    int tb_width = g_hover_state.taskbar_rect.right - g_hover_state.taskbar_rect.left;
+    int tb_height = g_hover_state.taskbar_rect.bottom - g_hover_state.taskbar_rect.top;
 
-    /* Create overlay window */
-    g_hover_state.overlay_hwnd = TE_DCompCreateOverlayWindow(taskbar_hwnd, tb_width, tb_height);
+    g_hover_state.current_dpi = g_hover_state.ctx->dpi ? g_hover_state.ctx->dpi : 96;
+    g_hover_state.headroom_y = (int)(64.0f * (float)g_hover_state.current_dpi / 96.0f);
+
+    int overlay_x = g_hover_state.taskbar_rect.left;
+    int overlay_y = g_hover_state.taskbar_rect.top - g_hover_state.headroom_y;
+    int overlay_w = tb_width;
+    int overlay_h = tb_height + g_hover_state.headroom_y;
+
+    /* Create overlay window (WS_POPUP layered window with headroom) */
+    g_hover_state.overlay_hwnd = TE_DCompCreateOverlayWindow(taskbar_hwnd, overlay_x, overlay_y, overlay_w, overlay_h);
     if (!g_hover_state.overlay_hwnd) {
         HoverLog(TE_LOG_ERROR, "Failed to create overlay window — disabling IconHover");
         TE_IconCaptureShutdown();
@@ -318,9 +419,12 @@ static HRESULT Enable(void) {
     /* Discover icons and build visual tree */
     RebuildIconData();
 
-    /* Subscribe to events */
+    /* Subscribe to engine events */
     g_hover_state.ctx->subscribe(TE_EVENT_SHELL_HOOK, OnShellHook, NULL);
     g_hover_state.ctx->subscribe(TE_EVENT_CONFIG_CHANGED, OnConfigChanged, NULL);
+    g_hover_state.ctx->subscribe(TE_EVENT_TASKBAR_MOUSE, OnTaskbarMouse, NULL);
+    g_hover_state.ctx->subscribe(TE_EVENT_DPI_CHANGED, OnDpiChanged, NULL);
+    g_hover_state.ctx->subscribe(TE_EVENT_TASKBAR_GEOMETRY, OnTaskbarGeometry, NULL);
 
     /* Register for mouse tracking via message filter (v2 API) */
     if (TE_CTX_HAS_FIELD(g_hover_state.ctx, subscribe_message) &&
@@ -352,6 +456,9 @@ static HRESULT Disable(void) {
     /* Unsubscribe events */
     g_hover_state.ctx->unsubscribe(TE_EVENT_SHELL_HOOK, OnShellHook);
     g_hover_state.ctx->unsubscribe(TE_EVENT_CONFIG_CHANGED, OnConfigChanged);
+    g_hover_state.ctx->unsubscribe(TE_EVENT_TASKBAR_MOUSE, OnTaskbarMouse);
+    g_hover_state.ctx->unsubscribe(TE_EVENT_DPI_CHANGED, OnDpiChanged);
+    g_hover_state.ctx->unsubscribe(TE_EVENT_TASKBAR_GEOMETRY, OnTaskbarGeometry);
 
     /* Tear down DComp */
     TE_DCompDestroyDevice();

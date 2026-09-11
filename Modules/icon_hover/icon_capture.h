@@ -44,6 +44,17 @@ void TE_IconCaptureShutdown(void);
 HRESULT TE_IconCaptureGetBitmap(const wchar_t* app_id, int icon_index, HBITMAP* out_bitmap);
 
 /**
+ * Retrieve a cached icon bitmap with fallback to screen bounds snapshot.
+ *
+ * @param app_id        Application identifier string.
+ * @param icon_index    System image list index.
+ * @param screen_bounds Screen coordinates of the icon button for fallback snapshot.
+ * @param out_bitmap    Pointer to receive HBITMAP.
+ * @return TE_S_OK on success, or error HRESULT.
+ */
+HRESULT TE_IconCaptureGetBitmapWithBounds(const wchar_t* app_id, int icon_index, const RECT* screen_bounds, HBITMAP* out_bitmap);
+
+/**
  * Invalidate all cached icon bitmaps, forcing re-extraction on next request.
  * Called when taskbar icons change (e.g., on TE_EVENT_SHELL_HOOK).
  *

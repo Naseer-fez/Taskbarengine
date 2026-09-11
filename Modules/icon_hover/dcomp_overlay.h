@@ -8,19 +8,32 @@ extern "C" {
 #endif
 
 /**
- * Create the transparent overlay child window parented to the taskbar.
+ * Create the transparent overlay window positioned over the taskbar.
  *
- * Creates a WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST child window
- * of Shell_TrayWnd. Mouse events pass through to the real taskbar.
+ * Creates a WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE
+ * popup window over Shell_TrayWnd. Mouse events pass through to the real taskbar.
  *
  * @param taskbar_hwnd Handle to Shell_TrayWnd.
+ * @param x            Screen X origin.
+ * @param y            Screen Y origin (including headroom).
  * @param width        Overlay width in pixels.
- * @param height       Overlay height in pixels.
+ * @param height       Overlay height in pixels (including headroom).
  * @return Handle to the created overlay window, or NULL on failure.
  *
  * @note Thread Safety: Must be called on the UI thread.
  */
-HWND TE_DCompCreateOverlayWindow(HWND taskbar_hwnd, int width, int height);
+HWND TE_DCompCreateOverlayWindow(HWND taskbar_hwnd, int x, int y, int width, int height);
+
+/**
+ * Move and resize the overlay window.
+ *
+ * @param overlay_hwnd Handle to the overlay window.
+ * @param x            New screen X origin.
+ * @param y            New screen Y origin.
+ * @param width        New width in pixels.
+ * @param height       New height in pixels.
+ */
+void TE_DCompMoveOverlayWindow(HWND overlay_hwnd, int x, int y, int width, int height);
 
 /**
  * Destroy the overlay window created by TE_DCompCreateOverlayWindow.

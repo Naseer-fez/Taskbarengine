@@ -20,6 +20,7 @@ target_link_libraries(IconHoverPlugin PRIVATE
     te_sdk
     dcomp
     d2d1
+    d3d11
     dxguid
     ole32
     oleaut32

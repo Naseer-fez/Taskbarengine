@@ -62,13 +62,17 @@ typedef struct TE_IconAnimState {
  */
 typedef struct TE_IconHoverState {
     const PluginContext* ctx;               /**< Host-provided plugin context. */
+    SRWLOCK state_lock;                     /**< Thread-safe state access lock. */
     TE_HoverConfig config;                  /**< Current configuration. */
     TE_HoverMouseState mouse;               /**< Mouse tracking state. */
     TE_IconElementCache icon_cache;         /**< UIA-discovered icon elements. */
     TE_IconAnimState anim[TE_HOVER_MAX_ICONS]; /**< Per-icon animation state. */
     int anim_count;                         /**< Number of active icon animations. */
-    HWND overlay_hwnd;                      /**< DComp overlay child window handle. */
+    HWND overlay_hwnd;                      /**< DComp overlay window handle. */
+    RECT taskbar_rect;                      /**< Cached screen rect of the taskbar. */
     int taskbar_height;                     /**< Current taskbar height from state store. */
+    int headroom_y;                         /**< Headroom height above taskbar for unclipped growth. */
+    uint32_t current_dpi;                   /**< Current monitor DPI. */
     int enabled;                            /**< Non-zero if plugin is actively running. */
 } TE_IconHoverState;
 

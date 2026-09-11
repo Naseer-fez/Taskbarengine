@@ -23,6 +23,15 @@ TE_PluginEntry* TE_PluginLoaderGetEntry(int index);
 TE_PluginEntry* TE_PluginLoaderFindByName(const char* name);
 HRESULT TE_PluginLoaderInit(void);
 void TE_PluginLoaderShutdown(void);
+
+HRESULT TE_TaskbarSubclassSubscribeMessage(UINT msg) {
+    (void)msg;
+    return TE_S_OK;
+}
+HRESULT TE_TaskbarSubclassUnsubscribeMessage(UINT msg) {
+    (void)msg;
+    return TE_S_OK;
+}
 }
 
 TEST_CASE("Plugin loader initialization", "[plugins]") {

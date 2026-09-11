@@ -162,7 +162,7 @@ static DWORD WINAPI TE_IpcServerThread(LPVOID lpParam) {
                 SetEvent(ol.hEvent);
             } else if (err != ERROR_IO_PENDING) {
                 char msg[128];
-                snprintf(msg, sizeof(msg), "ConnectNamedPipe failed: %u", err);
+                snprintf(msg, sizeof(msg), "ConnectNamedPipe failed: %lu", (unsigned long)err);
                 TE_LogWrite(TE_LOG_ERROR, "IpcServer", msg);
                 Sleep(100);
                 continue;

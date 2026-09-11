@@ -22,15 +22,14 @@ static HRESULT TE_PluginUnsubscribeWrapper(uint32_t event_type, void (*callback)
     return TE_EventDispatchUnsubscribe(event_type, (TE_EventCallback)callback);
 }
 
+#include "core/taskbar_subclass.h"
+
 static HRESULT TE_PluginSubscribeMessageWrapper(UINT msg) {
-    (void)msg;
-    /* TODO(Phase3): Wire to TE_TaskbarSubclassSubscribeMessage */
-    return TE_S_OK;
+    return TE_TaskbarSubclassSubscribeMessage(msg);
 }
 
 static HRESULT TE_PluginUnsubscribeMessageWrapper(UINT msg) {
-    (void)msg;
-    return TE_S_OK;
+    return TE_TaskbarSubclassUnsubscribeMessage(msg);
 }
 
 static HRESULT TE_PluginRegisterTimerWrapper(uint32_t interval_ms, void (*callback)(void*), void* user_data, uint32_t* out_timer_id) {

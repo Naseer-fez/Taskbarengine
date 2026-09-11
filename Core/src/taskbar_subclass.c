@@ -36,6 +36,8 @@ HRESULT TE_TaskbarSubclassUnsubscribeMessage(UINT msg) {
     return TE_S_OK;
 }
 
+static BOOL s_taskbar_mouse_tracking = FALSE;
+
 LRESULT CALLBACK TE_TaskbarSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData) {
     (void)uIdSubclass;
     (void)dwRefData;
@@ -74,10 +76,54 @@ LRESULT CALLBACK TE_TaskbarSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             TE_TaskbarSubclassRemove(hwnd);
             break;
             
+        case WM_MOUSEMOVE: {
+            if (!s_taskbar_mouse_tracking) {
+                TRACKMOUSEEVENT tme;
+                tme.cbSize = sizeof(TRACKMOUSEEVENT);
+                tme.dwFlags = TME_LEAVE;
+                tme.hwndTrack = hwnd;
+                tme.dwHoverTime = HOVER_DEFAULT;
+                if (TrackMouseEvent(&tme)) {
+                    s_taskbar_mouse_tracking = TRUE;
+                }
+            }
+            POINT pt;
+            pt.x = (int)(short)LOWORD(lParam);
+            pt.y = (int)(short)HIWORD(lParam);
+            ClientToScreen(hwnd, &pt);
+
+            TE_TaskbarMouseData mouse_data;
+            mouse_data.cursor_pos = pt;
+            mouse_data.is_in_taskbar = TRUE;
+            TE_EventDispatchFire(TE_EVENT_TASKBAR_MOUSE, &mouse_data);
+            break;
+        }
+
+        case WM_MOUSELEAVE: {
+            s_taskbar_mouse_tracking = FALSE;
+            TE_TaskbarMouseData mouse_data;
+            mouse_data.cursor_pos.x = 0;
+            mouse_data.cursor_pos.y = 0;
+            mouse_data.is_in_taskbar = FALSE;
+            TE_EventDispatchFire(TE_EVENT_TASKBAR_MOUSE, &mouse_data);
+            break;
+        }
+
+        case WM_WINDOWPOSCHANGED: {
+            const WINDOWPOS* wp = (const WINDOWPOS*)lParam;
+            if (wp && (!(wp->flags & SWP_NOMOVE) || !(wp->flags & SWP_NOSIZE))) {
+                TE_TaskbarGeometryData geom;
+                GetWindowRect(hwnd, &geom.new_rect);
+                geom.monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTOPRIMARY);
+                TE_EventDispatchFire(TE_EVENT_TASKBAR_GEOMETRY, &geom);
+            }
+            break;
+        }
+
         case WM_POWERBROADCAST:
             TE_PowerProcess(wParam, lParam);
             break;
-            
+
         case WM_DEVICECHANGE:
             TE_DeviceProcess(wParam, lParam);
             break;

@@ -67,6 +67,7 @@ add_executable(te_tests
     test_crash_recovery.cpp
     test_magnification.cpp
     test_state_store.cpp
+    test_icon_hover.cpp
 )
 
 target_compile_definitions(te_tests PRIVATE _CRT_SECURE_NO_WARNINGS)

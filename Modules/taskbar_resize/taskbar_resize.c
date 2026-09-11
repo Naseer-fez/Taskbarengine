@@ -88,7 +88,9 @@ static void ApplyWorkArea(int new_height) {
         }
         
         HMONITOR hMon = (g_ctx && g_ctx->monitor) ? g_ctx->monitor : MonitorFromWindow(g_ctx ? g_ctx->taskbar_hwnd : NULL, MONITOR_DEFAULTTOPRIMARY);
-        MONITORINFO mi = { sizeof(MONITORINFO) };
+        MONITORINFO mi;
+        memset(&mi, 0, sizeof(mi));
+        mi.cbSize = sizeof(MONITORINFO);
         if (GetMonitorInfoW(hMon, &mi)) {
             RECT new_wa;
             if (TE_CalculateWorkArea(&mi.rcMonitor, new_height, g_current_dpi, &new_wa)) {
@@ -218,7 +220,9 @@ static void ApplySecondaryTaskbars(int height) {
 
         int new_cy = TE_ScaleDPI(height, sec_dpi);
         HMONITOR hMon = MonitorFromWindow(sec, MONITOR_DEFAULTTONEAREST);
-        MONITORINFO mi = { sizeof(MONITORINFO) };
+        MONITORINFO mi;
+        memset(&mi, 0, sizeof(mi));
+        mi.cbSize = sizeof(MONITORINFO);
         if (GetMonitorInfoW(hMon, &mi)) {
             int x = mi.rcMonitor.left;
             int y = mi.rcMonitor.bottom - new_cy;
@@ -241,7 +245,9 @@ static void RestoreSecondaryTaskbars(void) {
 
         int default_cy = TE_ScaleDPI(TE_DEFAULT_TASKBAR_HEIGHT, sec_dpi);
         HMONITOR hMon = MonitorFromWindow(sec, MONITOR_DEFAULTTONEAREST);
-        MONITORINFO mi = { sizeof(MONITORINFO) };
+        MONITORINFO mi;
+        memset(&mi, 0, sizeof(mi));
+        mi.cbSize = sizeof(MONITORINFO);
         if (GetMonitorInfoW(hMon, &mi)) {
             int x = mi.rcMonitor.left;
             int y = mi.rcMonitor.bottom - default_cy;
@@ -257,7 +263,9 @@ static void ApplyTaskbarSize(HWND hwnd) {
     QueryDpi(hwnd);
     int new_cy = TE_ScaleDPI(g_config.height, g_current_dpi);
     HMONITOR hMon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTOPRIMARY);
-    MONITORINFO mi = { sizeof(MONITORINFO) };
+    MONITORINFO mi;
+    memset(&mi, 0, sizeof(mi));
+    mi.cbSize = sizeof(MONITORINFO);
     if (GetMonitorInfoW(hMon, &mi)) {
         int x = mi.rcMonitor.left;
         int y = mi.rcMonitor.bottom - new_cy;
@@ -276,7 +284,9 @@ static void RestoreTaskbarSize(HWND hwnd) {
     QueryDpi(hwnd);
     int default_cy = TE_ScaleDPI(TE_DEFAULT_TASKBAR_HEIGHT, g_current_dpi);
     HMONITOR hMon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTOPRIMARY);
-    MONITORINFO mi = { sizeof(MONITORINFO) };
+    MONITORINFO mi;
+    memset(&mi, 0, sizeof(mi));
+    mi.cbSize = sizeof(MONITORINFO);
     if (GetMonitorInfoW(hMon, &mi)) {
         int x = mi.rcMonitor.left;
         int y = mi.rcMonitor.bottom - default_cy;
@@ -308,7 +318,9 @@ static LRESULT CALLBACK ResizeSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, L
             WINDOWPOS* wp = (WINDOWPOS*)lParam;
             int new_cy = TE_ScaleDPI(g_config.height, g_current_dpi);
             HMONITOR hMon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTOPRIMARY);
-            MONITORINFO mi = { sizeof(MONITORINFO) };
+            MONITORINFO mi;
+            memset(&mi, 0, sizeof(mi));
+            mi.cbSize = sizeof(MONITORINFO);
             if (GetMonitorInfoW(hMon, &mi)) {
                 wp->y = mi.rcMonitor.bottom - new_cy;
                 wp->cy = new_cy;

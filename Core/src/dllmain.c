@@ -1,11 +1,13 @@
 #include "core/engine.h"
 #include "core/engine_init.h"
 #include "core/taskbar_subclass.h"
+#include "core/event_dispatch.h"
 
 #include <windows.h>
 #include <commctrl.h>
 
 #include <sdk/te_types.h>
+#include <sdk/te_events.h>
 
 static HINSTANCE g_hinstDLL = NULL;
 static HWND g_taskbarHwnd = NULL;
@@ -92,6 +94,18 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
 LRESULT CALLBACK TE_GetMsgHookProc(int nCode, WPARAM wParam, LPARAM lParam)
 {
     /* WH_GETMESSAGE hook proc: called on Explorer's message loop */
+    if (nCode >= 0 && lParam) {
+        const MSG* msg = (const MSG*)lParam;
+        if (msg->message == WM_MOUSEMOVE) {
+            HWND taskbar = g_taskbarHwnd;
+            if (taskbar && (msg->hwnd == taskbar || IsChild(taskbar, msg->hwnd))) {
+                TE_TaskbarMouseData mouse_data;
+                mouse_data.cursor_pos = msg->pt;
+                mouse_data.is_in_taskbar = TRUE;
+                TE_EventDispatchFire(TE_EVENT_TASKBAR_MOUSE, &mouse_data);
+            }
+        }
+    }
     return CallNextHookEx(NULL, nCode, wParam, lParam);
 }
 

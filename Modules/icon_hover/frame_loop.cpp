@@ -102,15 +102,24 @@ static VOID CALLBACK FrameTimerCallback(PVOID lpParam, BOOLEAN timer_or_wait_fir
     int icon_count = state->anim_count;
     if (icon_count <= 0) return;
 
-    /* Safety timeout: if no mouse movement for 500ms while not settling,
-     * force settle mode */
-    if (state->mouse.is_in_taskbar && state->mouse.last_mousemove_qpc > 0) {
-        uint64_t elapsed_ms = (uint64_t)((now.QuadPart - (LONGLONG)state->mouse.last_mousemove_qpc)
-                             * 1000 / s_qpc_freq.QuadPart);
-        if (elapsed_ms > MOUSE_TIMEOUT_MS) {
-            state->mouse.is_in_taskbar = 0;
-            state->mouse.is_settling = 1;
-            state->mouse.settle_progress = 0.0f;
+    /* Active cursor position validation: check if cursor is in active taskbar rect (including upward headroom) */
+    RECT active_rect = state->taskbar_rect;
+    active_rect.top -= state->headroom_y;
+
+    if (state->mouse.is_in_taskbar) {
+        POINT cur;
+        if (GetCursorPos(&cur)) {
+            if (active_rect.right > active_rect.left && !PtInRect(&active_rect, cur)) {
+                /* Cursor left the taskbar region: begin smooth settle */
+                state->mouse.is_in_taskbar = 0;
+                state->mouse.is_settling = 1;
+                state->mouse.settle_progress = 0.0f;
+            } else {
+                /* Cursor is still in taskbar: update current cursor position */
+                state->mouse.cursor_x = (float)cur.x;
+                state->mouse.cursor_y = (float)cur.y;
+                state->mouse.last_mousemove_qpc = (uint64_t)now.QuadPart;
+            }
         }
     }
 
@@ -287,6 +296,7 @@ int TE_FrameLoopIsActive(void)
 void TE_FrameLoopOnMouseMove(float cursor_x, float cursor_y)
 {
     TE_IconHoverState* state = &g_hover_state;
+    AcquireSRWLockExclusive(&state->state_lock);
     state->mouse.cursor_x = cursor_x;
     state->mouse.cursor_y = cursor_y;
     state->mouse.is_in_taskbar = 1;
@@ -295,6 +305,7 @@ void TE_FrameLoopOnMouseMove(float cursor_x, float cursor_y)
     LARGE_INTEGER now;
     QueryPerformanceCounter(&now);
     state->mouse.last_mousemove_qpc = (uint64_t)now.QuadPart;
+    ReleaseSRWLockExclusive(&state->state_lock);
 
     /* Start frame loop if not already running */
     if (!TE_FrameLoopIsActive()) {
@@ -305,9 +316,11 @@ void TE_FrameLoopOnMouseMove(float cursor_x, float cursor_y)
 void TE_FrameLoopOnMouseLeave(void)
 {
     TE_IconHoverState* state = &g_hover_state;
+    AcquireSRWLockExclusive(&state->state_lock);
     state->mouse.is_in_taskbar = 0;
     state->mouse.is_settling = 1;
     state->mouse.settle_progress = 0.0f;
+    ReleaseSRWLockExclusive(&state->state_lock);
 
     /* Frame loop continues running to animate the settle */
 }
