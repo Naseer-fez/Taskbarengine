@@ -138,7 +138,7 @@ static const PluginMetadata g_metadata = {
 
 /**
  * Query taskbar_resize.height from the shared state store.
- * Updates the cached taskbar_height in hover state.
+ * Updates the cached taskbarHeight in hover state.
  */
 static void QueryTaskbarHeight(void) {
     if (!g_hover_state.ctx || !g_hover_state.ctx->query_state) return;
@@ -146,9 +146,31 @@ static void QueryTaskbarHeight(void) {
     StateValue val;
     HRESULT hr = g_hover_state.ctx->query_state("taskbar_resize.height", &val);
     if (TE_SUCCEEDED(hr) && val.type == TE_STATE_INT) {
-        g_hover_state.taskbar_height = val.data.int_val;
-        HoverLog(TE_LOG_DEBUG, "Queried taskbar height: %d", g_hover_state.taskbar_height);
+        g_hover_state.geometry.taskbarHeight = val.data.int_val;
+        HoverLog(TE_LOG_DEBUG, "Queried taskbar height: %d", g_hover_state.geometry.taskbarHeight);
     }
+}
+
+static void RebuildGeometry(void) {
+    HWND taskbar_hwnd = g_hover_state.ctx->taskbar_hwnd;
+    if (!taskbar_hwnd) return;
+
+    GetWindowRect(taskbar_hwnd, &g_hover_state.geometry.taskbarRect);
+
+    HWND bridge = FindWindowExA(taskbar_hwnd, NULL, "Windows.UI.Composition.DesktopWindowContentBridge", NULL);
+    if (bridge) {
+        RECT bridgeRect;
+        GetWindowRect(bridge, &bridgeRect);
+        g_hover_state.geometry.bridgeOffsetY = bridgeRect.top - g_hover_state.geometry.taskbarRect.top;
+    } else {
+        g_hover_state.geometry.bridgeOffsetY = 0;
+    }
+
+    QueryTaskbarHeight();
+    g_hover_state.geometry.baselineY = g_hover_state.geometry.taskbarRect.bottom;
+    g_hover_state.geometry.headroom_y = (TE_HOVER_HEADROOM_BASE_PX * g_hover_state.current_dpi) / 96;
+    g_hover_state.geometry.generation++;
+    g_hover_state.geometry.valid = 1;
 }
 
 /**
@@ -163,6 +185,15 @@ static void RebuildIconData(void) {
     int was_active = TE_FrameLoopIsActive();
     if (was_active) {
         TE_FrameLoopStop();
+    }
+
+    /* Save old animation state to preserve scales across rebuilds */
+    TE_IconAnimState old_anim[TE_HOVER_MAX_ICONS];
+    TE_IconElementInfo old_items[TE_HOVER_MAX_ICONS];
+    int old_count = g_hover_state.anim_count;
+    if (old_count > 0) {
+        memcpy(old_anim, g_hover_state.anim, sizeof(TE_IconAnimState) * old_count);
+        memcpy(old_items, g_hover_state.icon_cache.items, sizeof(TE_IconElementInfo) * old_count);
     }
 
     /* Discover icons via UIA */
@@ -184,16 +215,29 @@ static void RebuildIconData(void) {
     /* Initialize animation state from discovered bounds */
     g_hover_state.anim_count = (int)count;
     for (uint32_t i = 0; i < count; i++) {
-        const RECT* b = &g_hover_state.icon_cache.items[i].bounds;
+        const RECT* b = &g_hover_state.icon_cache.items[i].buttonRect;
         float w = (float)(b->right - b->left);
         float h = (float)(b->bottom - b->top);
+
+        float initial_scale = 1.0f;
+        float initial_target = 1.0f;
+        
+        for (int j = 0; j < old_count; j++) {
+            if (wcscmp(g_hover_state.icon_cache.items[i].app_id, old_items[j].app_id) == 0 ||
+                abs(b->left - old_items[j].buttonRect.left) < 10) {
+                initial_scale = old_anim[j].current_scale;
+                initial_target = old_anim[j].target_scale;
+                break;
+            }
+        }
 
         g_hover_state.anim[i].center_x = (float)b->left + w / 2.0f;
         g_hover_state.anim[i].center_y = (float)b->top + h / 2.0f;
         g_hover_state.anim[i].base_width = w;
         g_hover_state.anim[i].base_height = h;
-        g_hover_state.anim[i].current_scale = 1.0f;
-        g_hover_state.anim[i].target_scale = 1.0f;
+        g_hover_state.anim[i].current_scale = initial_scale;
+        g_hover_state.anim[i].target_scale = initial_target;
+        g_hover_state.anim[i].geometry_generation = g_hover_state.geometry.generation;
     }
 
     /* Capture icon bitmaps */
@@ -202,27 +246,24 @@ static void RebuildIconData(void) {
         TE_IconCaptureGetBitmapWithBounds(
             g_hover_state.icon_cache.items[i].app_id,
             g_hover_state.icon_cache.items[i].icon_index,
-            &g_hover_state.icon_cache.items[i].bounds,
+            &g_hover_state.icon_cache.items[i].glyphRect,
             &bitmaps[i]
         );
     }
 
     /* Build/rebuild DComp visual tree */
-    RECT bounds[TE_HOVER_MAX_ICONS];
-    for (uint32_t i = 0; i < count; i++) {
-        /* Convert screen coords to overlay-local coords */
-        RECT screen_bounds = g_hover_state.icon_cache.items[i].bounds;
-        POINT pt = { screen_bounds.left, screen_bounds.top };
-        if (g_hover_state.overlay_hwnd) {
-            ScreenToClient(g_hover_state.overlay_hwnd, &pt);
-        }
-        bounds[i].left = pt.x;
-        bounds[i].top = pt.y;
-        bounds[i].right = pt.x + (screen_bounds.right - screen_bounds.left);
-        bounds[i].bottom = pt.y + (screen_bounds.bottom - screen_bounds.top);
-    }
+    int overlay_x = g_hover_state.geometry.taskbarRect.left;
+    int overlay_y = g_hover_state.geometry.taskbarRect.top - g_hover_state.geometry.headroom_y;
+    int baseline_y = g_hover_state.geometry.baselineY;
 
-    TE_DCompBuildVisualTree((int)count, bounds, bitmaps);
+    TE_DCompBuildVisualTree(
+        (int)count,
+        g_hover_state.icon_cache.items,
+        bitmaps,
+        baseline_y,
+        overlay_x,
+        overlay_y
+    );
 
     if (was_active) {
         TE_FrameLoopStart();
@@ -299,17 +340,18 @@ static void OnDpiChanged(uint32_t type, const void* data, void* user_data) {
 
     HoverLog(TE_LOG_INFO, "DPI changed from %u to %u", dpi_data->old_dpi, dpi_data->new_dpi);
     g_hover_state.current_dpi = dpi_data->new_dpi;
-    g_hover_state.headroom_y = (int)(64.0f * (float)g_hover_state.current_dpi / 96.0f);
+
+    TE_FrameLoopStop();
+    RebuildGeometry();
 
     HWND taskbar_hwnd = g_hover_state.ctx->taskbar_hwnd;
     if (taskbar_hwnd && IsWindow(taskbar_hwnd)) {
-        GetWindowRect(taskbar_hwnd, &g_hover_state.taskbar_rect);
-        int tb_width = g_hover_state.taskbar_rect.right - g_hover_state.taskbar_rect.left;
-        int tb_height = g_hover_state.taskbar_rect.bottom - g_hover_state.taskbar_rect.top;
-        int overlay_x = g_hover_state.taskbar_rect.left;
-        int overlay_y = g_hover_state.taskbar_rect.top - g_hover_state.headroom_y;
+        int tb_width = g_hover_state.geometry.taskbarRect.right - g_hover_state.geometry.taskbarRect.left;
+        int tb_height = g_hover_state.geometry.taskbarRect.bottom - g_hover_state.geometry.taskbarRect.top;
+        int overlay_x = g_hover_state.geometry.taskbarRect.left;
+        int overlay_y = g_hover_state.geometry.taskbarRect.top - g_hover_state.geometry.headroom_y;
         int overlay_w = tb_width;
-        int overlay_h = tb_height + g_hover_state.headroom_y;
+        int overlay_h = tb_height + g_hover_state.geometry.headroom_y;
 
         TE_DCompMoveOverlayWindow(g_hover_state.overlay_hwnd, overlay_x, overlay_y, overlay_w, overlay_h);
     }
@@ -322,19 +364,18 @@ static void OnDpiChanged(uint32_t type, const void* data, void* user_data) {
  * Taskbar geometry change event handler.
  */
 static void OnTaskbarGeometry(uint32_t type, const void* data, void* user_data) {
-    (void)type; (void)user_data;
+    (void)type; (void)data; (void)user_data;
     if (!g_hover_state.enabled) return;
 
-    const TE_TaskbarGeometryData* geom_data = (const TE_TaskbarGeometryData*)data;
-    if (!geom_data) return;
+    TE_FrameLoopStop();
+    RebuildGeometry();
 
-    g_hover_state.taskbar_rect = geom_data->new_rect;
-    int tb_width = g_hover_state.taskbar_rect.right - g_hover_state.taskbar_rect.left;
-    int tb_height = g_hover_state.taskbar_rect.bottom - g_hover_state.taskbar_rect.top;
-    int overlay_x = g_hover_state.taskbar_rect.left;
-    int overlay_y = g_hover_state.taskbar_rect.top - g_hover_state.headroom_y;
+    int tb_width = g_hover_state.geometry.taskbarRect.right - g_hover_state.geometry.taskbarRect.left;
+    int tb_height = g_hover_state.geometry.taskbarRect.bottom - g_hover_state.geometry.taskbarRect.top;
+    int overlay_x = g_hover_state.geometry.taskbarRect.left;
+    int overlay_y = g_hover_state.geometry.taskbarRect.top - g_hover_state.geometry.headroom_y;
     int overlay_w = tb_width;
-    int overlay_h = tb_height + g_hover_state.headroom_y;
+    int overlay_h = tb_height + g_hover_state.geometry.headroom_y;
 
     TE_DCompMoveOverlayWindow(g_hover_state.overlay_hwnd, overlay_x, overlay_y, overlay_w, overlay_h);
     RebuildIconData();
@@ -356,12 +397,12 @@ static HRESULT Initialize(const PluginContext* ctx) {
     g_hover_state.config.radius = 120;
     g_hover_state.config.curve = TE_CURVE_GAUSSIAN;
     g_hover_state.config.speed_ms = 150;
-    g_hover_state.taskbar_height = 48; /* Default until state store provides real value */
+    g_hover_state.geometry.taskbarHeight = 48; /* Default until state store provides real value */
 
     g_hover_state.current_dpi = (ctx && ctx->dpi) ? ctx->dpi : 96;
-    g_hover_state.headroom_y = (int)(64.0f * (float)g_hover_state.current_dpi / 96.0f);
+    g_hover_state.geometry.headroom_y = (TE_HOVER_HEADROOM_BASE_PX * g_hover_state.current_dpi) / 96;
     if (ctx && ctx->taskbar_hwnd) {
-        GetWindowRect(ctx->taskbar_hwnd, &g_hover_state.taskbar_rect);
+        GetWindowRect(ctx->taskbar_hwnd, &g_hover_state.geometry.taskbarRect);
     }
 
     ParseConfig(ctx ? ctx->config : NULL);
@@ -386,17 +427,16 @@ static HRESULT Enable(void) {
 
     /* Get taskbar dimensions and position for overlay */
     HWND taskbar_hwnd = g_hover_state.ctx->taskbar_hwnd;
-    GetWindowRect(taskbar_hwnd, &g_hover_state.taskbar_rect);
-    int tb_width = g_hover_state.taskbar_rect.right - g_hover_state.taskbar_rect.left;
-    int tb_height = g_hover_state.taskbar_rect.bottom - g_hover_state.taskbar_rect.top;
-
     g_hover_state.current_dpi = g_hover_state.ctx->dpi ? g_hover_state.ctx->dpi : 96;
-    g_hover_state.headroom_y = (int)(64.0f * (float)g_hover_state.current_dpi / 96.0f);
+    RebuildGeometry();
 
-    int overlay_x = g_hover_state.taskbar_rect.left;
-    int overlay_y = g_hover_state.taskbar_rect.top - g_hover_state.headroom_y;
+    int tb_width = g_hover_state.geometry.taskbarRect.right - g_hover_state.geometry.taskbarRect.left;
+    int tb_height = g_hover_state.geometry.taskbarRect.bottom - g_hover_state.geometry.taskbarRect.top;
+
+    int overlay_x = g_hover_state.geometry.taskbarRect.left;
+    int overlay_y = g_hover_state.geometry.taskbarRect.top - g_hover_state.geometry.headroom_y;
     int overlay_w = tb_width;
-    int overlay_h = tb_height + g_hover_state.headroom_y;
+    int overlay_h = tb_height + g_hover_state.geometry.headroom_y;
 
     /* Create overlay window (WS_POPUP layered window with headroom) */
     g_hover_state.overlay_hwnd = TE_DCompCreateOverlayWindow(taskbar_hwnd, overlay_x, overlay_y, overlay_w, overlay_h);

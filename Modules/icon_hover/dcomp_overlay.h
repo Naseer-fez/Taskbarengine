@@ -2,6 +2,7 @@
 #define TE_DCOMP_OVERLAY_H
 
 #include <sdk/te_types.h>
+#include "uia_discovery.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -66,13 +67,16 @@ void TE_DCompDestroyDevice(void);
  * each with scale and translate transforms.
  *
  * @param count      Number of icons.
- * @param bounds     Array of icon bounding rectangles (screen coords).
+ * @param elements   Array of icon element info (contains buttonRect and glyphRect).
  * @param bitmaps    Array of icon HBITMAP handles (may contain NULLs).
+ * @param baseline_y Taskbar baseline Y in screen coordinates.
+ * @param overlay_x  Overlay screen X coordinate.
+ * @param overlay_y  Overlay screen Y coordinate.
  * @return TE_S_OK on success.
  *
  * @note Thread Safety: Must be called from the animation thread or UI thread.
  */
-HRESULT TE_DCompBuildVisualTree(int count, const RECT* bounds, const HBITMAP* bitmaps);
+HRESULT TE_DCompBuildVisualTree(int count, const TE_IconElementInfo* elements, const HBITMAP* bitmaps, int baseline_y, int overlay_x, int overlay_y);
 
 /**
  * Update the scale and position transforms for all icon visuals.

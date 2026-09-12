@@ -15,6 +15,9 @@ add_library(EngineDLL SHARED
     src/vdesktop_notify.cpp
 )
 
+set_target_properties(EngineDLL PROPERTIES PREFIX "")
+
+
 target_include_directories(EngineDLL PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_SOURCE_DIR}/ThirdParty/cJSON

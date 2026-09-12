@@ -50,26 +50,11 @@ static void ComputeDisplacedPositions(
     float* out_pos_x, float* out_pos_y)
 {
     if (count <= 0) return;
-
-    /* Calculate cumulative displacement from left to right.
-     * Each icon's width increase pushes all subsequent icons rightward. */
-    float cumulative_dx = 0.0f;
+    (void)anim;
 
     for (int i = 0; i < count; i++) {
-        float scale = anim[i].current_scale;
-        float base_w = anim[i].base_width;
-
-        /* Displacement for this icon: center it around its scaled position */
-        float extra_w = base_w * (scale - 1.0f);
-        out_pos_x[i] = cumulative_dx - extra_w / 2.0f;
-
-        /* Y displacement: push icon upward by half the extra height */
-        float base_h = anim[i].base_height;
-        float extra_h = base_h * (scale - 1.0f);
-        out_pos_y[i] = -extra_h; /* Grow upward from taskbar */
-
-        /* Accumulate displacement for subsequent icons */
-        cumulative_dx += extra_w;
+        out_pos_x[i] = 0.0f;
+        out_pos_y[i] = 0.0f;
     }
 }
 
@@ -103,8 +88,8 @@ static VOID CALLBACK FrameTimerCallback(PVOID lpParam, BOOLEAN timer_or_wait_fir
     if (icon_count <= 0) return;
 
     /* Active cursor position validation: check if cursor is in active taskbar rect (including upward headroom) */
-    RECT active_rect = state->taskbar_rect;
-    active_rect.top -= state->headroom_y;
+    RECT active_rect = state->geometry.taskbarRect;
+    active_rect.top -= state->geometry.headroom_y;
 
     if (state->mouse.is_in_taskbar) {
         POINT cur;
@@ -164,8 +149,8 @@ static VOID CALLBACK FrameTimerCallback(PVOID lpParam, BOOLEAN timer_or_wait_fir
         float target = target_scales[i];
         float current = state->anim[i].current_scale;
 
-        /* Use faster lerp when approaching target (mouse in), slower for settle */
-        float speed = state->mouse.is_in_taskbar ? in_speed : lerp_speed;
+        /* Use faster lerp when approaching target (mouse in), slower for settle (0.2x speed) */
+        float speed = state->mouse.is_in_taskbar ? in_speed : (lerp_speed * 0.2f);
         float new_scale = current + (target - current) * speed;
 
         /* Clamp to valid range */
@@ -177,6 +162,20 @@ static VOID CALLBACK FrameTimerCallback(PVOID lpParam, BOOLEAN timer_or_wait_fir
 
         float diff = fabsf(new_scale - target);
         if (diff > max_diff) max_diff = diff;
+    }
+
+    /* Validate geometry generation */
+    int generation_mismatch = 0;
+    for (int i = 0; i < icon_count; i++) {
+        if (state->anim[i].geometry_generation != state->geometry.generation) {
+            generation_mismatch = 1;
+            break;
+        }
+    }
+
+    if (generation_mismatch) {
+        /* Drop frame during resize transition to prevent floating artifacts */
+        return;
     }
 
     /* Compute displaced positions */

@@ -98,12 +98,12 @@ HWND TE_DCompCreateOverlayWindow(HWND taskbar_hwnd, int x, int y, int width, int
     }
 
     HWND overlay = CreateWindowExW(
-        WS_EX_NOREDIRECTIONBITMAP | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+        WS_EX_NOREDIRECTIONBITMAP | WS_EX_TRANSPARENT | WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
         OVERLAY_CLASS_NAME,
         NULL,
         WS_POPUP | WS_VISIBLE,
         x, y, width, height,
-        taskbar_hwnd,
+        NULL,
         NULL,
         hinstance,
         NULL
@@ -113,6 +113,8 @@ HWND TE_DCompCreateOverlayWindow(HWND taskbar_hwnd, int x, int y, int width, int
         TE_LogWrite(TE_LOG_ERROR, LOG_TAG, "Failed to create overlay window");
         return NULL;
     }
+
+    SetLayeredWindowAttributes(overlay, 0, 255, LWA_ALPHA);
 
     char msg[128];
     snprintf(msg, sizeof(msg), "Overlay window created: %dx%d at (%d,%d)", width, height, x, y);
@@ -255,16 +257,18 @@ void TE_DCompDestroyDevice(void)
     TE_LogWrite(TE_LOG_INFO, LOG_TAG, "DComp device destroyed");
 }
 
-HRESULT TE_DCompBuildVisualTree(int count, const RECT* bounds, const HBITMAP* bitmaps)
+HRESULT TE_DCompBuildVisualTree(int count, const TE_IconElementInfo* elements, const HBITMAP* bitmaps, int baseline_y, int overlay_x, int overlay_y)
 {
     if (!s_dcomp_device || !s_root_visual) return TE_E_FAIL;
-    if (count <= 0 || !bounds) return TE_E_INVALIDARG;
+    if (count <= 0 || !elements) return TE_E_INVALIDARG;
     if (count > TE_HOVER_MAX_ICONS) count = TE_HOVER_MAX_ICONS;
 
     /* Release any existing visual tree */
     ReleaseVisualTree();
 
     HRESULT hr;
+
+    int baseline_OVERLAY = baseline_y - overlay_y;
 
     for (int i = 0; i < count; i++) {
         /* Create child visual */
@@ -295,24 +299,34 @@ HRESULT TE_DCompBuildVisualTree(int count, const RECT* bounds, const HBITMAP* bi
         s_translate_transforms[i]->SetOffsetX(0.0f);
         s_translate_transforms[i]->SetOffsetY(0.0f);
 
-        /* Position the visual at the icon's location */
-        float icon_x = (float)bounds[i].left;
-        float icon_y = (float)bounds[i].top;
-        float icon_w = (float)(bounds[i].right - bounds[i].left);
-        float icon_h = (float)(bounds[i].bottom - bounds[i].top);
+        /* Calculate positions using glyphCenter and taskbar baseline */
+        const RECT* btn = &elements[i].buttonRect;
+        const RECT* gl = &elements[i].glyphRect;
 
-        /* Set scale center to icon center */
-        s_scale_transforms[i]->SetCenterX(icon_w / 2.0f);
-        s_scale_transforms[i]->SetCenterY(icon_h / 2.0f);
+        float w_surf = (float)(btn->right - btn->left);
+        float h_surf = (float)(btn->bottom - btn->top);
 
-        /* Set offset to icon position */
-        s_icon_visuals[i]->SetOffsetX(icon_x);
-        s_icon_visuals[i]->SetOffsetY(icon_y);
+        float glyphCenterX_OVERLAY = ((float)(gl->left + gl->right) / 2.0f) - (float)overlay_x;
+        float glyphCenterY_OVERLAY = ((float)(gl->top + gl->bottom) / 2.0f) - (float)overlay_y;
+
+        float X_visual_base = glyphCenterX_OVERLAY - (w_surf / 2.0f);
+        float Y_visual_base = glyphCenterY_OVERLAY - (h_surf / 2.0f);
+
+        float c_x = w_surf / 2.0f;
+        float c_y = (float)baseline_OVERLAY - Y_visual_base;
+
+        /* Set scale center to invariant baseline anchor */
+        s_scale_transforms[i]->SetCenterX(c_x);
+        s_scale_transforms[i]->SetCenterY(c_y);
+
+        /* Set offset to the base visual position */
+        s_icon_visuals[i]->SetOffsetX(X_visual_base);
+        s_icon_visuals[i]->SetOffsetY(Y_visual_base);
 
         /* Create a DComp surface for the icon bitmap */
         if (bitmaps && bitmaps[i]) {
-            int bmp_w = (int)icon_w;
-            int bmp_h = (int)icon_h;
+            int bmp_w = (int)w_surf;
+            int bmp_h = (int)h_surf;
             if (bmp_w <= 0) bmp_w = 48;
             if (bmp_h <= 0) bmp_h = 48;
 
@@ -438,7 +452,7 @@ HRESULT TE_DCompSetOverlayAlpha(float alpha)
         if (alpha <= 0.0f) {
             ShowWindow(s_overlay_hwnd_ref, SW_HIDE);
         } else {
-            ShowWindow(s_overlay_hwnd_ref, SW_SHOWNOACTIVATE);
+            SetWindowPos(s_overlay_hwnd_ref, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
         }
     }
 

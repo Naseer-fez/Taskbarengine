@@ -36,7 +36,6 @@ HRESULT TE_TaskbarSubclassUnsubscribeMessage(UINT msg) {
     return TE_S_OK;
 }
 
-static BOOL s_taskbar_mouse_tracking = FALSE;
 
 LRESULT CALLBACK TE_TaskbarSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData) {
     (void)uIdSubclass;
@@ -44,6 +43,7 @@ LRESULT CALLBACK TE_TaskbarSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
     
     switch (msg) {
         case WM_TE_INIT:
+            SetTimer(hwnd, 1001, 16, NULL);
             TE_CoreManagerInit(hwnd);
             return 0;
             
@@ -72,40 +72,44 @@ LRESULT CALLBACK TE_TaskbarSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
         
         case WM_DESTROY:
         case WM_ENDSESSION:
+            KillTimer(hwnd, 1001);
             TE_CoreManagerShutdown();
             TE_TaskbarSubclassRemove(hwnd);
             break;
             
-        case WM_MOUSEMOVE: {
-            if (!s_taskbar_mouse_tracking) {
-                TRACKMOUSEEVENT tme;
-                tme.cbSize = sizeof(TRACKMOUSEEVENT);
-                tme.dwFlags = TME_LEAVE;
-                tme.hwndTrack = hwnd;
-                tme.dwHoverTime = HOVER_DEFAULT;
-                if (TrackMouseEvent(&tme)) {
-                    s_taskbar_mouse_tracking = TRUE;
+        case WM_TIMER: {
+            if (wParam == 1001) {
+                POINT pt;
+                GetCursorPos(&pt);
+                RECT rect;
+                GetWindowRect(hwnd, &rect);
+                
+                BOOL in_taskbar = FALSE;
+                if (PtInRect(&rect, pt)) {
+                    HWND hit_hwnd = WindowFromPoint(pt);
+                    if (hit_hwnd) {
+                        HWND root = GetAncestor(hit_hwnd, GA_ROOT);
+                        if (root == hwnd) {
+                            in_taskbar = TRUE;
+                        }
+                    }
+                }
+                
+                static BOOL s_was_in_taskbar = FALSE;
+                static POINT s_last_pt = {0, 0};
+                
+                if (in_taskbar || s_was_in_taskbar) {
+                    if (pt.x != s_last_pt.x || pt.y != s_last_pt.y || in_taskbar != s_was_in_taskbar) {
+                        TE_TaskbarMouseData mouse_data;
+                        mouse_data.cursor_pos = pt;
+                        mouse_data.is_in_taskbar = in_taskbar;
+                        TE_EventDispatchFire(TE_EVENT_TASKBAR_MOUSE, &mouse_data);
+                        
+                        s_last_pt = pt;
+                        s_was_in_taskbar = in_taskbar;
+                    }
                 }
             }
-            POINT pt;
-            pt.x = (int)(short)LOWORD(lParam);
-            pt.y = (int)(short)HIWORD(lParam);
-            ClientToScreen(hwnd, &pt);
-
-            TE_TaskbarMouseData mouse_data;
-            mouse_data.cursor_pos = pt;
-            mouse_data.is_in_taskbar = TRUE;
-            TE_EventDispatchFire(TE_EVENT_TASKBAR_MOUSE, &mouse_data);
-            break;
-        }
-
-        case WM_MOUSELEAVE: {
-            s_taskbar_mouse_tracking = FALSE;
-            TE_TaskbarMouseData mouse_data;
-            mouse_data.cursor_pos.x = 0;
-            mouse_data.cursor_pos.y = 0;
-            mouse_data.is_in_taskbar = FALSE;
-            TE_EventDispatchFire(TE_EVENT_TASKBAR_MOUSE, &mouse_data);
             break;
         }
 

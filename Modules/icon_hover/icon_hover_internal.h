@@ -45,6 +45,27 @@ typedef struct TE_HoverMouseState {
 } TE_HoverMouseState;
 
 /**
+ * Baseline vertical headroom in logical pixels at 96 DPI.
+ * Accommodates upward expansion for icons up to 48px base height
+ * at max_scale 2.0x, with antialiasing clearance.
+ * Scaled at runtime via: (TE_HOVER_HEADROOM_BASE_PX * dpi) / 96
+ */
+#define TE_HOVER_HEADROOM_BASE_PX 64
+
+/**
+ * Taskbar geometry information.
+ */
+typedef struct TE_TaskbarGeometryInfo {
+    RECT taskbarRect;
+    int taskbarHeight;
+    int bridgeOffsetY;
+    int baselineY;
+    int headroom_y;
+    uint64_t generation;
+    int valid;
+} TE_TaskbarGeometryInfo;
+
+/**
  * Per-icon animation state.
  */
 typedef struct TE_IconAnimState {
@@ -54,6 +75,7 @@ typedef struct TE_IconAnimState {
     float center_y;                 /**< Icon center Y in screen coordinates. */
     float base_width;               /**< Base icon width (unscaled). */
     float base_height;              /**< Base icon height (unscaled). */
+    uint64_t geometry_generation;   /**< Generation of geometry used for this animation. */
 } TE_IconAnimState;
 
 /**
@@ -69,9 +91,7 @@ typedef struct TE_IconHoverState {
     TE_IconAnimState anim[TE_HOVER_MAX_ICONS]; /**< Per-icon animation state. */
     int anim_count;                         /**< Number of active icon animations. */
     HWND overlay_hwnd;                      /**< DComp overlay window handle. */
-    RECT taskbar_rect;                      /**< Cached screen rect of the taskbar. */
-    int taskbar_height;                     /**< Current taskbar height from state store. */
-    int headroom_y;                         /**< Headroom height above taskbar for unclipped growth. */
+    TE_TaskbarGeometryInfo geometry;        /**< Cached taskbar geometry info. */
     uint32_t current_dpi;                   /**< Current monitor DPI. */
     int enabled;                            /**< Non-zero if plugin is actively running. */
 } TE_IconHoverState;

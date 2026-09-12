@@ -20,6 +20,7 @@
 #include <uiautomation.h>
 #include <stdio.h>
 #include <wchar.h>
+#include <math.h>
 
 /** Minimum interval between UIA queries in QPC ticks (~500ms). */
 static LARGE_INTEGER s_rate_limit_interval = {};
@@ -67,6 +68,161 @@ static void CopyAutomationId(wchar_t* dest, size_t dest_count, BSTR src)
     } else {
         dest[0] = L'\0';
     }
+}
+
+static BOOL ContainsSubstringI(BSTR str, const wchar_t* sub) {
+    if (!str || !sub) return FALSE;
+    size_t len = wcslen(str);
+    size_t sub_len = wcslen(sub);
+    if (sub_len > len) return FALSE;
+    for (size_t i = 0; i <= len - sub_len; i++) {
+        if (_wcsnicmp(str + i, sub, sub_len) == 0) return TRUE;
+    }
+    return FALSE;
+}
+
+static BOOL DiscoverGlyphRect(IUIAutomation* uia, IUIAutomationElement* btn, RECT btn_rect, RECT* out_glyph) {
+    BOOL success = FALSE;
+    IUIAutomationCondition* img_cond = NULL;
+    VARIANT var_img;
+    var_img.vt = VT_I4;
+    var_img.lVal = UIA_ImageControlTypeId;
+    
+    if (SUCCEEDED(uia->CreatePropertyCondition(UIA_ControlTypePropertyId, var_img, &img_cond)) && img_cond) {
+        IUIAutomationElement* img_child = NULL;
+        if (SUCCEEDED(btn->FindFirst(TreeScope_Children, img_cond, &img_child)) && img_child) {
+            RECT gl_rect = {0, 0, 0, 0};
+            if (SUCCEEDED(img_child->get_CurrentBoundingRectangle(&gl_rect))) {
+                int w_btn = btn_rect.right - btn_rect.left;
+                int w_gl = gl_rect.right - gl_rect.left;
+                int h_gl = gl_rect.bottom - gl_rect.top;
+                
+                if (w_gl >= 8 && h_gl >= 8 &&
+                    gl_rect.left >= btn_rect.left - 2 &&
+                    gl_rect.top >= btn_rect.top - 2 &&
+                    gl_rect.right <= btn_rect.right + 2 &&
+                    gl_rect.bottom <= btn_rect.bottom + 2) {
+                    
+                    float aspect = (float)w_gl / (float)h_gl;
+                    float size_ratio = (float)w_gl / (float)w_btn;
+                    
+                    if (aspect >= 0.6f && aspect <= 1.4f &&
+                        size_ratio >= 0.35f && size_ratio <= 0.90f) {
+                        *out_glyph = gl_rect;
+                        success = TRUE;
+                    }
+                }
+            }
+            img_child->Release();
+        }
+        img_cond->Release();
+    }
+    
+    if (!success) {
+        int w_btn = btn_rect.right - btn_rect.left;
+        int h_btn = btn_rect.bottom - btn_rect.top;
+        int targetGlyphDim = (int)(h_btn * 0.60f + 0.5f);
+        int insetX = (w_btn - targetGlyphDim) / 2;
+        int insetY = (h_btn - targetGlyphDim) / 2;
+        out_glyph->left = btn_rect.left + insetX;
+        out_glyph->top = btn_rect.top + insetY;
+        out_glyph->right = out_glyph->left + targetGlyphDim;
+        out_glyph->bottom = out_glyph->top + targetGlyphDim;
+    }
+    return TRUE;
+}
+
+static TE_TaskbarElementType ClassifyElement(IUIAutomation* uia, IUIAutomationElement* btn, RECT btn_rect, BSTR auto_id, BSTR class_name) {
+    int w = btn_rect.right - btn_rect.left;
+    int h = btn_rect.bottom - btn_rect.top;
+    if (w < 16 || w > 200 || h < 16 || h > 200) return TE_ELEM_UNKNOWN;
+    
+    float aspect = (float)w / (float)h;
+    if (aspect < 0.4f || aspect > 2.5f) return TE_ELEM_UNKNOWN;
+    
+    BSTR name = NULL;
+    btn->get_CurrentName(&name);
+    
+    auto MatchesAny = [&](const wchar_t** patterns, int count) -> BOOL {
+        for (int i = 0; i < count; i++) {
+            if (ContainsSubstringI(auto_id, patterns[i])) return TRUE;
+            if (ContainsSubstringI(class_name, patterns[i])) return TRUE;
+            if (ContainsSubstringI(name, patterns[i])) return TRUE;
+        }
+        return FALSE;
+    };
+    
+    const wchar_t* start_patterns[] = {L"Start", L"StartButton"};
+    const wchar_t* search_patterns[] = {L"Search", L"SearchButton", L"SearchHost", L"SearchBox"};
+    const wchar_t* system_patterns[] = {L"TaskView", L"TaskViewButton", L"Widgets", L"Weather", L"People", L"InputIndicator"};
+    const wchar_t* notify_patterns[] = {L"Notification", L"Notify", L"Clock", L"Tray"};
+    
+    if (MatchesAny(start_patterns, 2) || MatchesAny(search_patterns, 4) || 
+        MatchesAny(system_patterns, 6) || MatchesAny(notify_patterns, 4)) {
+        if (name) SysFreeString(name);
+        return TE_ELEM_SHELL_CONTROL;
+    }
+    
+    IUIAutomationTreeWalker* walker = NULL;
+    if (SUCCEEDED(uia->get_ControlViewWalker(&walker)) && walker) {
+        IUIAutomationElement* current = btn;
+        current->AddRef();
+        for (int i = 0; i < 3; i++) {
+            IUIAutomationElement* parent = NULL;
+            if (FAILED(walker->GetParentElement(current, &parent)) || !parent) {
+                break;
+            }
+            BSTR parent_class = NULL;
+            BSTR parent_id = NULL;
+            parent->get_CurrentClassName(&parent_class);
+            parent->get_CurrentAutomationId(&parent_id);
+            
+            BOOL is_tray = FALSE;
+            if (ContainsSubstringI(parent_class, L"TrayNotifyWnd") ||
+                ContainsSubstringI(parent_class, L"Windows.UI.Composition.DesktopWindowContentBridge") ||
+                ContainsSubstringI(parent_id, L"SystemTrayIcon")) {
+                is_tray = TRUE;
+            }
+            
+            if (parent_class) SysFreeString(parent_class);
+            if (parent_id) SysFreeString(parent_id);
+            
+            current->Release();
+            current = parent;
+            
+            if (is_tray) {
+                current->Release();
+                walker->Release();
+                if (name) SysFreeString(name);
+                return TE_ELEM_SYSTEM_TRAY;
+            }
+        }
+        current->Release();
+        walker->Release();
+    }
+    
+    BOOL has_image = FALSE;
+    IUIAutomationCondition* img_cond = NULL;
+    VARIANT var_img;
+    var_img.vt = VT_I4;
+    var_img.lVal = UIA_ImageControlTypeId;
+    if (SUCCEEDED(uia->CreatePropertyCondition(UIA_ControlTypePropertyId, var_img, &img_cond)) && img_cond) {
+        IUIAutomationElement* img_child = NULL;
+        if (SUCCEEDED(btn->FindFirst(TreeScope_Children, img_cond, &img_child)) && img_child) {
+            has_image = TRUE;
+            img_child->Release();
+        }
+        img_cond->Release();
+    }
+    
+    BOOL has_app_id = ContainsSubstringI(auto_id, L"AppID:");
+    if (name) SysFreeString(name);
+    
+    if (!has_image && !has_app_id) {
+        return TE_ELEM_UNKNOWN;
+    }
+    
+    return TE_ELEM_APP_ICON;
 }
 
 HRESULT TE_UiaDiscoverIcons(HWND taskbar_hwnd, TE_IconElementCache* out_cache)
@@ -162,19 +318,20 @@ HRESULT TE_UiaDiscoverIcons(HWND taskbar_hwnd, TE_IconElementCache* out_cache)
         BSTR auto_id = NULL;
         btn->get_CurrentAutomationId(&auto_id);
 
-        /* Filter: skip elements that are clearly not taskbar app buttons.
-         * Windows 11 taskbar buttons typically have automation IDs containing
-         * specific patterns. We accept all buttons with valid bounds and
-         * filter out known system buttons by pattern. */
         BSTR class_name = NULL;
         btn->get_CurrentClassName(&class_name);
 
-        TE_IconElementInfo* info = &out_cache->items[icon_count];
-        info->bounds = bounds;
-        CopyAutomationId(info->app_id, 256, auto_id);
-        info->icon_index = (int)icon_count; /* Default index; refined by icon_capture */
+        TE_TaskbarElementType type = ClassifyElement(uia, btn, bounds, auto_id, class_name);
+        if (type == TE_ELEM_APP_ICON) {
+            TE_IconElementInfo* info = &out_cache->items[icon_count];
+            info->buttonRect = bounds;
+            DiscoverGlyphRect(uia, btn, bounds, &info->glyphRect);
+            info->element_type = type;
+            CopyAutomationId(info->app_id, 256, auto_id);
+            info->icon_index = (int)icon_count; /* Default index; refined by icon_capture */
 
-        icon_count++;
+            icon_count++;
+        }
 
         if (auto_id) SysFreeString(auto_id);
         if (class_name) SysFreeString(class_name);

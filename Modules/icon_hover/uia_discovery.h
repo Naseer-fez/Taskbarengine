@@ -12,10 +12,22 @@ extern "C" {
 #define TE_UIA_MAX_ICONS 64
 
 /**
+ * Element classification types.
+ */
+typedef enum TE_TaskbarElementType {
+    TE_ELEM_UNKNOWN = 0,
+    TE_ELEM_APP_ICON,
+    TE_ELEM_SHELL_CONTROL,
+    TE_ELEM_SYSTEM_TRAY
+} TE_TaskbarElementType;
+
+/**
  * Information about a single taskbar button element discovered via UI Automation.
  */
 typedef struct TE_IconElementInfo {
-    RECT bounds;                /**< Screen-space bounding rectangle of the button. */
+    RECT buttonRect;            /**< Screen-space bounding rectangle of the button. */
+    RECT glyphRect;             /**< Screen-space bounding rectangle of the icon glyph. */
+    TE_TaskbarElementType element_type; /**< Classification of the element. */
     wchar_t app_id[256];       /**< Automation ID or app identifier string. */
     int icon_index;            /**< Index in the system image list for icon extraction. */
 } TE_IconElementInfo;
