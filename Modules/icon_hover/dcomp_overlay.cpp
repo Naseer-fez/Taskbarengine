@@ -103,7 +103,7 @@ HWND TE_DCompCreateOverlayWindow(HWND taskbar_hwnd, int x, int y, int width, int
         NULL,
         WS_POPUP | WS_VISIBLE,
         x, y, width, height,
-        NULL,
+        taskbar_hwnd, /* Establish ownership so overlay always stays above taskbar */
         NULL,
         hinstance,
         NULL
@@ -364,11 +364,16 @@ HRESULT TE_DCompBuildVisualTree(int count, const TE_IconElementInfo* elements, c
                             if (SUCCEEDED(hr) && d2d_bmp) {
                                 rt->BeginDraw();
                                 rt->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
+                                float dest_w = (float)dib.dsBm.bmWidth;
+                                float dest_h = (float)dib.dsBm.bmHeight;
+                                float dest_x = (float)offset_point.x + ((float)bmp_w - dest_w) / 2.0f;
+                                float dest_y = (float)offset_point.y + ((float)bmp_h - dest_h) / 2.0f;
+
                                 D2D1_RECT_F dest_rect = D2D1::RectF(
-                                    (float)offset_point.x,
-                                    (float)offset_point.y,
-                                    (float)(offset_point.x + bmp_w),
-                                    (float)(offset_point.y + bmp_h)
+                                    dest_x,
+                                    dest_y,
+                                    dest_x + dest_w,
+                                    dest_y + dest_h
                                 );
                                 rt->DrawBitmap(d2d_bmp, dest_rect);
                                 rt->EndDraw();

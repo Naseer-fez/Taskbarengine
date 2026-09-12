@@ -135,23 +135,42 @@ static VOID CALLBACK FrameTimerCallback(PVOID lpParam, BOOLEAN timer_or_wait_fir
     }
 
     /* Smooth interpolation: lerp current scales toward targets */
-    float lerp_speed = (state->config.speed_ms > 0)
-                     ? (1000.0f / (float)state->config.speed_ms) * dt
+    float base_speed = (state->config.speed_ms > 0)
+                     ? (1000.0f / (float)state->config.speed_ms) * dt * 4.0f
                      : 1.0f;
-    if (lerp_speed > 1.0f) lerp_speed = 1.0f;
+    if (base_speed > 1.0f) base_speed = 1.0f;
 
     /* For mouse-in, use faster interpolation for responsive feel */
-    float in_speed = lerp_speed * 3.0f;
+    float in_speed = base_speed * 1.5f;
     if (in_speed > 1.0f) in_speed = 1.0f;
+
+    /* User requested 1.2x speed for the drop/fallout */
+    float out_speed = base_speed * 1.2f;
+    if (out_speed > 1.0f) out_speed = 1.0f;
+
+    /* Minimum step to ensure the animation completes cleanly and quickly */
+    float min_step = 2.4f * dt;
 
     float max_diff = 0.0f;
     for (int i = 0; i < icon_count; i++) {
         float target = target_scales[i];
         float current = state->anim[i].current_scale;
 
-        /* Use faster lerp when approaching target (mouse in), slower for settle (0.2x speed) */
-        float speed = state->mouse.is_in_taskbar ? in_speed : (lerp_speed * 0.2f);
-        float new_scale = current + (target - current) * speed;
+        /* Use faster lerp when approaching target (mouse in), use out_speed for settle */
+        float speed = state->mouse.is_in_taskbar ? in_speed : out_speed;
+        
+        float delta = (target - current) * speed;
+        
+        if (fabsf(target - current) > 0.0001f) {
+            if (fabsf(delta) < min_step) {
+                delta = (target > current) ? min_step : -min_step;
+            }
+        }
+        
+        float new_scale = current + delta;
+        if ((current < target && new_scale > target) || (current > target && new_scale < target)) {
+            new_scale = target;
+        }
 
         /* Clamp to valid range */
         if (new_scale < 1.0f) new_scale = 1.0f;
