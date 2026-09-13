@@ -5,24 +5,111 @@
 #include <fstream>
 #include <sstream>
 
+#include <vector>
+
 std::wstring ConfigIO_GetConfigPath()
 {
-    PWSTR local_appdata = NULL;
-    HRESULT hr = SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, NULL, &local_appdata);
-    if (SUCCEEDED(hr)) {
-        std::wstring path = std::wstring(local_appdata) + L"\\TaskbarEngine\\config.jsonc";
-        CoTaskMemFree(local_appdata);
-        return path;
+    // Search relative to the executable path
+    wchar_t exe_path[MAX_PATH] = { 0 };
+    if (GetModuleFileNameW(NULL, exe_path, MAX_PATH)) {
+        wchar_t* last_slash = wcsrchr(exe_path, L'\\');
+        if (last_slash) {
+            *last_slash = L'\0';
+        }
+
+        const wchar_t* relatives[] = {
+            L"\\..\\..\\Config\\default_config.jsonc",
+            L"\\..\\Config\\default_config.jsonc",
+            L"\\Config\\default_config.jsonc",
+            L"\\..\\..\\..\\Config\\default_config.jsonc"
+        };
+
+        for (const wchar_t* rel : relatives) {
+            std::wstring candidate = std::wstring(exe_path) + rel;
+            wchar_t full_path[MAX_PATH] = { 0 };
+            if (GetFullPathNameW(candidate.c_str(), MAX_PATH, full_path, NULL)) {
+                if (GetFileAttributesW(full_path) != INVALID_FILE_ATTRIBUTES) {
+                    return full_path;
+                }
+            }
+        }
     }
-    return L"config.jsonc";
+
+    // Search relative to current working directory
+    const wchar_t* cwd_relatives[] = {
+        L"Config\\default_config.jsonc",
+        L"..\\Config\\default_config.jsonc",
+        L"..\\..\\Config\\default_config.jsonc"
+    };
+    for (const wchar_t* rel : cwd_relatives) {
+        wchar_t full_path[MAX_PATH] = { 0 };
+        if (GetFullPathNameW(rel, MAX_PATH, full_path, NULL)) {
+            if (GetFileAttributesW(full_path) != INVALID_FILE_ATTRIBUTES) {
+                return full_path;
+            }
+        }
+    }
+
+    // Fallback: resolve canonical path relative to executable
+    if (exe_path[0] != L'\0') {
+        std::wstring candidate = std::wstring(exe_path) + L"\\..\\..\\Config\\default_config.jsonc";
+        wchar_t full_path[MAX_PATH] = { 0 };
+        if (GetFullPathNameW(candidate.c_str(), MAX_PATH, full_path, NULL)) {
+            return full_path;
+        }
+    }
+
+    return L"Config\\default_config.jsonc";
 }
 
 cJSON* ConfigIO_Load(const std::wstring& path)
 {
+    HANDLE hFile = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                               NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile == INVALID_HANDLE_VALUE) {
+        return nullptr;
+    }
+
+    DWORD file_size = GetFileSize(hFile, NULL);
+    if (file_size == INVALID_FILE_SIZE || file_size == 0) {
+        CloseHandle(hFile);
+        return nullptr;
+    }
+
+    std::vector<uint8_t> buffer(file_size + 2, 0);
+    DWORD bytes_read = 0;
+    if (!ReadFile(hFile, buffer.data(), file_size, &bytes_read, NULL) || bytes_read == 0) {
+        CloseHandle(hFile);
+        return nullptr;
+    }
+    CloseHandle(hFile);
+
     cJSON* root = nullptr;
-    if (SUCCEEDED(TE_JsoncParse(path.c_str(), &root))) {
+
+    // Check for UTF-16LE BOM: 0xFF, 0xFE
+    if (bytes_read >= 2 && buffer[0] == 0xFF && buffer[1] == 0xFE) {
+        const wchar_t* wstr = reinterpret_cast<const wchar_t*>(buffer.data() + 2);
+        int wlen = (bytes_read - 2) / sizeof(wchar_t);
+        int utf8_len = WideCharToMultiByte(CP_UTF8, 0, wstr, wlen, NULL, 0, NULL, NULL);
+        if (utf8_len > 0) {
+            std::string utf8_str(utf8_len, '\0');
+            WideCharToMultiByte(CP_UTF8, 0, wstr, wlen, &utf8_str[0], utf8_len, NULL, NULL);
+            if (SUCCEEDED(TE_JsoncParse(utf8_str.c_str(), &root))) {
+                return root;
+            }
+        }
+    }
+
+    // Check for UTF-8 BOM: 0xEF, 0xBB, 0xBF
+    const char* char_ptr = reinterpret_cast<const char*>(buffer.data());
+    if (bytes_read >= 3 && buffer[0] == 0xEF && buffer[1] == 0xBB && buffer[2] == 0xBF) {
+        char_ptr += 3;
+    }
+
+    if (SUCCEEDED(TE_JsoncParse(char_ptr, &root))) {
         return root;
     }
+
     return nullptr;
 }
 
@@ -75,6 +162,22 @@ HRESULT ConfigIO_Save(const std::wstring& path, cJSON* root)
         DeleteFileW(temp_path.c_str());
         return HRESULT_FROM_WIN32(error);
     }
+
+    // If %LOCALAPPDATA%\TaskbarEngine exists, keep its config.jsonc in sync
+    // so any running engine instance watching AppData receives the update instantly.
+    wchar_t appdata[MAX_PATH] = { 0 };
+    if (GetEnvironmentVariableW(L"LOCALAPPDATA", appdata, MAX_PATH) > 0) {
+        wchar_t appdata_cfg[MAX_PATH] = { 0 };
+        swprintf_s(appdata_cfg, MAX_PATH, L"%s\\TaskbarEngine\\config.jsonc", appdata);
+        if (_wcsicmp(path.c_str(), appdata_cfg) != 0) {
+            wchar_t appdata_dir[MAX_PATH] = { 0 };
+            swprintf_s(appdata_dir, MAX_PATH, L"%s\\TaskbarEngine", appdata);
+            if (GetFileAttributesW(appdata_dir) != INVALID_FILE_ATTRIBUTES) {
+                CopyFileW(path.c_str(), appdata_cfg, FALSE);
+            }
+        }
+    }
+
     return S_OK;
 }
 
@@ -82,7 +185,7 @@ cJSON* ConfigIO_GetPluginValue(cJSON* root, const char* plugin_name, const char*
 {
     if (!root || !plugin_name || !key) return nullptr;
 
-    cJSON* plugin_section = cJSON_GetObjectItemCaseSensitive(root, "plugin");
+    cJSON* plugin_section = cJSON_GetObjectItemCaseSensitive(root, "plugins");
     if (!plugin_section || !cJSON_IsObject(plugin_section)) return nullptr;
 
     cJSON* specific_plugin = cJSON_GetObjectItemCaseSensitive(plugin_section, plugin_name);
@@ -103,14 +206,14 @@ HRESULT ConfigIO_SetPluginValue(cJSON* root, const char* plugin_name, const char
         return E_INVALIDARG;
     }
 
-    cJSON* plugin_section = cJSON_GetObjectItemCaseSensitive(root, "plugin");
+    cJSON* plugin_section = cJSON_GetObjectItemCaseSensitive(root, "plugins");
     if (plugin_section && !cJSON_IsObject(plugin_section)) {
         cJSON_Delete(value);
         return E_INVALIDARG;
     }
     if (!plugin_section) {
         plugin_section = cJSON_CreateObject();
-        if (plugin_section && !cJSON_AddItemToObject(root, "plugin", plugin_section)) {
+        if (plugin_section && !cJSON_AddItemToObject(root, "plugins", plugin_section)) {
             cJSON_Delete(plugin_section);
             cJSON_Delete(value);
             return E_OUTOFMEMORY;

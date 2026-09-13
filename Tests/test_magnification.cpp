@@ -1,55 +1,166 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
-#include "../Modules/icon_hover/magnification.h"
+#include "magnification.h"
+#include <vector>
 
-TEST_CASE("Magnification Math - Curves", "[magnification]") {
-    float max_scale = 2.0f;
-    float radius = 100.0f;
+using Catch::Matchers::WithinAbs;
 
-    SECTION("Linear Curve") {
-        REQUIRE_THAT(TE_MagnifyScale(0.0f, radius, max_scale, TE_CURVE_LINEAR), Catch::Matchers::WithinAbs(2.0f, 0.001f));
-        REQUIRE_THAT(TE_MagnifyScale(50.0f, radius, max_scale, TE_CURVE_LINEAR), Catch::Matchers::WithinAbs(1.5f, 0.001f));
-        REQUIRE_THAT(TE_MagnifyScale(100.0f, radius, max_scale, TE_CURVE_LINEAR), Catch::Matchers::WithinAbs(1.0f, 0.001f));
-        REQUIRE_THAT(TE_MagnifyScale(150.0f, radius, max_scale, TE_CURVE_LINEAR), Catch::Matchers::WithinAbs(1.0f, 0.001f));
+TEST_CASE("Per-curve weight function tests", "[magnification]") {
+    SECTION("weight(0) == 1.0") {
+        REQUIRE(TE_MagnifyWeightGaussian(0.0f) == 1.0f);
+        REQUIRE(TE_MagnifyWeightCubic(0.0f) == 1.0f);
+        REQUIRE(TE_MagnifyWeightCosine(0.0f) == 1.0f);
+        REQUIRE(TE_MagnifyWeightLinear(0.0f) == 1.0f);
     }
 
-    SECTION("Cubic Curve") {
-        REQUIRE_THAT(TE_MagnifyScale(0.0f, radius, max_scale, TE_CURVE_CUBIC), Catch::Matchers::WithinAbs(2.0f, 0.001f));
-        REQUIRE_THAT(TE_MagnifyScale(50.0f, radius, max_scale, TE_CURVE_CUBIC), Catch::Matchers::WithinAbs(1.125f, 0.001f));
-        REQUIRE_THAT(TE_MagnifyScale(100.0f, radius, max_scale, TE_CURVE_CUBIC), Catch::Matchers::WithinAbs(1.0f, 0.001f));
+    SECTION("weight(1) for smooth curves") {
+        REQUIRE(TE_MagnifyWeightCubic(1.0f) == 0.0f);
+        REQUIRE(TE_MagnifyWeightCosine(1.0f) == 0.0f);
+        REQUIRE(TE_MagnifyWeightLinear(1.0f) == 0.0f);
+        REQUIRE_THAT(TE_MagnifyWeightGaussian(1.0f), WithinAbs(0.0439369f, 0.001f));
     }
 
-    SECTION("Cosine Curve") {
-        REQUIRE_THAT(TE_MagnifyScale(0.0f, radius, max_scale, TE_CURVE_COSINE), Catch::Matchers::WithinAbs(2.0f, 0.001f));
-        REQUIRE_THAT(TE_MagnifyScale(50.0f, radius, max_scale, TE_CURVE_COSINE), Catch::Matchers::WithinAbs(1.5f, 0.001f));
-        REQUIRE_THAT(TE_MagnifyScale(100.0f, radius, max_scale, TE_CURVE_COSINE), Catch::Matchers::WithinAbs(1.0f, 0.001f));
-        REQUIRE_THAT(TE_MagnifyScale(-50.0f, radius, max_scale, TE_CURVE_COSINE), Catch::Matchers::WithinAbs(1.5f, 0.001f));
+    SECTION("Monotonically non-increasing") {
+        float prev_g = 1.0f, prev_c = 1.0f, prev_cos = 1.0f, prev_l = 1.0f;
+        for (int i = 1; i <= 10; ++i) {
+            float u = i * 0.1f;
+            float g = TE_MagnifyWeightGaussian(u);
+            float c = TE_MagnifyWeightCubic(u);
+            float cos = TE_MagnifyWeightCosine(u);
+            float l = TE_MagnifyWeightLinear(u);
+            
+            REQUIRE(g <= prev_g);
+            REQUIRE(c <= prev_c);
+            REQUIRE(cos <= prev_cos);
+            REQUIRE(l <= prev_l);
+            
+            prev_g = g;
+            prev_c = c;
+            prev_cos = cos;
+            prev_l = l;
+        }
     }
 
-    SECTION("Gaussian Curve") {
-        REQUIRE_THAT(TE_MagnifyScale(0.0f, radius, max_scale, TE_CURVE_GAUSSIAN), Catch::Matchers::WithinAbs(2.0f, 0.001f));
-        REQUIRE(TE_MagnifyScale(50.0f, radius, max_scale, TE_CURVE_GAUSSIAN) < 1.5f);
-        REQUIRE(TE_MagnifyScale(50.0f, radius, max_scale, TE_CURVE_GAUSSIAN) > 1.0f);
-        REQUIRE_THAT(TE_MagnifyScale(100.0f, radius, max_scale, TE_CURVE_GAUSSIAN), Catch::Matchers::WithinAbs(1.0f, 0.05f));
-        REQUIRE_THAT(TE_MagnifyScale(-50.0f, radius, max_scale, TE_CURVE_GAUSSIAN), 
-                     Catch::Matchers::WithinAbs(TE_MagnifyScale(50.0f, radius, max_scale, TE_CURVE_GAUSSIAN), 0.001f));
+    SECTION("All values in [0, 1]") {
+        for (int i = 0; i <= 100; ++i) {
+            float u = i * 0.01f;
+            float g = TE_MagnifyWeightGaussian(u);
+            float c = TE_MagnifyWeightCubic(u);
+            float cos = TE_MagnifyWeightCosine(u);
+            float l = TE_MagnifyWeightLinear(u);
+            
+            REQUIRE((g >= 0.0f && g <= 1.0f));
+            REQUIRE((c >= 0.0f && c <= 1.0f));
+            REQUIRE((cos >= 0.0f && cos <= 1.0f));
+            REQUIRE((l >= 0.0f && l <= 1.0f));
+        }
+    }
+
+    SECTION("Negative u clamped") {
+        REQUIRE(TE_MagnifyWeightGaussian(-0.5f) == 1.0f);
+        REQUIRE(TE_MagnifyWeightCubic(-0.5f) == 1.0f);
+        REQUIRE(TE_MagnifyWeightCosine(-0.5f) == 1.0f);
+        REQUIRE(TE_MagnifyWeightLinear(-0.5f) == 1.0f);
+    }
+
+    SECTION("u > 1 returns 0") {
+        REQUIRE(TE_MagnifyWeightGaussian(1.5f) == 0.0f);
+        REQUIRE(TE_MagnifyWeightCubic(1.5f) == 0.0f);
+        REQUIRE(TE_MagnifyWeightCosine(1.5f) == 0.0f);
+        REQUIRE(TE_MagnifyWeightLinear(1.5f) == 0.0f);
     }
 }
 
-TEST_CASE("Magnification Math - Batch Compute", "[magnification]") {
-    float centers[5] = {0.0f, 40.0f, 80.0f, 120.0f, 160.0f};
-    float scales[5] = {0};
-    
-    TE_MagnifyComputeScales(80.0f, centers, scales, 5, 80.0f, 1.5f, TE_CURVE_LINEAR);
-    
-    // Center icon at 80.0 is exactly at cursor
-    REQUIRE_THAT(scales[2], Catch::Matchers::WithinAbs(1.5f, 0.001f));
-    
-    // Icon at 40 and 120 are 40px away (half radius)
-    REQUIRE_THAT(scales[1], Catch::Matchers::WithinAbs(1.25f, 0.001f));
-    REQUIRE_THAT(scales[3], Catch::Matchers::WithinAbs(1.25f, 0.001f));
-    
-    // Icon at 0 and 160 are 80px away (full radius)
-    REQUIRE_THAT(scales[0], Catch::Matchers::WithinAbs(1.0f, 0.001f));
-    REQUIRE_THAT(scales[4], Catch::Matchers::WithinAbs(1.0f, 0.001f));
+TEST_CASE("Batch compute scale tests", "[magnification]") {
+    const int num_icons = 20;
+    std::vector<float> icon_centers(num_icons);
+    for (int i = 0; i < num_icons; ++i) {
+        icon_centers[i] = 20.0f + i * 40.0f;
+    }
+    std::vector<float> scales(num_icons);
+    float radius = 120.0f;
+    float max_scale = 1.5f;
+
+    TE_MagnifyCurveType curves[] = {
+        TE_CURVE_GAUSSIAN, TE_CURVE_CUBIC, TE_CURVE_COSINE, TE_CURVE_LINEAR
+    };
+
+    SECTION("Scale bounds") {
+        for (auto curve : curves) {
+            TE_MagnifyComputeScales(400.0f, icon_centers.data(), scales.data(), num_icons, radius, max_scale, curve);
+            for (float s : scales) {
+                REQUIRE(s >= 1.0f);
+                REQUIRE(s <= max_scale);
+            }
+        }
+    }
+
+    SECTION("Cursor on icon center") {
+        for (auto curve : curves) {
+            TE_MagnifyComputeScales(100.0f, icon_centers.data(), scales.data(), num_icons, radius, max_scale, curve);
+            REQUIRE(scales[2] == max_scale);
+        }
+    }
+
+    SECTION("Cursor far away") {
+        for (auto curve : curves) {
+            TE_MagnifyComputeScales(10000.0f, icon_centers.data(), scales.data(), num_icons, radius, max_scale, curve);
+            for (float s : scales) {
+                REQUIRE(s == 1.0f);
+            }
+        }
+    }
+
+    SECTION("Symmetry") {
+        for (auto curve : curves) {
+            // Cursor exactly between icon at idx 2 (100) and idx 3 (140) -> 120
+            TE_MagnifyComputeScales(120.0f, icon_centers.data(), scales.data(), num_icons, radius, max_scale, curve);
+            REQUIRE_THAT(scales[2], WithinAbs(scales[3], 0.0001f));
+        }
+    }
+
+    SECTION("Zero count") {
+        // Just verify no crash
+        TE_MagnifyComputeScales(100.0f, nullptr, nullptr, 0, radius, max_scale, TE_CURVE_LINEAR);
+        SUCCEED();
+    }
+
+    SECTION("Single icon") {
+        float center = 50.0f;
+        float scale = 0.0f;
+        TE_MagnifyComputeScales(50.0f, &center, &scale, 1, radius, max_scale, TE_CURVE_LINEAR);
+        REQUIRE(scale == max_scale);
+    }
+
+    SECTION("Zero radius") {
+        for (auto curve : curves) {
+            TE_MagnifyComputeScales(100.0f, icon_centers.data(), scales.data(), num_icons, 0.0f, max_scale, curve);
+            for (float s : scales) {
+                REQUIRE(s == 1.0f);
+            }
+        }
+    }
+
+    SECTION("max_scale = 1.0") {
+        for (auto curve : curves) {
+            TE_MagnifyComputeScales(100.0f, icon_centers.data(), scales.data(), num_icons, radius, 1.0f, curve);
+            for (float s : scales) {
+                REQUIRE(s == 1.0f);
+            }
+        }
+    }
+
+    SECTION("Curves produce distinct results") {
+        std::vector<float> scales_g(num_icons), scales_c(num_icons), scales_cos(num_icons), scales_l(num_icons);
+        TE_MagnifyComputeScales(110.0f, icon_centers.data(), scales_g.data(), num_icons, radius, max_scale, TE_CURVE_GAUSSIAN);
+        TE_MagnifyComputeScales(110.0f, icon_centers.data(), scales_c.data(), num_icons, radius, max_scale, TE_CURVE_CUBIC);
+        TE_MagnifyComputeScales(110.0f, icon_centers.data(), scales_cos.data(), num_icons, radius, max_scale, TE_CURVE_COSINE);
+        TE_MagnifyComputeScales(110.0f, icon_centers.data(), scales_l.data(), num_icons, radius, max_scale, TE_CURVE_LINEAR);
+        
+        // Icon at idx 3 (center 140) is distance 30 from cursor 110
+        // u = 30 / 120 = 0.25
+        REQUIRE(scales_g[3] != scales_c[3]);
+        REQUIRE(scales_c[3] != scales_cos[3]);
+        REQUIRE(scales_cos[3] != scales_l[3]);
+    }
 }

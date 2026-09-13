@@ -1,45 +1,41 @@
 #pragma once
-
 #include <sdk/te_types.h>
-#include <sdk/te_events.h>
-#include "core/plugin_loader.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-#define TE_MAX_FAULT_STRIKES        3
-#define TE_WATCHDOG_TIMEOUT_MS      100   /* For event callbacks */
-#define TE_WATCHDOG_INIT_TIMEOUT_MS 2000  /* For lifecycle calls (Init, Enable, Disable, Shutdown) */
+/** Maximum faults before a plugin is auto-disabled. */
+#define TE_MAX_FAULT_COUNT 3
+
+/** Plugin method with no arguments. */
+typedef HRESULT (*TE_PluginMethodVoid)(void);
+
+/** Plugin method receiving a PluginContext pointer. */
+typedef HRESULT (*TE_PluginMethodCtx)(const void* ctx);
 
 /**
- * @brief Invoke a plugin callback wrapped in SEH exception handling and 100ms watchdog timer.
- * @param entry Target plugin entry.
- * @param callback Void parameter callback pointer (Enable, Disable, Update, Shutdown).
- * @param callback_name Diagnostic string name of callback.
- * @return S_OK on success, or E_FAIL/E_ABORT on fault/timeout.
+ * Call a plugin method wrapped in SEH fault isolation.
+ * If the method throws an exception, it is caught, logged, and the plugin's
+ * fault counter is incremented. After 3 faults, the plugin is disabled.
+ *
+ * @param fault_count  Pointer to the plugin's fault counter (incremented on fault).
+ * @param plugin_name  Plugin name for logging.
+ * @param method_name  Method name string for logging.
+ * @param method       Function pointer to invoke.
+ * @return Result of method(), or TE_E_FAIL on exception.
+ * @note Thread Safety: Must be called on UI thread.
  */
-HRESULT TE_FaultIsolationCallPlugin(TE_PluginEntry* entry, HRESULT (*callback)(void), const char* callback_name);
+HRESULT TE_FaultIsolatedCall(int* fault_count, const char* plugin_name,
+                              const char* method_name, TE_PluginMethodVoid method);
 
 /**
- * @brief Invoke a plugin Initialize callback wrapped in SEH exception handling and 100ms watchdog timer.
- * @param entry Target plugin entry.
- * @param callback Plugin Initialize callback pointer.
- * @param ctx PluginContext pointer passed to Initialize.
- * @return S_OK on success, or E_FAIL/E_ABORT on fault/timeout.
+ * Exception filter for SEH. Logs the exception and returns EXCEPTION_EXECUTE_HANDLER.
+ * @param ep           Exception pointers.
+ * @param plugin_name  Plugin name for logging.
+ * @return EXCEPTION_EXECUTE_HANDLER.
  */
-HRESULT TE_FaultIsolationCallPluginInit(TE_PluginEntry* entry, HRESULT (*callback)(const PluginContext*), const PluginContext* ctx);
-
-/**
- * @brief Invoke an event callback wrapped in SEH exception handling. (No watchdog timer for performance).
- * @param entry Target plugin entry (may be NULL).
- * @param callback Event callback pointer.
- * @param type Event type.
- * @param event_data Event payload pointer.
- * @param user_data User context pointer.
- * @return S_OK on success, or E_FAIL on fault.
- */
-HRESULT TE_FaultIsolationCallEventCallback(TE_PluginEntry* entry, TE_EventCallback callback, TE_EventType type, const void* event_data, void* user_data);
+LONG TE_FaultFilter(EXCEPTION_POINTERS* ep, const char* plugin_name);
 
 #ifdef __cplusplus
 }

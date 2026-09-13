@@ -1,40 +1,43 @@
-#pragma once
+#ifndef TE_MAGNIFICATION_H
+#define TE_MAGNIFICATION_H
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-#define TE_MAX_TASKBAR_ICONS 64
-
-typedef enum {
+typedef enum TE_MagnifyCurveType {
     TE_CURVE_GAUSSIAN = 0,
-    TE_CURVE_COSINE,
-    TE_CURVE_LINEAR,
-    TE_CURVE_CUBIC
+    TE_CURVE_CUBIC    = 1,
+    TE_CURVE_COSINE   = 2,
+    TE_CURVE_LINEAR   = 3
 } TE_MagnifyCurveType;
 
-/**
- * @brief Compute the magnification scale for a single icon.
- * @param distance Distance from cursor to icon center.
- * @param radius Magnification effect radius.
- * @param max_scale Maximum scale at center.
- * @param curve Curve type.
- * @return Scale factor (>= 1.0f).
- */
-float TE_MagnifyScale(float distance, float radius, float max_scale, TE_MagnifyCurveType curve);
+// Individual weight functions.
+// Input: u = normalized distance in [0, 1] where 0 = cursor position, 1 = edge of radius
+// Output: weight in [0, 1] where 1 = full magnification, 0 = no magnification
+float TE_MagnifyWeightGaussian(float u);  // exp(-u^2 / (2 * sigma^2)), sigma = 0.4
+float TE_MagnifyWeightCubic(float u);     // (1 - u)^2 * (1 + 2*u)  — Hermite smoothstep
+float TE_MagnifyWeightCosine(float u);    // (1 + cos(pi * u)) / 2
+float TE_MagnifyWeightLinear(float u);    // 1 - u
 
-/**
- * @brief Batch compute magnification scales for an array of icons.
- * @param cursor_x X-coordinate of cursor.
- * @param icon_centers Array of original icon center X positions.
- * @param out_scales Output array of scale factors.
- * @param count Number of icons.
- * @param radius Magnification effect radius.
- * @param max_scale Maximum scale at center.
- * @param curve Curve type.
- */
-void TE_MagnifyComputeScales(float cursor_x, const float icon_centers[], float out_scales[], int count, float radius, float max_scale, TE_MagnifyCurveType curve);
+// Batch scale computation for N icons.
+// For each icon i:
+//   d = |cursor_x - icon_centers_x[i]|
+//   u = d / radius  (clamped: if u >= 1, scale = 1.0)
+//   scale = 1.0 + (max_scale - 1.0) * weight(u)
+// Guarantees: 1.0 <= out_scales[i] <= max_scale for all i
+void TE_MagnifyComputeScales(
+    float cursor_x,
+    const float* icon_centers_x,
+    float* out_scales,
+    int count,
+    float radius,
+    float max_scale,
+    TE_MagnifyCurveType curve
+);
 
 #ifdef __cplusplus
 }
 #endif
+
+#endif /* TE_MAGNIFICATION_H */

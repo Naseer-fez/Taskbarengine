@@ -1,16 +1,13 @@
-add_library(DummyPlugin SHARED dummy_plugin.c)
-
-target_include_directories(DummyPlugin PRIVATE
-    ${CMAKE_SOURCE_DIR}/SDK/include
-    ${CMAKE_SOURCE_DIR}/ThirdParty
+add_library(DummyPlugin SHARED
+    dummy_plugin.c
 )
 
-target_link_libraries(DummyPlugin PRIVATE te_sdk)
+target_link_libraries(DummyPlugin PRIVATE
+    te_sdk
+)
 
+# Place output in Modules directory for plugin discovery
 set_target_properties(DummyPlugin PROPERTIES
-    PREFIX ""
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/Tests/Modules"
-    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/Tests/Modules"
-    ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib/Tests/Modules"
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/Modules/dummy"
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/Modules/dummy"
 )
-set_target_properties(DummyPlugin PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")

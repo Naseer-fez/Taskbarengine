@@ -1,12 +1,17 @@
-#include "sdk/te_dpi.h"
+#include <sdk/te_dpi.h>
 
-int TE_ScaleDPI(int value, uint32_t dpi)
+int TE_ScaleDPI(int value, UINT dpi)
 {
-    if (value == 0) return 0;
-    int64_t scaled = (int64_t)value * (int64_t)dpi;
-    if (scaled >= 0) {
-        return (int)((scaled + 48) / 96);
-    } else {
-        return (int)((scaled - 48) / 96);
+    if (dpi == 0) {
+        return 0;
     }
+    return MulDiv(value, (int)dpi, 96);
+}
+
+int TE_UnscaleDPI(int value, UINT dpi)
+{
+    if (dpi == 0) {
+        return 0;
+    }
+    return MulDiv(value, 96, (int)dpi);
 }

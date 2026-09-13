@@ -1,43 +1,67 @@
 #pragma once
-
 #include <sdk/te_types.h>
-#include <cJSON.h>
-#include <wchar.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-/**
- * @brief Resolve absolute path to config.jsonc in LocalAppData directory.
- * @param buf Wide char buffer to receive absolute file path.
- * @param buf_len Length of buffer in wchar_t elements.
- * @return S_OK on success, or E_POINTER / error HRESULT.
- */
-HRESULT TE_ConfigResolvePath(wchar_t* buf, size_t buf_len);
+struct cJSON;
 
 /**
- * @brief Load and parse JSONC config file from disk. Creates default config if missing.
- * @param path Wide char file path, or NULL to use default resolved path.
- * @param out_root Pointer to receive parsed cJSON root node.
- * @return S_OK on success, or error HRESULT.
+ * Load and parse a JSONC configuration file.
+ * @param path      Wide-char path to the config.jsonc file.
+ * @param out_root  Receives the parsed cJSON root. Caller must free via TE_JsoncFree().
+ * @return TE_S_OK on success.
+ * @note Thread Safety: Thread-safe.
  */
-HRESULT TE_ConfigLoad(const wchar_t* path, cJSON** out_root);
+HRESULT TE_ConfigLoad(const wchar_t* path, struct cJSON** out_root);
 
 /**
- * @brief Extract plugin-specific configuration section from root config.
- * @param root Parsed cJSON root configuration object.
- * @param plugin_name Plugin identifier string.
- * @return Pointer to plugin cJSON sub-object, or NULL if missing/invalid.
+ * Get the "plugins.<name>" sub-object from a parsed config root.
+ * @param root        Parsed config root.
+ * @param plugin_name Plugin name key (e.g., "taskbar_resize").
+ * @return Pointer to the plugin's cJSON sub-object, or NULL if not found.
+ * @note Thread Safety: Thread-safe if root is not being mutated.
  */
-const cJSON* TE_ConfigGetPluginSection(const cJSON* root, const char* plugin_name);
+const struct cJSON* TE_ConfigGetPluginSection(const struct cJSON* root, const char* plugin_name);
 
 /**
- * @brief Extract core engine configuration section from root config.
- * @param root Parsed cJSON root configuration object.
- * @return Pointer to core cJSON sub-object, or NULL if missing.
+ * Read an integer value from a config section with a default fallback.
+ * @note Thread Safety: Thread-safe if section is not being mutated.
  */
-const cJSON* TE_ConfigGetCoreSection(const cJSON* root);
+int TE_ConfigGetInt(const struct cJSON* section, const char* key, int default_val);
+
+/**
+ * Read a float value from a config section with a default fallback.
+ * @note Thread Safety: Thread-safe if section is not being mutated.
+ */
+float TE_ConfigGetFloat(const struct cJSON* section, const char* key, float default_val);
+
+/**
+ * Read a boolean value from a config section with a default fallback.
+ * @note Thread Safety: Thread-safe if section is not being mutated.
+ */
+BOOL TE_ConfigGetBool(const struct cJSON* section, const char* key, BOOL default_val);
+
+/**
+ * Read a string value from a config section with a default fallback.
+ * @return Pointer to internal cJSON string (do NOT free), or default_val if missing.
+ * @note Thread Safety: Thread-safe if section is not being mutated.
+ */
+const char* TE_ConfigGetString(const struct cJSON* section, const char* key, const char* default_val);
+
+/**
+ * Compare two config roots and find which plugin sections changed.
+ * @param old_root       Previous config root (may be NULL for first load).
+ * @param new_root       New config root.
+ * @param changed_names  Output array of plugin name strings (points into cJSON internals).
+ * @param out_count      Receives the number of changed plugin names.
+ * @param max_count      Maximum entries in changed_names array.
+ * @return TRUE if any differences found, FALSE otherwise.
+ * @note Thread Safety: Thread-safe if both roots are not being mutated.
+ */
+BOOL TE_ConfigDiffPlugins(const struct cJSON* old_root, const struct cJSON* new_root,
+                          const char** changed_names, int* out_count, int max_count);
 
 #ifdef __cplusplus
 }

@@ -1,88 +1,133 @@
 #include "core/event_dispatch.h"
-#include "core/plugin_loader.h"
-#include "core/fault_isolation.h"
 #include <windows.h>
+#include <string.h>
 #include <sdk/te_log.h>
 
-void TE_EventDispatchInit(TE_EventEntry* table, uint32_t* count)
+typedef struct TE_Subscription {
+    uint32_t event_type;
+    TE_EventCallback callback;
+    void* user_data;
+    uint32_t plugin_id;
+    BOOL active;
+} TE_Subscription;
+
+static TE_Subscription g_subscriptions[TE_MAX_SUBSCRIPTIONS];
+static uint32_t g_subscription_count = 0;
+static CRITICAL_SECTION g_event_cs;
+
+HRESULT TE_EventDispatchInit(void)
 {
-    if (table && count) {
-        *count = 0;
-        ZeroMemory(table, sizeof(TE_EventEntry) * TE_MAX_SUBSCRIPTIONS);
-    }
+    InitializeCriticalSection(&g_event_cs);
+    memset(g_subscriptions, 0, sizeof(g_subscriptions));
+    g_subscription_count = 0;
+    return TE_S_OK;
 }
 
-HRESULT TE_EventSubscribeEx(TE_EventEntry* table, uint32_t* count, TE_EventType type, TE_EventCallback cb, void* user_data, uint32_t plugin_id, void* plugin_entry)
+void TE_EventDispatchShutdown(void)
 {
-    if (!table || !count || !cb) return E_POINTER;
-    if (*count >= TE_MAX_SUBSCRIPTIONS) {
-        TE_LogWrite(TE_LOG_WARN, "Event subscribe failed: max subscriptions (%d) reached", TE_MAX_SUBSCRIPTIONS);
-        return E_OUTOFMEMORY;
-    }
+    memset(g_subscriptions, 0, sizeof(g_subscriptions));
+    g_subscription_count = 0;
+    DeleteCriticalSection(&g_event_cs);
+}
 
-    /* Check if already subscribed */
-    for (uint32_t i = 0; i < *count; i++) {
-        if (table[i].type == type && table[i].callback == cb && table[i].user_data == user_data) {
-            table[i].plugin_entry = plugin_entry;
-            return S_OK; /* Already subscribed */
+HRESULT TE_EventDispatchSubscribe(uint32_t event_type, TE_EventCallback callback,
+                                   void* user_data, uint32_t plugin_id)
+{
+    if (!callback) return TE_E_INVALIDARG;
+    
+    HRESULT hr = TE_E_FAIL;
+    EnterCriticalSection(&g_event_cs);
+    
+    if (g_subscription_count < TE_MAX_SUBSCRIPTIONS) {
+        for (uint32_t i = 0; i < TE_MAX_SUBSCRIPTIONS; ++i) {
+            if (!g_subscriptions[i].active) {
+                g_subscriptions[i].event_type = event_type;
+                g_subscriptions[i].callback = callback;
+                g_subscriptions[i].user_data = user_data;
+                g_subscriptions[i].plugin_id = plugin_id;
+                g_subscriptions[i].active = TRUE;
+                g_subscription_count++;
+                hr = TE_S_OK;
+                break;
+            }
         }
     }
-
-    table[*count].type = type;
-    table[*count].callback = cb;
-    table[*count].user_data = user_data;
-    table[*count].plugin_id = plugin_id;
-    table[*count].plugin_entry = plugin_entry;
-    (*count)++;
-
-    return S_OK;
+    
+    LeaveCriticalSection(&g_event_cs);
+    return hr;
 }
 
-HRESULT TE_EventSubscribe(TE_EventEntry* table, uint32_t* count, TE_EventType type, TE_EventCallback cb, void* user_data, uint32_t plugin_id)
+HRESULT TE_EventDispatchUnsubscribe(uint32_t event_type, TE_EventCallback callback)
 {
-    return TE_EventSubscribeEx(table, count, type, cb, user_data, plugin_id, NULL);
-}
+    if (!callback) return TE_E_INVALIDARG;
 
-HRESULT TE_EventUnsubscribe(TE_EventEntry* table, uint32_t* count, TE_EventType type, TE_EventCallback cb)
-{
-    if (!table || !count || !cb) return E_POINTER;
+    HRESULT hr = TE_E_FAIL;
+    EnterCriticalSection(&g_event_cs);
 
-    for (uint32_t i = 0; i < *count; i++) {
-        if (table[i].type == type && table[i].callback == cb) {
-            /* Shift remaining entries left */
-            for (uint32_t j = i; j < *count - 1; j++) {
-                table[j] = table[j + 1];
-            }
-            (*count)--;
-            ZeroMemory(&table[*count], sizeof(TE_EventEntry));
-            return S_OK;
+    for (uint32_t i = 0; i < TE_MAX_SUBSCRIPTIONS; ++i) {
+        if (g_subscriptions[i].active && 
+            g_subscriptions[i].event_type == event_type && 
+            g_subscriptions[i].callback == callback) {
+            
+            g_subscriptions[i].active = FALSE;
+            g_subscription_count--;
+            hr = TE_S_OK;
+            break;
         }
     }
-
-    return S_FALSE; /* Not found */
+    
+    LeaveCriticalSection(&g_event_cs);
+    return hr;
 }
 
-void TE_EventDispatchTargeted(const TE_EventEntry* table, uint32_t count, TE_EventType type, const void* event_data, uint32_t target_plugin_id)
+void TE_EventDispatchFire(uint32_t event_type, const void* event_data)
 {
-    if (!table || count == 0) return;
-
-    for (int32_t i = (int32_t)count - 1; i >= 0; i--) {
-        if (table[i].type == type && table[i].callback != NULL) {
-            if (target_plugin_id != 0 && table[i].plugin_id != 0 && table[i].plugin_id != target_plugin_id) {
-                continue; /* Skip event for non-targeted plugins */
-            }
-
-            TE_PluginEntry* entry = (TE_PluginEntry*)table[i].plugin_entry;
-            if (entry && (!entry->enabled || entry->disabled_by_fault)) {
-                continue; /* Skip disabled or fault-disabled plugins */
-            }
-
-            TE_FaultIsolationCallEventCallback(entry, table[i].callback, type, event_data, table[i].user_data);
+    EnterCriticalSection(&g_event_cs);
+    
+    /* Make a copy of active callbacks to avoid deadlocks or issues if a callback subscribes/unsubscribes */
+    TE_Subscription local_subs[TE_MAX_SUBSCRIPTIONS];
+    uint32_t local_count = 0;
+    
+    for (uint32_t i = 0; i < TE_MAX_SUBSCRIPTIONS; ++i) {
+        if (g_subscriptions[i].active && g_subscriptions[i].event_type == event_type) {
+            local_subs[local_count++] = g_subscriptions[i];
         }
+    }
+    
+    LeaveCriticalSection(&g_event_cs);
+    
+    for (uint32_t i = 0; i < local_count; ++i) {
+#ifdef _MSC_VER
+        __try {
+            local_subs[i].callback(event_type, event_data, local_subs[i].user_data);
+        } __except(EXCEPTION_EXECUTE_HANDLER) {
+            TE_LogWrite(TE_LOG_ERROR, "EventDispatch", "Exception caught in event callback");
+        }
+#else
+        local_subs[i].callback(event_type, event_data, local_subs[i].user_data);
+#endif
     }
 }
 
-void TE_EventDispatch(const TE_EventEntry* table, uint32_t count, TE_EventType type, const void* event_data)
+void TE_EventDispatchRemoveByPlugin(uint32_t plugin_id)
 {
-    TE_EventDispatchTargeted(table, count, type, event_data, 0);
+    EnterCriticalSection(&g_event_cs);
+    
+    for (uint32_t i = 0; i < TE_MAX_SUBSCRIPTIONS; ++i) {
+        if (g_subscriptions[i].active && g_subscriptions[i].plugin_id == plugin_id) {
+            g_subscriptions[i].active = FALSE;
+            g_subscription_count--;
+        }
+    }
+    
+    LeaveCriticalSection(&g_event_cs);
+}
+
+uint32_t TE_EventDispatchGetCount(void)
+{
+    uint32_t count = 0;
+    EnterCriticalSection(&g_event_cs);
+    count = g_subscription_count;
+    LeaveCriticalSection(&g_event_cs);
+    return count;
 }

@@ -1,15 +1,6 @@
 #pragma once
+#include <windows.h>
+#include <sdk/te_types.h>
 
-#include "core/event_dispatch.h"
-
-#ifdef __cplusplus
-extern "C" {
-#endif
-
-HRESULT TE_PowerDeviceStart(HWND hwnd, TE_EventEntry* event_table, uint32_t* sub_count);
-void TE_PowerDeviceStop(void);
-bool TE_PowerDeviceHandleMessage(UINT msg, WPARAM wparam, LPARAM lparam);
-
-#ifdef __cplusplus
-}
-#endif
+void TE_PowerProcess(WPARAM wParam, LPARAM lParam);
+void TE_DeviceProcess(WPARAM wParam, LPARAM lParam);

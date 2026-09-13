@@ -52,14 +52,14 @@ HRESULT TE_GetWindowsVersion(TE_WindowsVersion* version)
     if (InterlockedCompareExchange(&g_version_initialized, 1, 0) == 0) {
         HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
         if (!ntdll) {
-            InterlockedExchange(&g_version_initialized, 0);
+            InterlockedExchange(&g_version_initialized, -1);
             return E_FAIL;
         }
 
         RtlGetVersionFunc rtl_get_version =
             (RtlGetVersionFunc)(void*)GetProcAddress(ntdll, "RtlGetVersion");
         if (!rtl_get_version) {
-            InterlockedExchange(&g_version_initialized, 0);
+            InterlockedExchange(&g_version_initialized, -1);
             return E_FAIL;
         }
 
@@ -69,7 +69,7 @@ HRESULT TE_GetWindowsVersion(TE_WindowsVersion* version)
 
         LONG ntstatus = rtl_get_version(&vi);
         if (ntstatus != 0 /* STATUS_SUCCESS */) {
-            InterlockedExchange(&g_version_initialized, 0);
+            InterlockedExchange(&g_version_initialized, -1);
             return E_FAIL;
         }
 
@@ -90,9 +90,13 @@ HRESULT TE_GetWindowsVersion(TE_WindowsVersion* version)
         InterlockedExchange(&g_version_initialized, 2);
     }
 
-    /* Spin-wait for the initializing thread to finish (extremely brief) */
-    while (InterlockedCompareExchange(&g_version_initialized, 2, 2) != 2) {
+    /* Wait for the initializing thread to finish (extremely brief) */
+    while (InterlockedCompareExchange(&g_version_initialized, 0, 0) == 1) {
         YieldProcessor();
+    }
+
+    if (g_version_initialized != 2) {
+        return E_FAIL;
     }
 
     *version = g_cached_version;
@@ -110,8 +114,7 @@ BOOL TE_IsBuildInRange(uint32_t build, uint32_t min_build, uint32_t max_build)
         return FALSE;
     }
     if (max_build > 0 && build > max_build) {
-        /* Build is beyond max tested, but we allow it (with a warning from caller) */
-        return TRUE;
+        return FALSE;
     }
     return TRUE;
 }

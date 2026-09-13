@@ -1,82 +1,88 @@
 #include "app/crash_recovery.h"
-#include <sdk/te_debug_trace.h>
+#include <process.h>
+#include <strsafe.h>
 
-static HANDLE g_thread = NULL;
-static HANDLE g_stop_event = NULL;
-static HWND g_hwnd = NULL;
-static UINT g_taskbar_created_msg = 0;
-static volatile LONG g_state = TE_CRASH_RECOVERY_RUNNING;
+static HANDLE g_monitor_thread = NULL;
+static BOOL g_stop_monitor = FALSE;
+static HWND g_main_hwnd = NULL;
+static HMODULE g_dll_handle = NULL;
+static HHOOK g_recovered_hook = NULL;
 
-TE_CrashRecoveryState TE_CrashRecoveryAdvance(TE_CrashRecoveryState state, UINT msg, bool explorer_dead)
-{
-    if (state == TE_CRASH_RECOVERY_RUNNING && explorer_dead) return TE_CRASH_RECOVERY_EXPLORER_DEAD;
-    if (state == TE_CRASH_RECOVERY_EXPLORER_DEAD) return TE_CRASH_RECOVERY_WAITING_TASKBAR_CREATED;
-    if (state == TE_CRASH_RECOVERY_WAITING_TASKBAR_CREATED && msg == g_taskbar_created_msg) return TE_CRASH_RECOVERY_REHOOKING;
-    if (state == TE_CRASH_RECOVERY_REHOOKING) return TE_CRASH_RECOVERY_RUNNING;
-    return state;
-}
+static unsigned int __stdcall MonitorThread(void* arg) {
+    (void)arg;
 
-static DWORD WINAPI RecoveryThreadProc(LPVOID param)
-{
-    DWORD explorer_pid = (DWORD)(uintptr_t)param;
-    HANDLE explorer = OpenProcess(SYNCHRONIZE, FALSE, explorer_pid);
-    if (!explorer) return 0;
-
-    HANDLE waits[2] = { g_stop_event, explorer };
-    DWORD wait = WaitForMultipleObjects(2, waits, FALSE, INFINITE);
-    if (wait == WAIT_OBJECT_0 + 1) {
-        InterlockedExchange(&g_state, TE_CRASH_RECOVERY_WAITING_TASKBAR_CREATED);
-        TE_DebugTrace("[TE-DBG] CrashRecovery: Explorer process exited, waiting for TaskbarCreated\n");
-        /* Message-only windows do not receive broadcast TaskbarCreated
-         * notifications.  Explicitly notify the tray host after Explorer
-         * exits so it can reinstall the hook for the replacement process. */
-        if (g_hwnd && g_taskbar_created_msg) {
-            PostMessageW(g_hwnd, g_taskbar_created_msg, 0, 0);
-        }
+    HDESK hDesk = OpenInputDesktop(0, FALSE, GENERIC_ALL);
+    if (hDesk) {
+        SetThreadDesktop(hDesk);
+        CloseDesktop(hDesk);
     }
 
-    CloseHandle(explorer);
+    while (!g_stop_monitor) {
+        HWND taskbar_hwnd = FindWindowW(L"Shell_TrayWnd", NULL);
+        if (taskbar_hwnd) {
+            DWORD explorer_pid;
+            DWORD explorer_tid = GetWindowThreadProcessId(taskbar_hwnd, &explorer_pid);
+            HANDLE hThread = OpenThread(SYNCHRONIZE, FALSE, explorer_tid);
+            if (hThread) {
+                while (!g_stop_monitor) {
+                    DWORD res = WaitForSingleObject(hThread, 500);
+                    if (res == WAIT_OBJECT_0) {
+                        break;
+                    }
+                }
+                CloseHandle(hThread);
+                
+                if (!g_stop_monitor) {
+                    Sleep(2000);
+                    
+                    HWND new_taskbar = NULL;
+                    for (int i=0; i<10; i++) {
+                        new_taskbar = FindWindowW(L"Shell_TrayWnd", NULL);
+                        if (new_taskbar) break;
+                        Sleep(500);
+                    }
+                    
+                    if (new_taskbar) {
+                        DWORD new_tid = GetWindowThreadProcessId(new_taskbar, NULL);
+                        HOOKPROC hook_proc = (HOOKPROC)GetProcAddress(g_dll_handle, "TE_GetMsgHookProc");
+                        if (!hook_proc) {
+                            hook_proc = (HOOKPROC)GetProcAddress(g_dll_handle, "TE_CBTHookProc");
+                        }
+                        if (hook_proc) {
+                            if (g_recovered_hook) {
+                                UnhookWindowsHookEx(g_recovered_hook);
+                                g_recovered_hook = NULL;
+                            }
+                            g_recovered_hook = SetWindowsHookExW(WH_GETMESSAGE, hook_proc, g_dll_handle, new_tid);
+                            if (g_recovered_hook) {
+                                PostMessageW(new_taskbar, WM_NULL, 0, 0);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Sleep(500);
+    }
     return 0;
 }
 
-HRESULT TE_CrashRecoveryStart(HWND hwnd, DWORD explorer_pid, TE_ReinstallHookFunc reinstall_hook, void* context)
-{
-    (void)reinstall_hook;
-    (void)context;
-    if (g_thread) return S_OK;
-
-    g_hwnd = hwnd;
-    g_taskbar_created_msg = RegisterWindowMessageW(L"TaskbarCreated");
-    g_stop_event = CreateEventW(NULL, TRUE, FALSE, NULL);
-    if (!g_stop_event) return HRESULT_FROM_WIN32(GetLastError());
-
-    g_thread = CreateThread(NULL, 0, RecoveryThreadProc, (LPVOID)(uintptr_t)explorer_pid, 0, NULL);
-    if (!g_thread) {
-        HRESULT hr = HRESULT_FROM_WIN32(GetLastError());
-        CloseHandle(g_stop_event);
-        g_stop_event = NULL;
-        return hr;
-    }
-
-    InterlockedExchange(&g_state, TE_CRASH_RECOVERY_RUNNING);
-    return S_OK;
+void TE_CrashRecoveryStart(HWND main_hwnd, HMODULE dll_handle) {
+    g_main_hwnd = main_hwnd;
+    g_dll_handle = dll_handle;
+    g_stop_monitor = FALSE;
+    g_monitor_thread = (HANDLE)_beginthreadex(NULL, 0, MonitorThread, NULL, 0, NULL);
 }
 
-void TE_CrashRecoveryStop(void)
-{
-    if (g_stop_event) SetEvent(g_stop_event);
-    if (g_thread) {
-        WaitForSingleObject(g_thread, 1000);
-        CloseHandle(g_thread);
-        g_thread = NULL;
+void TE_CrashRecoveryStop(void) {
+    if (g_monitor_thread) {
+        g_stop_monitor = TRUE;
+        WaitForSingleObject(g_monitor_thread, INFINITE);
+        CloseHandle(g_monitor_thread);
+        g_monitor_thread = NULL;
     }
-    if (g_stop_event) {
-        CloseHandle(g_stop_event);
-        g_stop_event = NULL;
+    if (g_recovered_hook) {
+        UnhookWindowsHookEx(g_recovered_hook);
+        g_recovered_hook = NULL;
     }
-}
-
-TE_CrashRecoveryState TE_CrashRecoveryGetState(void)
-{
-    return (TE_CrashRecoveryState)InterlockedCompareExchange(&g_state, 0, 0);
 }

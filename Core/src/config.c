@@ -1,110 +1,123 @@
 #include "core/config.h"
+#include <string.h>
 #include <sdk/te_jsonc.h>
-#include <sdk/te_log.h>
-#include <shlobj.h>
-#include <stdio.h>
+#include <cJSON.h>
 
-static const char* DEFAULT_CONFIG_CONTENT =
-"{\n"
-"    \"version\": 1,\n"
-"    \"core\": {\n"
-"        \"log_level\": \"info\",\n"
-"        \"log_to_file\": true\n"
-"    },\n"
-"    \"plugin\": {\n"
-"        \"taskbar_resize\": {\n"
-"            \"enabled\": false,\n"
-"            \"height\": 48,\n"
-"            \"padding\": 4,\n"
-"            \"margins\": 0,\n"
-"            \"icon_spacing\": 8\n"
-"        },\n"
-"        \"icon_hover\": {\n"
-"            \"enabled\": true,\n"
-"            \"scale\": 1.35,\n"
-"            \"radius\": 130,\n"
-"            \"curve\": \"gaussian\",\n"
-"            \"speed_ms\": 150\n"
-"        }\n"
-"    }\n"
-"}\n";
-
-HRESULT TE_ConfigResolvePath(wchar_t* buf, size_t buf_len)
+HRESULT TE_ConfigLoad(const wchar_t* path, struct cJSON** out_root)
 {
-    if (!buf || buf_len < MAX_PATH) return E_POINTER;
-
-    PWSTR local_appdata = NULL;
-    HRESULT hr = SHGetKnownFolderPath(&FOLDERID_LocalAppData, 0, NULL, &local_appdata);
-    if (SUCCEEDED(hr)) {
-        int written = swprintf(buf, buf_len, L"%s\\TaskbarEngine\\config.jsonc", local_appdata);
-        CoTaskMemFree(local_appdata);
-        if (written < 0 || (size_t)written >= buf_len) {
-            buf[0] = L'\0';
-            return HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER);
-        }
-        return S_OK;
-    }
-
-    return wcscpy_s(buf, buf_len, L"config.jsonc") == 0 ? S_OK : E_FAIL;
+    if (!path || !out_root) return TE_E_INVALIDARG;
+    return TE_JsoncParseFile(path, out_root);
 }
 
-HRESULT TE_ConfigLoad(const wchar_t* path, cJSON** out_root)
-{
-    if (!out_root) return E_POINTER;
-
-    wchar_t resolved_path[MAX_PATH];
-    if (!path || path[0] == L'\0') {
-        TE_ConfigResolvePath(resolved_path, MAX_PATH);
-        path = resolved_path;
-    }
-
-    DWORD attribs = GetFileAttributesW(path);
-    if (attribs == INVALID_FILE_ATTRIBUTES) {
-        /* File does not exist, create directory and default file */
-        wchar_t dir_path[MAX_PATH];
-        wcsncpy(dir_path, path, MAX_PATH - 1);
-        dir_path[MAX_PATH - 1] = L'\0';
-        wchar_t* last_slash = wcsrchr(dir_path, L'\\');
-        if (last_slash) {
-            *last_slash = L'\0';
-            SHCreateDirectoryExW(NULL, dir_path, NULL);
-        }
-
-        HANDLE hfile = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
-        if (hfile != INVALID_HANDLE_VALUE) {
-            DWORD written = 0;
-            WriteFile(hfile, DEFAULT_CONFIG_CONTENT, (DWORD)strlen(DEFAULT_CONFIG_CONTENT), &written, NULL);
-            CloseHandle(hfile);
-            TE_LogWrite(TE_LOG_INFO, "Created default config file at: %ls", path);
-        }
-    }
-
-    cJSON* root = NULL;
-    HRESULT hr_p = TE_JsoncParse(path, &root);
-    if (FAILED(hr_p) || !root) {
-        TE_LogWrite(TE_LOG_ERROR, "Failed to parse config file at: %ls", path);
-        return E_FAIL;
-    }
-
-    cJSON* ver = cJSON_GetObjectItemCaseSensitive(root, "version");
-    if (!ver || !cJSON_IsNumber(ver) || ver->valueint < 1) {
-        TE_LogWrite(TE_LOG_WARN, "Config version missing or invalid, assuming version 1");
-    }
-
-    *out_root = root;
-    return S_OK;
-}
-
-const cJSON* TE_ConfigGetPluginSection(const cJSON* root, const char* plugin_name)
+const struct cJSON* TE_ConfigGetPluginSection(const struct cJSON* root, const char* plugin_name)
 {
     if (!root || !plugin_name) return NULL;
-    const cJSON* plugin_group = cJSON_GetObjectItemCaseSensitive(root, "plugin");
-    if (!plugin_group || !cJSON_IsObject(plugin_group)) return NULL;
-    return cJSON_GetObjectItemCaseSensitive(plugin_group, plugin_name);
+    
+    const struct cJSON* plugins = cJSON_GetObjectItem(root, "plugins");
+    if (!plugins) return NULL;
+    
+    return cJSON_GetObjectItem(plugins, plugin_name);
 }
 
-const cJSON* TE_ConfigGetCoreSection(const cJSON* root)
+int TE_ConfigGetInt(const struct cJSON* section, const char* key, int default_val)
 {
-    if (!root) return NULL;
-    return cJSON_GetObjectItemCaseSensitive(root, "core");
+    if (!section || !key) return default_val;
+    
+    const struct cJSON* item = cJSON_GetObjectItem(section, key);
+    if (item && cJSON_IsNumber(item)) {
+        return item->valueint;
+    }
+    return default_val;
+}
+
+float TE_ConfigGetFloat(const struct cJSON* section, const char* key, float default_val)
+{
+    if (!section || !key) return default_val;
+    
+    const struct cJSON* item = cJSON_GetObjectItem(section, key);
+    if (item && cJSON_IsNumber(item)) {
+        return (float)item->valuedouble;
+    }
+    return default_val;
+}
+
+BOOL TE_ConfigGetBool(const struct cJSON* section, const char* key, BOOL default_val)
+{
+    if (!section || !key) return default_val;
+    
+    const struct cJSON* item = cJSON_GetObjectItem(section, key);
+    if (item && cJSON_IsBool(item)) {
+        return cJSON_IsTrue(item);
+    }
+    return default_val;
+}
+
+const char* TE_ConfigGetString(const struct cJSON* section, const char* key, const char* default_val)
+{
+    if (!section || !key) return default_val;
+    
+    const struct cJSON* item = cJSON_GetObjectItem(section, key);
+    if (item && cJSON_IsString(item)) {
+        return cJSON_GetStringValue(item);
+    }
+    return default_val;
+}
+
+BOOL TE_ConfigDiffPlugins(const struct cJSON* old_root, const struct cJSON* new_root,
+                          const char** changed_names, int* out_count, int max_count)
+{
+    if (!new_root || !changed_names || !out_count || max_count <= 0) return FALSE;
+    
+    *out_count = 0;
+    BOOL diff_found = FALSE;
+    
+    const struct cJSON* new_plugins = cJSON_GetObjectItem(new_root, "plugins");
+    const struct cJSON* old_plugins = old_root ? cJSON_GetObjectItem(old_root, "plugins") : NULL;
+    
+    if (!new_plugins) {
+        if (old_plugins && old_plugins->child) {
+            // All plugins were removed
+            struct cJSON* old_child = old_plugins->child;
+            while (old_child && *out_count < max_count) {
+                if (old_child->string) {
+                    changed_names[*out_count] = old_child->string;
+                    (*out_count)++;
+                    diff_found = TRUE;
+                }
+                old_child = old_child->next;
+            }
+        }
+        return diff_found;
+    }
+
+    // Check for new/modified plugins
+    struct cJSON* new_child = new_plugins->child;
+    while (new_child && *out_count < max_count) {
+        if (new_child->string) {
+            const struct cJSON* old_child = old_plugins ? cJSON_GetObjectItem(old_plugins, new_child->string) : NULL;
+            if (!old_child || !cJSON_Compare(new_child, old_child, cJSON_True)) {
+                changed_names[*out_count] = new_child->string;
+                (*out_count)++;
+                diff_found = TRUE;
+            }
+        }
+        new_child = new_child->next;
+    }
+
+    // Check for removed plugins
+    if (old_plugins) {
+        struct cJSON* old_child = old_plugins->child;
+        while (old_child && *out_count < max_count) {
+            if (old_child->string) {
+                if (!cJSON_GetObjectItem(new_plugins, old_child->string)) {
+                    changed_names[*out_count] = old_child->string;
+                    (*out_count)++;
+                    diff_found = TRUE;
+                }
+            }
+            old_child = old_child->next;
+        }
+    }
+
+    return diff_found;
 }

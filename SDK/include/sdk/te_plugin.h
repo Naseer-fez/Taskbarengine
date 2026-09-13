@@ -1,228 +1,268 @@
 #pragma once
 
-#include "te_types.h"
-#include "te_version.h"
-#include "te_log.h"
-#include <cJSON.h>
+#include <sdk/te_types.h>
+#include <sdk/te_log.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-/* Forward declarations */
-struct PluginContext;
-struct PluginMetadata;
-struct PluginSettings;
+/** Forward declaration of cJSON struct from parser library. */
+struct cJSON;
+typedef struct cJSON cJSON;
 
 /**
- * @brief Setting value types for GUI auto-generation.
+ * Setting types for automatic GUI configuration control generation.
  */
 typedef enum SettingType {
-    TE_SETTING_BOOL,
-    TE_SETTING_INT,
-    TE_SETTING_FLOAT,
-    TE_SETTING_STRING,
-    TE_SETTING_ENUM,
-    TE_SETTING_COLOR
+    TE_SETTING_BOOL = 0,    /**< Boolean toggle checkbox / switch. */
+    TE_SETTING_INT,         /**< Integer slider or spin box with min/max/step. */
+    TE_SETTING_FLOAT,       /**< Floating-point slider or numeric field with min/max/step. */
+    TE_SETTING_STRING,      /**< Text entry field. */
+    TE_SETTING_ENUM,        /**< Dropdown selector with a list of discrete options. */
+    TE_SETTING_COLOR        /**< Color picker storing 32-bit ARGB/RGBA color value. */
 } SettingType;
 
 /**
- * @brief Setting descriptor structure for GUI generation.
+ * Schema descriptor for a single configurable setting in a plugin.
+ * Used by the settings GUI to dynamically render controls and validate inputs.
  */
 typedef struct SettingDescriptor {
-    const char* key;
-    const char* label;
-    const char* tooltip;
-    SettingType type;
+    const char* key;        /**< Unique configuration key name within the plugin's config object. */
+    const char* label;      /**< User-facing label displayed in the configuration UI. */
+    const char* tooltip;    /**< Descriptive tooltip explaining the setting purpose. */
+    SettingType type;       /**< Data type determining which union field is populated. */
     union {
-        struct { bool default_val; } b;
-        struct { int default_val; int min; int max; int step; } i;
-        struct { float default_val; float min; float max; float step; } f;
-        struct { const char* default_val; } s;
-        struct { const char* default_val; const char** options; int count; } e;
-        struct { uint32_t default_val; } color;
-    } value;
+        struct { int default_val; int min_val; int max_val; int step; } int_val;
+        struct { float default_val; float min_val; float max_val; float step; } float_val;
+        struct { int default_val; } bool_val;
+        struct { const char* default_val; } string_val;
+        struct { int default_val; const char** options; int option_count; } enum_val;
+        struct { uint32_t default_val; } color_val;
+    } value;                /**< Type-specific defaults and validation constraints. */
 } SettingDescriptor;
 
 /**
- * @brief Container for plugin settings schema.
+ * Array container of setting descriptors exposed by a plugin.
  */
 typedef struct PluginSettings {
-    const SettingDescriptor* descriptors;
-    size_t count;
+    const SettingDescriptor* descriptors;   /**< Pointer to array of setting descriptors. */
+    uint32_t count;                         /**< Number of descriptors in the array. */
 } PluginSettings;
 
 /**
- * @brief Plugin metadata description.
- *
- * Returned by GetMetadata(). The engine reads this to determine plugin
- * identity, priority ordering, and build compatibility.
- */
-typedef struct PluginMetadata {
-    const char* name;
-    const char* version;
-    const char* author;
-    const char* description;
-    uint32_t priority;
-    TE_PluginCompatibility compatibility;  /**< Windows build range (v2). Zero = no restriction. */
-} PluginMetadata;
-
-/**
- * @brief Shared inter-plugin state value type.
+ * Data type tag for StateValue union.
  */
 typedef enum StateValueType {
-    TE_STATE_TYPE_INT,
-    TE_STATE_TYPE_FLOAT,
-    TE_STATE_TYPE_BOOL,
-    TE_STATE_TYPE_RECT
+    TE_STATE_INT = 0,       /**< 32-bit signed integer value. */
+    TE_STATE_FLOAT,         /**< Single-precision floating point value. */
+    TE_STATE_BOOL,          /**< Boolean value (0 = false, non-zero = true). */
+    TE_STATE_RECT           /**< Win32 RECT structure value. */
 } StateValueType;
 
+/**
+ * Variant value container for inter-plugin shared state blackboard.
+ */
 typedef struct StateValue {
-    StateValueType type;
+    StateValueType type;    /**< Discriminator indicating the active union field. */
     union {
-        int i;
-        float f;
-        bool b;
-        RECT rect;
-    } value;
+        int int_val;        /**< Integer payload when type == TE_STATE_INT. */
+        float float_val;    /**< Float payload when type == TE_STATE_FLOAT. */
+        int bool_val;       /**< Boolean payload when type == TE_STATE_BOOL. */
+        RECT rect_val;      /**< RECT payload when type == TE_STATE_RECT. */
+    } data;                 /**< Data union storing the typed state value. */
 } StateValue;
 
-/* --------------------------------------------------------------------------
- * Callback function pointer types
- * -------------------------------------------------------------------------- */
+/**
+ * Function pointer for logging messages from within a plugin.
+ *
+ * @param level Severity level of the log message.
+ * @param module Module or plugin name string.
+ * @param message Message body string.
+ */
+typedef void (*LogFunc)(TE_LogLevel level, const char* module, const char* message);
 
-typedef HRESULT (*EventCallbackFunc)(uint32_t event_type, const void* event_data, void* user_data);
-typedef HRESULT (*SubscribeFunc)(uint32_t event_type, EventCallbackFunc callback, void* user_data);
-typedef HRESULT (*UnsubscribeFunc)(uint32_t event_type, EventCallbackFunc callback);
+/**
+ * Function pointer to subscribe to an engine event.
+ *
+ * @param event_type Event ID to subscribe to.
+ * @param callback Callback function invoked when the event occurs.
+ * @param user_data Opaque pointer passed back to the callback.
+ * @return TE_S_OK on success, or error HRESULT.
+ */
+typedef HRESULT (*SubscribeFunc)(uint32_t event_type, void (*callback)(uint32_t, const void*, void*), void* user_data);
+
+/**
+ * Function pointer to unsubscribe from an engine event.
+ *
+ * @param event_type Event ID previously subscribed to.
+ * @param callback Callback function pointer used during subscription.
+ * @return TE_S_OK on success, or error HRESULT.
+ */
+typedef HRESULT (*UnsubscribeFunc)(uint32_t event_type, void (*callback)(uint32_t, const void*, void*));
+
+/**
+ * Function pointer to request a taskbar window redraw / invalidate.
+ */
 typedef void (*RequestRedrawFunc)(void);
-typedef HRESULT (*PublishStateFunc)(const char* key, const StateValue* val);
-typedef HRESULT (*QueryStateFunc)(const char* key, StateValue* out_val);
-
-/* v2 function pointer types */
 
 /**
- * @brief Timer callback function signature.
- * @param user_data Opaque context passed during registration.
- * @note Always invoked on the UI thread (Shell_TrayWnd message pump).
+ * Function pointer to publish a key-value pair to the inter-plugin state store.
+ *
+ * @param key Unique key name in the format "plugin_name.setting_key".
+ * @param value Pointer to the StateValue to store.
+ * @return TE_S_OK on success, or error HRESULT.
  */
-typedef void (*TE_TimerCallback)(void* user_data);
+typedef HRESULT (*PublishStateFunc)(const char* key, const StateValue* value);
 
 /**
- * @brief Subscribe to a specific Win32 window message on Shell_TrayWnd.
+ * Function pointer to query a key-value pair from the inter-plugin state store.
  *
- * When subscribed, the subclass proc will dispatch events for this
- * message type to the plugin's event subscribers.
- *
- * @param win_msg Win32 message ID (e.g. WM_MOUSEMOVE).
- * @return S_OK on success, E_OUTOFMEMORY if table is full.
+ * @param key Unique key name in the format "plugin_name.setting_key".
+ * @param out_value Pointer to receive the retrieved StateValue.
+ * @return TE_S_OK on success, or TE_E_FAIL if key not found.
  */
-typedef HRESULT (*SubscribeToMessageFunc)(UINT win_msg);
+typedef HRESULT (*QueryStateFunc)(const char* key, StateValue* out_value);
 
 /**
- * @brief Unsubscribe from a previously subscribed Win32 window message.
+ * Function pointer to subscribe to a Win32 window message on the taskbar subclass.
  *
- * @param win_msg Win32 message ID to unsubscribe from.
- * @return S_OK on success, S_FALSE if not found.
+ * @param msg Win32 message identifier (e.g., WM_WINDOWPOSCHANGING).
+ * @return TE_S_OK on success, or error HRESULT.
  */
-typedef HRESULT (*UnsubscribeFromMessageFunc)(UINT win_msg);
+typedef HRESULT (*SubscribeToMessageFunc)(UINT msg);
 
 /**
- * @brief Register a timer that fires on the UI thread.
+ * Function pointer to unsubscribe from a Win32 window message on the taskbar subclass.
  *
- * @param interval_ms  Timer interval in milliseconds.
- * @param recurring    TRUE for repeating timer, FALSE for one-shot.
- * @param callback     Function to invoke when the timer fires.
- * @param user_data    Opaque context passed to the callback.
- * @return S_OK on success.
+ * @param msg Win32 message identifier.
+ * @return TE_S_OK on success, or error HRESULT.
  */
-typedef HRESULT (*RegisterTimerFunc)(uint32_t interval_ms, BOOL recurring,
-                                     TE_TimerCallback callback, void* user_data);
+typedef HRESULT (*UnsubscribeFromMessageFunc)(UINT msg);
 
 /**
- * @brief Cancel a previously registered timer by callback pointer.
+ * Function pointer to register a periodic UI thread timer.
  *
- * All timers registered with the given callback are cancelled.
- *
- * @param callback The callback used during registration.
- * @return S_OK if found and cancelled, S_FALSE if not found.
+ * @param interval_ms Interval between ticks in milliseconds.
+ * @param callback Callback function invoked on timer tick on the UI thread.
+ * @param user_data Opaque pointer passed back to the timer callback.
+ * @param out_timer_id Pointer to receive the assigned timer identifier.
+ * @return TE_S_OK on success, or error HRESULT.
  */
-typedef HRESULT (*CancelTimerFunc)(TE_TimerCallback callback);
-
-/* --------------------------------------------------------------------------
- * Plugin Context (Core → Plugin)
- * -------------------------------------------------------------------------- */
+typedef HRESULT (*RegisterTimerFunc)(uint32_t interval_ms, void (*callback)(void*), void* user_data, uint32_t* out_timer_id);
 
 /**
- * @brief Plugin Context passed from Engine to Plugin upon initialization.
+ * Function pointer to cancel an active UI thread timer.
  *
- * ## ABI Compatibility
- *
- * - `struct_size` is always the first field and indicates how many bytes
- *   of this struct the engine actually populated.
- * - `api_version` is the second field and indicates the ABI generation.
- * - Plugins compiled against v1 will see `struct_size` equal to the
- *   offset of the v2 fields. They must not access any field beyond
- *   their known struct size.
- * - v2 plugins should check both `api_version >= 2` AND
- *   `struct_size >= offsetof(PluginContext, <last_v2_field>) + sizeof(<last_v2_field>)`
- *   before accessing v2 fields.
- *
- * @note Thread safety: Provided read-only to plugins. Pointer remains
- *       valid for the lifetime of the plugin (Initialize → Shutdown).
+ * @param timer_id Timer identifier returned by RegisterTimerFunc.
+ * @return TE_S_OK on success, or error HRESULT.
+ */
+typedef HRESULT (*CancelTimerFunc)(uint32_t timer_id);
+
+/**
+ * Execution context and host engine services provided to plugins during Initialize().
+ * Uses struct_size as an ABI envelope to allow backward/forward compatible extension.
  */
 typedef struct PluginContext {
-    /* --- ABI envelope (always present) --- */
-    uint32_t struct_size;           /**< sizeof(PluginContext) as set by the engine */
-    uint32_t api_version;           /**< TE_API_VERSION at build time of the engine */
+    /* ABI envelope */
+    uint32_t struct_size;                           /**< sizeof(PluginContext) for version negotiation. */
+    uint32_t api_version;                           /**< TE_API_VERSION supported by the host engine. */
 
-    /* --- v1 fields (frozen) --- */
-    HWND taskbar_hwnd;              /**< Primary Shell_TrayWnd handle */
-    HMONITOR monitor;               /**< Target monitor handle */
-    uint32_t dpi;                   /**< Target monitor DPI */
-    const cJSON* config;            /**< Plugin's configuration sub-tree */
-    LogFunc log;                    /**< Thread-safe logger */
-    SubscribeFunc subscribe;        /**< Event subscription */
-    UnsubscribeFunc unsubscribe;    /**< Event unsubscription */
-    RequestRedrawFunc request_redraw; /**< Requests redraw/commit */
-    PublishStateFunc publish_state;  /**< Inter-plugin state sharing (publish) */
-    QueryStateFunc query_state;      /**< Inter-plugin state sharing (query) */
-    void* core_opaque;              /**< Core internal context pointer */
+    /* v1 fields (frozen ABI) */
+    HWND taskbar_hwnd;                              /**< Window handle of the primary Shell_TrayWnd. */
+    HMONITOR monitor;                               /**< Handle to the monitor hosting this taskbar. */
+    uint32_t dpi;                                   /**< Current DPI scaling factor of the taskbar display. */
+    const struct cJSON* config;                     /**< Read-only pointer to plugin's parsed configuration sub-tree. */
+    LogFunc log;                                    /**< Host logging callback function. */
+    SubscribeFunc subscribe;                        /**< Event subscription callback. */
+    UnsubscribeFunc unsubscribe;                    /**< Event unsubscription callback. */
+    RequestRedrawFunc request_redraw;               /**< Redraw request callback. */
+    PublishStateFunc publish_state;                 /**< State store publish function. */
+    QueryStateFunc query_state;                     /**< State store query function. */
+    void* core_opaque;                              /**< Opaque internal pointer reserved for host engine use. */
 
-    /* --- v2 fields (appended) --- */
-    SubscribeToMessageFunc subscribe_message;       /**< Win32 message subscription */
-    UnsubscribeFromMessageFunc unsubscribe_message;  /**< Win32 message unsubscription */
-    RegisterTimerFunc register_timer;                /**< UI-thread timer registration */
-    CancelTimerFunc cancel_timer;                    /**< Timer cancellation */
+    /* v2 fields (appended, check presence via TE_CTX_HAS_FIELD) */
+    SubscribeToMessageFunc subscribe_message;       /**< Subclass window message filter registration. */
+    UnsubscribeFromMessageFunc unsubscribe_message; /**< Subclass window message filter unregistration. */
+    RegisterTimerFunc register_timer;               /**< UI thread periodic timer registration. */
+    CancelTimerFunc cancel_timer;                   /**< UI thread periodic timer cancellation. */
 } PluginContext;
 
 /**
- * @brief Helper macro: check if a v2 PluginContext field is available.
- *
- * Usage:
- *   if (TE_CTX_HAS_FIELD(ctx, register_timer)) {
- *       ctx->register_timer(100, FALSE, my_cb, NULL);
- *   }
+ * Metadata descriptor providing identity, ordering, and compatibility info for a plugin.
  */
-#define TE_CTX_HAS_FIELD(ctx, field) \
-    ((ctx) && \
-     (ctx)->api_version >= 2 && \
-     (ctx)->struct_size >= (uint32_t)(offsetof(PluginContext, field) + sizeof((ctx)->field)))
+typedef struct PluginMetadata {
+    const char* name;           /**< Unique programmatic plugin identifier (e.g., "taskbar_resize"). */
+    const char* display_name;   /**< Human-readable name for UI display (e.g., "Taskbar Resize"). */
+    const char* description;    /**< Short description of the plugin's functionality. */
+    const char* author;         /**< Author or organization name. */
+    uint32_t version;           /**< Plugin version integer (e.g., 100 for 1.0.0). */
+    uint32_t priority;          /**< Load/execution priority: lower loads first (0-99 geometry, 100-199 visual, 200-299 behavior). */
+    uint32_t api_version;       /**< TE_API_VERSION against which this plugin was compiled. */
+} PluginMetadata;
 
 /**
- * @brief Pure C Plugin Interface (VTable).
+ * Pure C virtual method table representing the complete lifecycle interface of a plugin.
+ * FROZEN ABI: The order and signature of these function pointers must never change.
  */
 typedef struct PluginInterface {
+    /**
+     * Initialize plugin instance with host services and configuration.
+     * Called once when the plugin DLL is loaded.
+     *
+     * @param ctx Pointer to the host-provided PluginContext.
+     * @return TE_S_OK on success, or error HRESULT.
+     */
     HRESULT (*Initialize)(const PluginContext* ctx);
+
+    /**
+     * Enable plugin operation and hook subscriptions.
+     * Pre-allocate all working memory here to avoid per-frame allocations.
+     *
+     * @return TE_S_OK on success, or error HRESULT.
+     */
     HRESULT (*Enable)(void);
+
+    /**
+     * Disable plugin operation, unsubscribe hooks, and suspend background activities.
+     *
+     * @return TE_S_OK on success, or error HRESULT.
+     */
     HRESULT (*Disable)(void);
-    HRESULT (*Update)(float deltaTime);
+
+    /**
+     * Periodic animation or logic update step called on the UI thread.
+     *
+     * @param delta_time Elapsed time since last update in seconds.
+     * @return TE_S_OK on success, or error HRESULT.
+     */
+    HRESULT (*Update)(float delta_time);
+
+    /**
+     * Release all allocated resources and prepare for DLL unload.
+     *
+     * @return TE_S_OK on success, or error HRESULT.
+     */
     HRESULT (*Shutdown)(void);
+
+    /**
+     * Retrieve static plugin metadata.
+     *
+     * @return Pointer to static PluginMetadata struct.
+     */
     const PluginMetadata* (*GetMetadata)(void);
+
+    /**
+     * Retrieve configurable settings schema for GUI auto-generation.
+     *
+     * @return Pointer to static PluginSettings struct, or NULL if no settings.
+     */
     const PluginSettings* (*GetSettings)(void);
 } PluginInterface;
 
 /**
- * @brief Exported entry point for Plugin DLLs.
+ * Function pointer type matching the GetPluginInterface entry point
+ * that every plugin DLL must export.
  */
 typedef const PluginInterface* (*GetPluginInterfaceFunc)(void);
 

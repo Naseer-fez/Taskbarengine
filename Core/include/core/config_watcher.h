@@ -1,24 +1,27 @@
 #pragma once
-
 #include <sdk/te_types.h>
-#include <wchar.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-#define WM_TE_CONFIG_CHANGED (WM_APP + 101)
-
 /**
- * @brief Start background directory watcher for config file hot-reload with 100ms debounce.
- * @param config_dir Wide char path to directory containing config.jsonc.
- * @param notify_hwnd Window handle to receive WM_TE_CONFIG_CHANGED notifications.
- * @return S_OK on success, or failure HRESULT.
+ * Start watching a directory for file changes (config hot-reload).
+ * Spawns a background thread using ReadDirectoryChangesW with 100ms debounce.
+ * On change, marshals TE_CMD_RELOAD_CONFIG to the UI thread via PostMessage.
+ *
+ * @param config_dir    Directory path to watch. Must not be NULL.
+ * @param taskbar_hwnd  HWND to post WM_TE_IPC_COMMAND to.
+ * @return TE_S_OK on success.
+ * @note Thread Safety: Call once during startup on UI thread.
  */
-HRESULT TE_ConfigWatcherStart(const wchar_t* config_dir, HWND notify_hwnd);
+HRESULT TE_ConfigWatcherStart(const wchar_t* config_dir, HWND taskbar_hwnd);
 
 /**
- * @brief Stop background config directory watcher and cancel pending debounce timers.
+ * Stop the config watcher thread and release resources.
+ * Blocks until the watcher thread exits.
+ *
+ * @note Thread Safety: Call once during shutdown on UI thread.
  */
 void TE_ConfigWatcherStop(void);
 

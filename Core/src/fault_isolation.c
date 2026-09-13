@@ -1,216 +1,46 @@
 #include "core/fault_isolation.h"
-#include "core/core_manager.h"
 #include <windows.h>
+#include <stdio.h>
 #include <sdk/te_log.h>
 
-
-typedef struct WatchdogContext {
-    volatile LONG fired;
-} WatchdogContext;
-
-static VOID CALLBACK WatchdogTimerCallback(PVOID lpParameter, BOOLEAN TimerOrWaitFired)
+LONG TE_FaultFilter(EXCEPTION_POINTERS* ep, const char* plugin_name)
 {
-    (void)TimerOrWaitFired;
-    WatchdogContext* ctx = (WatchdogContext*)lpParameter;
-    if (ctx) {
-        InterlockedExchange(&ctx->fired, 1);
-    }
+    char buf[256];
+    _snprintf_s(buf, sizeof(buf), _TRUNCATE, "Plugin '%s' caused exception 0x%08X", 
+                plugin_name ? plugin_name : "unknown", 
+                ep->ExceptionRecord->ExceptionCode);
+    TE_LogWrite(TE_LOG_ERROR, "FaultIsolation", buf);
+    return EXCEPTION_EXECUTE_HANDLER;
 }
 
-static void DisableFaultedPlugin(TE_PluginEntry* entry, bool invoke_disable)
+HRESULT TE_FaultIsolatedCall(int* fault_count, const char* plugin_name,
+                              const char* method_name, TE_PluginMethodVoid method)
 {
-    if (!entry || entry->fault_count < TE_MAX_FAULT_STRIKES) return;
-
-    TE_LogWrite(TE_LOG_ERROR, "Plugin '%s' exceeded max fault strikes (%u). Disabling plugin.",
-                (entry->metadata && entry->metadata->name) ? entry->metadata->name : "unknown",
-                TE_MAX_FAULT_STRIKES);
-
-    const bool needs_cleanup = !entry->disabled_by_fault;
-    entry->disabled_by_fault = true;
-    if (needs_cleanup && invoke_disable && entry->iface && entry->iface->Disable) {
-        /* Run Disable once to revert any partial visual or behavioral changes.
-         * A failing Disable cannot recurse because disabled_by_fault is set first. */
-        TE_FaultIsolationCallPlugin(entry, entry->iface->Disable, "Disable");
-    }
-    entry->enabled = false;
-}
-
-HRESULT TE_FaultIsolationCallPlugin(TE_PluginEntry* entry, HRESULT (*callback)(void), const char* callback_name)
-{
-    if (!entry || !callback) return E_POINTER;
-    if (entry->disabled_by_fault) {
-        bool is_cleanup = (entry->iface && (callback == entry->iface->Disable || callback == entry->iface->Shutdown));
-        if (!is_cleanup) {
-            return E_ABORT;
-        }
-    }
-
-    uint32_t prev_plugin_id = TE_CoreManagerGetCurrentPluginId();
-    uint32_t plugin_id = (entry && entry->context) ? (uint32_t)(uintptr_t)entry->context->core_opaque + 1 : 0;
-    if (plugin_id > 0) {
-        TE_CoreManagerSetCurrentPluginId(plugin_id);
-    }
-
-    WatchdogContext wd_ctx = { 0 };
-    HANDLE htimer = NULL;
-
-    BOOL timer_created = CreateTimerQueueTimer(&htimer, NULL, WatchdogTimerCallback, &wd_ctx, TE_WATCHDOG_INIT_TIMEOUT_MS, 0, WT_EXECUTEONLYONCE);
-
-    HRESULT hr = E_FAIL;
-    bool caught_exception = false;
-
+    if (!method) return TE_E_INVALIDARG;
+    
+    HRESULT hr = TE_S_OK;
 #ifdef _MSC_VER
     __try {
-        hr = callback();
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        caught_exception = true;
-        DWORD code = GetExceptionCode();
-        TE_LogWrite(TE_LOG_ERROR, "SEH Exception (0x%08X) caught during %s in plugin '%s'",
-                    (unsigned int)code, callback_name ? callback_name : "callback",
-                    (entry->metadata && entry->metadata->name) ? entry->metadata->name : "unknown");
+        hr = method();
+    } __except(TE_FaultFilter(GetExceptionInformation(), plugin_name)) {
+        if (fault_count) {
+            (*fault_count)++;
+        }
+        
+        char buf[256];
+        _snprintf_s(buf, sizeof(buf), _TRUNCATE, "Fault in plugin '%s' during '%s'. Total faults: %d", 
+                    plugin_name ? plugin_name : "unknown", 
+                    method_name ? method_name : "unknown", 
+                    fault_count ? *fault_count : 1);
+        TE_LogWrite(TE_LOG_ERROR, "FaultIsolation", buf);
+        
+        hr = TE_E_FAIL;
     }
 #else
-    (void)caught_exception;
-    (void)callback_name;
-    hr = callback();
+    (void)plugin_name;
+    (void)method_name;
+    (void)fault_count;
+    hr = method();
 #endif
-
-    if (timer_created && htimer) {
-        DeleteTimerQueueTimer(NULL, htimer, INVALID_HANDLE_VALUE);
-    }
-
-    if (plugin_id > 0) {
-        TE_CoreManagerSetCurrentPluginId(prev_plugin_id);
-    }
-
-    if (caught_exception || wd_ctx.fired) {
-        entry->fault_count++;
-        if (wd_ctx.fired) {
-            TE_LogWrite(TE_LOG_WARN, "Watchdog timeout (%dms) during %s in plugin '%s' (strike %u/%u)",
-                        TE_WATCHDOG_INIT_TIMEOUT_MS, callback_name ? callback_name : "callback",
-                        (entry->metadata && entry->metadata->name) ? entry->metadata->name : "unknown",
-                        entry->fault_count, TE_MAX_FAULT_STRIKES);
-        }
-
-        DisableFaultedPlugin(entry, callback != entry->iface->Disable && callback != entry->iface->Shutdown);
-
-        return caught_exception ? E_FAIL : E_ABORT;
-    }
-
-    /* On clean execution, reset consecutive strike counter if not disabled by fault */
-    if (!entry->disabled_by_fault) {
-        entry->fault_count = 0;
-    }
     return hr;
 }
-
-HRESULT TE_FaultIsolationCallPluginInit(TE_PluginEntry* entry, HRESULT (*callback)(const PluginContext*), const PluginContext* ctx)
-{
-    if (!entry || !callback || !ctx) return E_POINTER;
-    if (entry->disabled_by_fault) {
-        return E_ABORT;
-    }
-
-    uint32_t prev_plugin_id = TE_CoreManagerGetCurrentPluginId();
-    uint32_t plugin_id = (entry && entry->context) ? (uint32_t)(uintptr_t)entry->context->core_opaque + 1 : 0;
-    if (plugin_id > 0) {
-        TE_CoreManagerSetCurrentPluginId(plugin_id);
-    }
-
-    WatchdogContext wd_ctx = { 0 };
-    HANDLE htimer = NULL;
-
-    BOOL timer_created = CreateTimerQueueTimer(&htimer, NULL, WatchdogTimerCallback, &wd_ctx, TE_WATCHDOG_INIT_TIMEOUT_MS, 0, WT_EXECUTEONLYONCE);
-
-    HRESULT hr = E_FAIL;
-    bool caught_exception = false;
-
-#ifdef _MSC_VER
-    __try {
-        hr = callback(ctx);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        caught_exception = true;
-        DWORD code = GetExceptionCode();
-        TE_LogWrite(TE_LOG_ERROR, "SEH Exception (0x%08X) caught during Initialize in plugin '%s'",
-                    (unsigned int)code,
-                    (entry->metadata && entry->metadata->name) ? entry->metadata->name : "unknown");
-    }
-#else
-    (void)caught_exception;
-    hr = callback(ctx);
-#endif
-
-    if (timer_created && htimer) {
-        DeleteTimerQueueTimer(NULL, htimer, INVALID_HANDLE_VALUE);
-    }
-
-    if (plugin_id > 0) {
-        TE_CoreManagerSetCurrentPluginId(prev_plugin_id);
-    }
-
-    if (caught_exception || wd_ctx.fired) {
-        entry->fault_count++;
-        if (wd_ctx.fired) {
-            TE_LogWrite(TE_LOG_WARN, "Watchdog timeout (%dms) during Initialize in plugin '%s' (strike %u/%u)",
-                        TE_WATCHDOG_INIT_TIMEOUT_MS,
-                        (entry->metadata && entry->metadata->name) ? entry->metadata->name : "unknown",
-                        entry->fault_count, TE_MAX_FAULT_STRIKES);
-        }
-
-        DisableFaultedPlugin(entry, true);
-
-        return caught_exception ? E_FAIL : E_ABORT;
-    }
-
-    entry->fault_count = 0;
-    return hr;
-}
-
-HRESULT TE_FaultIsolationCallEventCallback(TE_PluginEntry* entry, TE_EventCallback callback, TE_EventType type, const void* event_data, void* user_data)
-{
-    if (!callback) return E_POINTER;
-    if (entry && entry->disabled_by_fault) {
-        return E_ABORT;
-    }
-
-    uint32_t prev_plugin_id = TE_CoreManagerGetCurrentPluginId();
-    uint32_t plugin_id = (entry && entry->context) ? (uint32_t)(uintptr_t)entry->context->core_opaque + 1 : 0;
-    if (plugin_id > 0) {
-        TE_CoreManagerSetCurrentPluginId(plugin_id);
-    }
-
-    bool caught_exception = false;
-
-#ifdef _MSC_VER
-    __try {
-        callback(type, event_data, user_data);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        caught_exception = true;
-        DWORD code = GetExceptionCode();
-        TE_LogWrite(TE_LOG_ERROR, "SEH Exception (0x%08X) caught in event callback (type %d) for plugin '%s'",
-                    (unsigned int)code, (int)type,
-                    (entry && entry->metadata && entry->metadata->name) ? entry->metadata->name : "unknown");
-    }
-#else
-    (void)caught_exception;
-    callback(type, event_data, user_data);
-#endif
-
-    if (plugin_id > 0) {
-        TE_CoreManagerSetCurrentPluginId(prev_plugin_id);
-    }
-
-    if (entry) {
-        if (caught_exception) {
-            entry->fault_count++;
-            DisableFaultedPlugin(entry, true);
-
-            return E_FAIL;
-        }
-
-        entry->fault_count = 0;
-    }
-
-    return caught_exception ? E_FAIL : S_OK;
-}
-

@@ -1,46 +1,67 @@
 #pragma once
 
-#include "te_types.h"
-#include <cJSON.h>
+#include <sdk/te_types.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 /**
- * @brief Parse a JSONC file (JSON with single-line comments) into cJSON structure.
- * @param path Wide-string absolute path to the JSONC file.
- * @param out_root Pointer to receive the parsed cJSON root node.
- * @return S_OK on success, error HRESULT on failure.
- * @note Thread safety: Thread-safe.
+ * Forward declaration of cJSON struct from cJSON parser library.
  */
-HRESULT TE_JsoncParse(const wchar_t* path, cJSON** out_root);
+typedef struct cJSON cJSON;
 
 /**
- * @brief Parse a JSONC memory string into a cJSON structure.
- * @param json_str Buffer containing JSONC text.
- * @param out_root Pointer to receive the parsed cJSON root node.
- * @return S_OK on success, error HRESULT on failure.
- * @note Thread safety: Thread-safe.
+ * Parse a JSONC (JSON with comments) formatted string into a cJSON object hierarchy.
+ * Strips both single-line comments and multi-line comments before parsing.
+ *
+ * @param jsonc_text Null-terminated string containing JSONC payload. Must not be NULL.
+ * @param out_root Pointer to receive the parsed cJSON tree root. Must not be NULL.
+ *
+ * @return TE_S_OK on success,
+ *         TE_E_INVALIDARG if jsonc_text or out_root is NULL,
+ *         TE_E_OUTOFMEMORY if memory allocation fails,
+ *         TE_E_FAIL if JSON syntax parsing fails.
+ *
+ * @note Thread Safety: Thread-safe. Caller owns the resulting root object and must free it via TE_JsoncFree().
  */
-HRESULT TE_JsoncParseString(const char* json_str, cJSON** out_root);
+HRESULT TE_JsoncParse(const char* jsonc_text, cJSON** out_root);
 
 /**
- * @brief Free a cJSON structure.
- * @param root The cJSON root node to free.
- * @note Thread safety: Thread-safe.
+ * Read a JSONC file from disk, strip its comments, and parse it into a cJSON object hierarchy.
+ *
+ * @param file_path Wide character absolute or relative path to the .jsonc file. Must not be NULL.
+ * @param out_root Pointer to receive the parsed cJSON tree root. Must not be NULL.
+ *
+ * @return TE_S_OK on success,
+ *         TE_E_INVALIDARG if file_path or out_root is NULL,
+ *         TE_E_FAIL if file open/read fails or JSON syntax parsing fails.
+ *
+ * @note Thread Safety: Thread-safe. Caller owns the resulting root object and must free it via TE_JsoncFree().
+ */
+HRESULT TE_JsoncParseFile(const wchar_t* file_path, cJSON** out_root);
+
+/**
+ * Free a parsed cJSON tree previously allocated by TE_JsoncParse or TE_JsoncParseFile.
+ *
+ * @param root Pointer to the root cJSON node to delete. If NULL, this operation is a no-op.
+ *
+ * @note Thread Safety: Thread-safe as long as no other thread is reading or mutating the same cJSON tree.
  */
 void TE_JsoncFree(cJSON* root);
 
 /**
- * @brief Get a plugin's configuration sub-object from root config.
- * @param root Root cJSON configuration object.
- * @param name Plugin name string.
- * @param out_plugin Pointer to receive the plugin cJSON sub-object.
- * @return S_OK on success, HRESULT_FROM_WIN32(ERROR_NOT_FOUND) if key missing.
- * @note Thread safety: Thread-safe for read operations on root.
+ * Strip single-line comments and multi-line comments from a JSONC string.
+ * String literals (including escaped quotes within strings) are preserved unmodified.
+ *
+ * @param input Null-terminated string containing JSONC text. Must not be NULL.
+ *
+ * @return Newly allocated (malloc) string containing comment-free JSON, or NULL on error/invalid input.
+ *         Caller is responsible for freeing the returned buffer with free().
+ *
+ * @note Thread Safety: Thread-safe.
  */
-HRESULT TE_JsoncGetPlugin(const cJSON* root, const char* name, const cJSON** out_plugin);
+char* TE_JsoncStripComments(const char* input);
 
 #ifdef __cplusplus
 }

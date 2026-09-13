@@ -5,8 +5,8 @@
 #include <cJSON.h>
 
 /**
- * @brief Get the path to the configuration file.
- * @return The absolute path to config.jsonc.
+ * @brief Get the path to the configuration file (default_config.jsonc).
+ * @return The absolute path to Config/default_config.jsonc.
  */
 std::wstring ConfigIO_GetConfigPath();
 

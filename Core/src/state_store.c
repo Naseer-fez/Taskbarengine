@@ -1,115 +1,103 @@
-#include "core/state_store.h"
-#include <string.h>
 #include <windows.h>
+#include <string.h>
+#include <stdint.h>
+#include <core/state_store.h>
+#include <sdk/te_log.h>
 
-typedef struct StateEntry {
-    char key[TE_STATE_KEY_MAX_LEN];
-    StateValue val;
-    bool occupied;
+#define TE_STATE_STORE_CAPACITY 256
+
+typedef struct {
+    char key[64];
+    StateValue value;
+    int occupied;
 } StateEntry;
 
-static StateEntry g_entries[TE_STATE_STORE_MAX_ENTRIES];
-static SRWLOCK g_lock = SRWLOCK_INIT;
-static bool g_initialized = false;
+static StateEntry g_StateTable[TE_STATE_STORE_CAPACITY];
+static SRWLOCK g_StateLock = SRWLOCK_INIT;
 
-static uint32_t HashFnv1a(const char* str)
-{
+// FNV-1a hash function
+static uint32_t HashKey(const char* key) {
     uint32_t hash = 2166136261u;
-    while (*str) {
-        hash ^= (uint8_t)(*str++);
+    while (*key) {
+        hash ^= (uint8_t)(*key++);
         hash *= 16777619u;
     }
     return hash;
 }
 
-HRESULT TE_StateStoreInit(void)
-{
-    AcquireSRWLockExclusive(&g_lock);
-    memset(g_entries, 0, sizeof(g_entries));
-    g_initialized = true;
-    ReleaseSRWLockExclusive(&g_lock);
-    return S_OK;
+HRESULT TE_StateStoreInit(void) {
+    InitializeSRWLock(&g_StateLock);
+    memset(g_StateTable, 0, sizeof(g_StateTable));
+    return TE_S_OK;
 }
 
-void TE_StateStoreShutdown(void)
-{
-    AcquireSRWLockExclusive(&g_lock);
-    memset(g_entries, 0, sizeof(g_entries));
-    g_initialized = false;
-    ReleaseSRWLockExclusive(&g_lock);
+void TE_StateStoreShutdown(void) {
+    AcquireSRWLockExclusive(&g_StateLock);
+    memset(g_StateTable, 0, sizeof(g_StateTable));
+    ReleaseSRWLockExclusive(&g_StateLock);
 }
 
-HRESULT TE_StatePublish(const char* key, const StateValue* val)
-{
-    if (!key || !val) return E_POINTER;
-    if (key[0] == '\0') return E_INVALIDARG;
-    if (strnlen_s(key, TE_STATE_KEY_MAX_LEN) == TE_STATE_KEY_MAX_LEN) return HRESULT_FROM_WIN32(ERROR_BUFFER_OVERFLOW);
-
-    AcquireSRWLockExclusive(&g_lock);
-    if (!g_initialized) {
-        ReleaseSRWLockExclusive(&g_lock);
-        return E_UNEXPECTED;
+HRESULT TE_StatePublish(const char* key, const StateValue* value) {
+    if (!key || !value) {
+        return TE_E_INVALIDARG;
     }
 
-    uint32_t hash = HashFnv1a(key);
-    uint32_t start = hash % TE_STATE_STORE_MAX_ENTRIES;
-    uint32_t idx = start;
-    int first_empty = -1;
+    uint32_t hash = HashKey(key);
+    uint32_t index = hash % TE_STATE_STORE_CAPACITY;
+    uint32_t startIndex = index;
+    int found = 0;
 
+    AcquireSRWLockExclusive(&g_StateLock);
+
+    // Linear probing
     do {
-        if (g_entries[idx].occupied) {
-            if (strcmp(g_entries[idx].key, key) == 0) {
-                /* Update existing */
-                g_entries[idx].val = *val;
-                ReleaseSRWLockExclusive(&g_lock);
-                return S_OK;
-            }
-        } else if (first_empty == -1) {
-            first_empty = (int)idx;
-        }
-        idx = (idx + 1) % TE_STATE_STORE_MAX_ENTRIES;
-    } while (idx != start);
-
-    if (first_empty != -1) {
-        strncpy_s(g_entries[first_empty].key, TE_STATE_KEY_MAX_LEN, key, _TRUNCATE);
-        g_entries[first_empty].val = *val;
-        g_entries[first_empty].occupied = true;
-        ReleaseSRWLockExclusive(&g_lock);
-        return S_OK;
-    }
-
-    ReleaseSRWLockExclusive(&g_lock);
-    return E_OUTOFMEMORY;
-}
-
-HRESULT TE_StateQuery(const char* key, StateValue* out_val)
-{
-    if (!key || !out_val) return E_POINTER;
-    if (key[0] == '\0') return E_INVALIDARG;
-    if (strnlen_s(key, TE_STATE_KEY_MAX_LEN) == TE_STATE_KEY_MAX_LEN) return HRESULT_FROM_WIN32(ERROR_BUFFER_OVERFLOW);
-
-    AcquireSRWLockShared(&g_lock);
-    if (!g_initialized) {
-        ReleaseSRWLockShared(&g_lock);
-        return E_UNEXPECTED;
-    }
-
-    uint32_t hash = HashFnv1a(key);
-    uint32_t start = hash % TE_STATE_STORE_MAX_ENTRIES;
-    uint32_t idx = start;
-
-    do {
-        if (g_entries[idx].occupied && strcmp(g_entries[idx].key, key) == 0) {
-            *out_val = g_entries[idx].val;
-            ReleaseSRWLockShared(&g_lock);
-            return S_OK;
-        }
-        if (!g_entries[idx].occupied) {
+        if (!g_StateTable[index].occupied || strncmp(g_StateTable[index].key, key, 63) == 0) {
+            strncpy_s(g_StateTable[index].key, sizeof(g_StateTable[index].key), key, _TRUNCATE);
+            g_StateTable[index].value = *value;
+            g_StateTable[index].occupied = 1;
+            found = 1;
             break;
         }
-        idx = (idx + 1) % TE_STATE_STORE_MAX_ENTRIES;
-    } while (idx != start);
+        index = (index + 1) % TE_STATE_STORE_CAPACITY;
+    } while (index != startIndex);
 
-    ReleaseSRWLockShared(&g_lock);
-    return HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
+    ReleaseSRWLockExclusive(&g_StateLock);
+
+    if (found) {
+        return TE_S_OK;
+    }
+    
+    return TE_E_OUTOFMEMORY;
+}
+
+HRESULT TE_StateQuery(const char* key, StateValue* out_value) {
+    if (!key || !out_value) {
+        return TE_E_INVALIDARG;
+    }
+
+    uint32_t hash = HashKey(key);
+    uint32_t index = hash % TE_STATE_STORE_CAPACITY;
+    uint32_t startIndex = index;
+    HRESULT hr = TE_E_FAIL;
+
+    AcquireSRWLockShared(&g_StateLock);
+
+    // Linear probing
+    do {
+        if (g_StateTable[index].occupied) {
+            if (strncmp(g_StateTable[index].key, key, 63) == 0) {
+                *out_value = g_StateTable[index].value;
+                hr = TE_S_OK;
+                break;
+            }
+        } else {
+            // Hit an empty slot, means the key is not in the map
+            break;
+        }
+        index = (index + 1) % TE_STATE_STORE_CAPACITY;
+    } while (index != startIndex);
+
+    ReleaseSRWLockShared(&g_StateLock);
+
+    return hr;
 }

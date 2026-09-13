@@ -1,89 +1,50 @@
 #pragma once
-
 #include <sdk/te_types.h>
-#include "core/event_dispatch.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 /**
- * @brief Window message sent to taskbar subclass for deferred initialization.
- */
-#define WM_TE_INIT (WM_APP + 100)
-
-/**
- * @brief Window message sent to taskbar subclass for IPC commands.
- */
-#define WM_TE_IPC_COMMAND (WM_APP + 102)
-
-/**
- * @brief IPC command to reload engine configuration.
- */
-#define TE_IPC_CMD_RELOAD_CONFIG 1
-
-/**
- * @brief IPC command to enable a plugin by name.
- */
-#define TE_IPC_CMD_ENABLE_PLUGIN 2
-
-/**
- * @brief IPC command to disable a plugin by name.
- */
-#define TE_IPC_CMD_DISABLE_PLUGIN 3
-
-/**
- * @brief IPC command to shutdown core manager and engine.
- */
-#define TE_IPC_CMD_SHUTDOWN 4
-
-/**
- * @brief IPC command to query and format active plugin list.
- */
-#define TE_IPC_CMD_GET_PLUGIN_LIST 5
-
-/** @brief IPC command to query the generated settings schema. */
-#define TE_IPC_CMD_GET_SETTINGS 6
-
-/** @brief IPC command to query the latest performance statistics. */
-#define TE_IPC_CMD_GET_PERF_STATS 7
-
-/**
- * @brief Payload structure for synchronous IPC requests marshaled to UI thread.
- */
-typedef struct TE_IpcSyncPayload {
-    HANDLE completion_event; /**< Optional completion event handle for legacy event sync. */
-    void* buffer;            /**< Destination buffer for data returned from UI thread. */
-    size_t buffer_len;       /**< Size of destination buffer in bytes. */
-    uint32_t result_code;    /**< Result code or returned byte length from UI thread. */
-} TE_IpcSyncPayload;
-
-/**
- * @brief Install window subclass on Shell_TrayWnd to intercept WM messages and dispatch events.
+ * Install the full TaskbarEngine subclass on Shell_TrayWnd.
+ * Replaces the minimal Phase 1 subclass with full message handling.
  *
- * ## Ownership & Threading Model
- * - Installed via `comctl32!SetWindowSubclass` with ID `TASKBAR_SUBCLASS_ID` ('TESB').
- * - `g_subclass_ref` holds non-owning pointers to the Core Manager's event dispatch
- *   table, subscription count, and `TE_CoreState` instance.
- * - All messages intercepted by `TaskbarSubclassProc` execute synchronously on Explorer's
- *   UI thread.
- * - Re-entrancy guard `g_in_geometry_dispatch` prevents recursive feedback loops
- *   when plugins alter taskbar geometry via `SetWindowPos(SWP_FRAMECHANGED)`.
- *
- * @param taskbar_hwnd Handle of Shell_TrayWnd taskbar window.
- * @param event_table Event subscription table array.
- * @param sub_count Pointer to event subscription count.
- * @param core_state_ptr Opaque pointer to TE_CoreState instance.
- * @return S_OK on success, or failure HRESULT.
+ * @param taskbar_hwnd  Handle to Shell_TrayWnd.
+ * @return TE_S_OK on success.
+ * @note Thread Safety: Must be called on UI thread.
  */
-HRESULT TE_TaskbarSubclassInstall(HWND taskbar_hwnd, TE_EventEntry* event_table, uint32_t* sub_count, void* core_state_ptr);
+HRESULT TE_TaskbarSubclassInstall(HWND taskbar_hwnd);
 
 /**
- * @brief Remove window subclass from Shell_TrayWnd window.
- *
- * @param taskbar_hwnd Handle of Shell_TrayWnd taskbar window.
+ * Remove the TaskbarEngine subclass from Shell_TrayWnd.
+ * @param taskbar_hwnd  Handle to Shell_TrayWnd.
+ * @note Thread Safety: Must be called on UI thread.
  */
 void TE_TaskbarSubclassRemove(HWND taskbar_hwnd);
+
+/**
+ * The subclass window procedure. Handles WM_TE_INIT, WM_TE_IPC_COMMAND,
+ * WM_DPICHANGED, WM_DISPLAYCHANGE, WM_DESTROY, WM_ENDSESSION, and
+ * message-filter forwarding to subscribed plugins.
+ */
+LRESULT CALLBACK TE_TaskbarSubclassProc(HWND hwnd, UINT msg, WPARAM wParam,
+                                         LPARAM lParam, UINT_PTR uIdSubclass,
+                                         DWORD_PTR dwRefData);
+
+/**
+ * Subscribe a Win32 message to the message filter table.
+ * Subscribed messages are forwarded to plugins via the event dispatch system.
+ * @param msg  Win32 message identifier.
+ * @return TE_S_OK on success, TE_E_FAIL if table is full.
+ */
+HRESULT TE_TaskbarSubclassSubscribeMessage(UINT msg);
+
+/**
+ * Unsubscribe a Win32 message from the message filter table.
+ * @param msg  Win32 message identifier.
+ * @return TE_S_OK on success.
+ */
+HRESULT TE_TaskbarSubclassUnsubscribeMessage(UINT msg);
 
 #ifdef __cplusplus
 }

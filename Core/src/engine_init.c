@@ -1,44 +1,28 @@
-#include "core/engine.h"
+#include "core/engine_init.h"
+
+#include <windows.h>
+
+#include <sdk/te_types.h>
 #include "core/core_manager.h"
-#include <sdk/te_log.h>
-#include <sdk/te_debug_trace.h>
-#include <wchar.h>
-#include <stdio.h>
 
-static volatile LONG g_engine_initialized = 0;
-static HINSTANCE g_hinstance = NULL;
+static HWND g_active_taskbar_hwnd = NULL;
 
-void TE_SetEngineInstance(HINSTANCE hinstance)
+HRESULT TE_InitializeEngine(HWND taskbar_hwnd)
 {
-    g_hinstance = hinstance;
-}
-
-HRESULT TE_EngineInitialize(void)
-{
-    if (InterlockedCompareExchange(&g_engine_initialized, 1, 0) != 0) {
-        TE_DebugTrace("[TE-DBG] TE_EngineInitialize: Already initialized, skipping\n");
-        return S_OK;
-    }
-    TE_DebugTrace("[TE-DBG] TE_EngineInitialize: Starting first-time init\n");
-
-    /* Defense-in-depth: only initialize inside explorer.exe */
-    if (!TE_IsExplorerProcess()) {
-        TE_DebugTrace("[TE-DBG] TE_EngineInitialize: Not explorer process, aborting\n");
-        InterlockedExchange(&g_engine_initialized, 0);
-        return S_FALSE;
+    if (!IsWindow(taskbar_hwnd)) {
+        return TE_E_INVALIDARG;
     }
 
-    HRESULT hr = TE_CoreManagerInitPhaseA(g_hinstance);
-    TE_DebugTraceFmt("[TE-DBG] TE_EngineInitialize: PhaseA returned hr=0x%08X\n", (unsigned int)hr);
-    /* Never reset g_engine_initialized on failure — the thread-targeted
-     * CBT hook ensures we are on the correct thread.  Resetting the flag
-     * previously caused an unbounded retry storm that starved Explorer's
-     * XAML island startup.  Explorer-restart recovery will re-install the
-     * hook via TE_CrashRecoveryStart which handles the retry externally. */
-    return hr;
+    g_active_taskbar_hwnd = taskbar_hwnd;
+
+    /* Phase 2: Delegate to Core Manager for full initialization.
+     * This is now called from TE_TaskbarSubclassProc on WM_TE_INIT,
+     * but we keep this function as a compatibility shim. */
+    return TE_CoreManagerInit(taskbar_hwnd);
 }
 
-HRESULT TE_EngineInitializeDeferred(void)
+void TE_ShutdownEngine(void)
 {
-    return TE_CoreManagerInitPhaseB();
+    TE_CoreManagerShutdown();
+    g_active_taskbar_hwnd = NULL;
 }

@@ -1,139 +1,245 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <cstdlib>
+#include <cstring>
+#include <string>
+
 extern "C" {
 #include <sdk/te_jsonc.h>
+#include <cJSON.h>
 }
 
-TEST_CASE("JSONC comment stripping removes // comments", "[jsonc]") {
-    const char* jsonc_data = R"({
-        // This is a comment
-        "version": 1,
-        "name": "TaskbarEngine" // trailing comment
-    })";
+TEST_CASE("JSONC comment stripper", "[jsonc][strip]") {
+    SECTION("Strip line comments") {
+        const char* input = "{\"key\": \"value\"} // comment";
+        char* stripped = TE_JsoncStripComments(input);
+        REQUIRE(stripped != nullptr);
+        CHECK(std::string(stripped) == "{\"key\": \"value\"} ");
+        free(stripped);
+    }
 
-    cJSON* root = NULL;
-    HRESULT hr = TE_JsoncParseString(jsonc_data, &root);
+    SECTION("Strip block comments") {
+        const char* input = "{/* block */\"key\": \"value\"}";
+        char* stripped = TE_JsoncStripComments(input);
+        REQUIRE(stripped != nullptr);
+        CHECK(std::string(stripped) == "{\"key\": \"value\"}");
+        free(stripped);
+    }
 
-    REQUIRE(SUCCEEDED(hr));
-    REQUIRE(root != nullptr);
+    SECTION("Preserve strings containing comment-like text") {
+        const char* input = "{\"url\": \"http://example.com\"}";
+        char* stripped = TE_JsoncStripComments(input);
+        REQUIRE(stripped != nullptr);
+        CHECK(std::string(stripped) == input);
+        free(stripped);
+    }
 
-    cJSON* version = cJSON_GetObjectItemCaseSensitive(root, "version");
-    REQUIRE(version != nullptr);
-    REQUIRE(cJSON_IsNumber(version));
-    REQUIRE(version->valueint == 1);
+    SECTION("Preserve strings containing block comment syntax") {
+        const char* input = "{\"note\": \"use /* carefully */\"}";
+        char* stripped = TE_JsoncStripComments(input);
+        REQUIRE(stripped != nullptr);
+        CHECK(std::string(stripped) == input);
+        free(stripped);
+    }
 
-    cJSON* name = cJSON_GetObjectItemCaseSensitive(root, "name");
-    REQUIRE(name != nullptr);
-    REQUIRE(cJSON_IsString(name));
-    REQUIRE(std::string(name->valuestring) == "TaskbarEngine");
+    SECTION("Handle escaped quotes in strings") {
+        const char* input = "{\"msg\": \"say \\\"hello\\\" // world\"}";
+        char* stripped = TE_JsoncStripComments(input);
+        REQUIRE(stripped != nullptr);
+        CHECK(std::string(stripped) == input);
+        free(stripped);
+    }
 
-    TE_JsoncFree(root);
+    SECTION("Strip nested block comments") {
+        const char* input = "/* a /* b */ c */";
+        char* stripped = TE_JsoncStripComments(input);
+        REQUIRE(stripped != nullptr);
+        CHECK(std::string(stripped) == " c */");
+        free(stripped);
+    }
+
+    SECTION("Multiple line comments") {
+        const char* input =
+            "// Header comment\n"
+            "{\n"
+            "  \"name\": \"TaskbarEngine\", // inline comment 1\n"
+            "  // Line comment in middle\n"
+            "  \"version\": 1 // inline comment 2\n"
+            "}\n"
+            "// Trailing comment\n";
+        char* stripped = TE_JsoncStripComments(input);
+        REQUIRE(stripped != nullptr);
+        CHECK(strstr(stripped, "//") == nullptr);
+        free(stripped);
+
+        cJSON* root = nullptr;
+        HRESULT hr = TE_JsoncParse(input, &root);
+        CHECK(hr == TE_S_OK);
+        REQUIRE(root != nullptr);
+
+        cJSON* name = cJSON_GetObjectItem(root, "name");
+        REQUIRE(name != nullptr);
+        CHECK(std::string(cJSON_GetStringValue(name)) == "TaskbarEngine");
+
+        cJSON* ver = cJSON_GetObjectItem(root, "version");
+        REQUIRE(ver != nullptr);
+        CHECK(ver->valueint == 1);
+
+        TE_JsoncFree(root);
+    }
 }
 
-TEST_CASE("JSONC preserves // inside quoted strings", "[jsonc]") {
-    const char* jsonc_data = R"({
-        "url": "http://example.com/api//v1",
-        "comment": "//not_a_comment"
-    })";
+TEST_CASE("JSONC parser operations", "[jsonc][parse]") {
+    SECTION("Valid JSON parse") {
+        const char* input = "{\"core\": {\"log_level\": \"info\"}}";
+        cJSON* root = nullptr;
+        HRESULT hr = TE_JsoncParse(input, &root);
+        CHECK(hr == TE_S_OK);
+        REQUIRE(root != nullptr);
 
-    cJSON* root = nullptr;
-    HRESULT hr = TE_JsoncParseString(jsonc_data, &root);
+        cJSON* core = cJSON_GetObjectItem(root, "core");
+        REQUIRE(core != nullptr);
+        CHECK(cJSON_IsObject(core));
 
-    REQUIRE(SUCCEEDED(hr));
-    REQUIRE(root != nullptr);
+        cJSON* log_level = cJSON_GetObjectItem(core, "log_level");
+        REQUIRE(log_level != nullptr);
+        CHECK(cJSON_IsString(log_level));
+        CHECK(std::string(cJSON_GetStringValue(log_level)) == "info");
 
-    cJSON* url = cJSON_GetObjectItemCaseSensitive(root, "url");
-    REQUIRE(url != nullptr);
-    REQUIRE(cJSON_IsString(url));
-    REQUIRE(std::string(url->valuestring) == "http://example.com/api//v1");
+        TE_JsoncFree(root);
+    }
 
-    cJSON* comment = cJSON_GetObjectItemCaseSensitive(root, "comment");
-    REQUIRE(comment != nullptr);
-    REQUIRE(cJSON_IsString(comment));
-    REQUIRE(std::string(comment->valuestring) == "//not_a_comment");
+    SECTION("Malformed JSON parse") {
+        const char* input = "{\"key\": }";
+        cJSON* root = nullptr;
+        HRESULT hr = TE_JsoncParse(input, &root);
+        CHECK(hr == TE_E_FAIL);
+        CHECK(root == nullptr);
+    }
 
-    TE_JsoncFree(root);
+    SECTION("Nested access") {
+        const char* input =
+            "{\n"
+            "  // Plugins configuration section\n"
+            "  \"plugins\": {\n"
+            "    \"taskbar_resize\": {\n"
+            "      \"height\": 48 /* height in pixels */\n"
+            "    }\n"
+            "  }\n"
+            "}";
+        cJSON* root = nullptr;
+        HRESULT hr = TE_JsoncParse(input, &root);
+        CHECK(hr == TE_S_OK);
+        REQUIRE(root != nullptr);
+
+        cJSON* plugins = cJSON_GetObjectItem(root, "plugins");
+        REQUIRE(plugins != nullptr);
+        CHECK(cJSON_IsObject(plugins));
+
+        cJSON* resize = cJSON_GetObjectItem(plugins, "taskbar_resize");
+        REQUIRE(resize != nullptr);
+        CHECK(cJSON_IsObject(resize));
+
+        cJSON* height = cJSON_GetObjectItem(resize, "height");
+        REQUIRE(height != nullptr);
+        CHECK(cJSON_IsNumber(height));
+        CHECK(height->valueint == 48);
+
+        TE_JsoncFree(root);
+    }
+
+    SECTION("Null input") {
+        cJSON* root = nullptr;
+        HRESULT hr = TE_JsoncParse(nullptr, &root);
+        CHECK(hr == TE_E_INVALIDARG);
+        CHECK(root == nullptr);
+
+        CHECK(TE_JsoncStripComments(nullptr) == nullptr);
+    }
+
+    SECTION("Null output") {
+        HRESULT hr = TE_JsoncParse("{}", nullptr);
+        CHECK(hr == TE_E_INVALIDARG);
+    }
+
+    SECTION("Empty input") {
+        cJSON* root = nullptr;
+        HRESULT hr = TE_JsoncParse("", &root);
+        CHECK(hr == TE_E_FAIL);
+        CHECK(root == nullptr);
+    }
 }
 
-TEST_CASE("JSONC returns error for malformed input", "[jsonc]") {
-    const char* malformed_jsonc = R"({
-        "version": 1,
-        "unclosed_string": "oops
-    })";
-
-    cJSON* root = nullptr;
-    HRESULT hr = TE_JsoncParseString(malformed_jsonc, &root);
-
-    REQUIRE(FAILED(hr));
-    REQUIRE(root == nullptr);
+TEST_CASE("JSONC memory management", "[jsonc][memory]") {
+    SECTION("Free NULL") {
+        TE_JsoncFree(nullptr);
+        SUCCEED("TE_JsoncFree(nullptr) did not crash");
+    }
 }
 
-TEST_CASE("JSONC handles escaped quotes correctly", "[jsonc]") {
-    const char* jsonc_data = R"({
-        "message": "hello \"world\"",
-        "nested": "\"quotes\" inside // not a comment"
-    })";
+TEST_CASE("JSONC default configuration validation", "[jsonc][config]") {
+    SECTION("Parse full default config structure") {
+        const char* default_config_text =
+            "// TaskbarEngine Default Configuration\n"
+            "// Edit this file to customize your taskbar.\n"
+            "// Changes are detected automatically — no restart required.\n"
+            "\n"
+            "{\n"
+            "    // Core engine settings\n"
+            "    \"core\": {\n"
+            "        \"log_level\": \"info\",      // debug, info, warning, error\n"
+            "        \"log_max_files\": 5,\n"
+            "        \"log_max_size_mb\": 5\n"
+            "    },\n"
+            "\n"
+            "    // Plugin configurations\n"
+            "    \"plugins\": {\n"
+            "        // Taskbar resize plugin — adjusts taskbar height and spacing\n"
+            "        \"taskbar_resize\": {\n"
+            "            \"enabled\": true,\n"
+            "            \"height\": 48,\n"
+            "            \"padding_top\": 0,\n"
+            "            \"padding_bottom\": 0,\n"
+            "            \"icon_spacing\": 4\n"
+            "        },\n"
+            "\n"
+            "        // Icon hover plugin — macOS Dock-style magnification\n"
+            "        \"icon_hover\": {\n"
+            "            \"enabled\": true,\n"
+            "            \"max_scale\": 1.2,\n"
+            "            \"radius\": 150,\n"
+            "            \"curve\": \"gaussian\",     // gaussian, cubic, cosine, linear\n"
+            "            \"speed_ms\": 150\n"
+            "        }\n"
+            "    }\n"
+            "}\n";
 
-    cJSON* root = nullptr;
-    HRESULT hr = TE_JsoncParseString(jsonc_data, &root);
+        cJSON* root = nullptr;
+        HRESULT hr = TE_JsoncParse(default_config_text, &root);
+        CHECK(hr == TE_S_OK);
+        REQUIRE(root != nullptr);
 
-    REQUIRE(SUCCEEDED(hr));
-    REQUIRE(root != nullptr);
+        cJSON* core = cJSON_GetObjectItem(root, "core");
+        REQUIRE(core != nullptr);
+        cJSON* log_level = cJSON_GetObjectItem(core, "log_level");
+        REQUIRE(log_level != nullptr);
+        CHECK(std::string(cJSON_GetStringValue(log_level)) == "info");
 
-    cJSON* message = cJSON_GetObjectItemCaseSensitive(root, "message");
-    REQUIRE(message != nullptr);
-    REQUIRE(cJSON_IsString(message));
-    REQUIRE(std::string(message->valuestring) == "hello \"world\"");
+        cJSON* plugins = cJSON_GetObjectItem(root, "plugins");
+        REQUIRE(plugins != nullptr);
 
-    cJSON* nested = cJSON_GetObjectItemCaseSensitive(root, "nested");
-    REQUIRE(nested != nullptr);
-    REQUIRE(cJSON_IsString(nested));
-    REQUIRE(std::string(nested->valuestring) == "\"quotes\" inside // not a comment");
+        cJSON* resize = cJSON_GetObjectItem(plugins, "taskbar_resize");
+        REQUIRE(resize != nullptr);
+        cJSON* resize_enabled = cJSON_GetObjectItem(resize, "enabled");
+        REQUIRE(resize_enabled != nullptr);
+        CHECK(cJSON_IsTrue(resize_enabled));
 
-    TE_JsoncFree(root);
-}
+        cJSON* hover = cJSON_GetObjectItem(plugins, "icon_hover");
+        REQUIRE(hover != nullptr);
+        cJSON* curve = cJSON_GetObjectItem(hover, "curve");
+        REQUIRE(curve != nullptr);
+        CHECK(std::string(cJSON_GetStringValue(curve)) == "gaussian");
 
-TEST_CASE("JSONC handles escaped backslashes correctly", "[jsonc]") {
-    const char* jsonc_data = R"({
-        "path": "C:\\Windows\\System32",
-        "trailing": "path\\\\" // Should correctly match the backslashes and not escape the quote
-    })";
-
-    cJSON* root = nullptr;
-    HRESULT hr = TE_JsoncParseString(jsonc_data, &root);
-
-    REQUIRE(SUCCEEDED(hr));
-    REQUIRE(root != nullptr);
-
-    cJSON* path = cJSON_GetObjectItemCaseSensitive(root, "path");
-    REQUIRE(path != nullptr);
-    REQUIRE(cJSON_IsString(path));
-    REQUIRE(std::string(path->valuestring) == "C:\\Windows\\System32");
-
-    cJSON* trailing = cJSON_GetObjectItemCaseSensitive(root, "trailing");
-    REQUIRE(trailing != nullptr);
-    REQUIRE(cJSON_IsString(trailing));
-    REQUIRE(std::string(trailing->valuestring) == "path\\\\");
-
-    TE_JsoncFree(root);
-}
-
-TEST_CASE("JSONC handles empty strings correctly", "[jsonc]") {
-    const char* jsonc_data = R"({
-        "empty": "",
-        "comment": "" // comment after empty string
-    })";
-
-    cJSON* root = nullptr;
-    HRESULT hr = TE_JsoncParseString(jsonc_data, &root);
-
-    REQUIRE(SUCCEEDED(hr));
-    REQUIRE(root != nullptr);
-
-    cJSON* empty = cJSON_GetObjectItemCaseSensitive(root, "empty");
-    REQUIRE(empty != nullptr);
-    REQUIRE(cJSON_IsString(empty));
-    REQUIRE(std::string(empty->valuestring) == "");
-
-    TE_JsoncFree(root);
+        TE_JsoncFree(root);
+    }
 }

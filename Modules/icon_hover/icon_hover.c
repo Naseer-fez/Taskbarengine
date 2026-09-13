@@ -1,343 +1,817 @@
+/**
+ * @file icon_hover.c
+ * @brief IconHover plugin ABI entry points (pure C).
+ *
+ * Implements the PluginInterface lifecycle for macOS Dock-style icon
+ * hover magnification. Bridges the C plugin ABI with C++ subsystems
+ * (UIA discovery, icon capture, DComp overlay, frame loop).
+ *
+ * Priority: 110 (visual overlay layer, loads after taskbar_resize at 10).
+ */
+
 #include <sdk/te_plugin.h>
-#include <sdk/te_log.h>
 #include <sdk/te_events.h>
-#include <sdk/te_debug_trace.h>
-#include "icon_hover_internal.h"
-#include "uia_discovery.h"
-#include "dcomp_overlay.h"
-#include "icon_capture.h"
-#include "frame_loop.h"
+#include <sdk/te_jsonc.h>
+#include <cJSON.h>
+#include <windows.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <stdarg.h>
 #include <string.h>
 
-static TE_IconHoverState g_state = {0};
+#include "icon_hover_internal.h"
+#include "magnification.h"
+#include "uia_discovery.h"
+#include "icon_capture.h"
+#include "dcomp_overlay.h"
+#include "frame_loop.h"
 
-static void PluginLog(TE_LogLevel level, const char* fmt, ...)
-{
-    if (g_state.ctx.log) {
+/* ── Global State ─────────────────────────────────────────────────── */
+
+TE_IconHoverState g_hover_state = { 0 };
+
+/* ── Logging Helper ───────────────────────────────────────────────── */
+
+static void HoverLog(TE_LogLevel level, const char* fmt, ...) {
+    if (g_hover_state.ctx && g_hover_state.ctx->log) {
+        char buf[256];
         va_list args;
         va_start(args, fmt);
-        char buf[512];
         vsnprintf(buf, sizeof(buf), fmt, args);
         va_end(args);
-        g_state.ctx.log(level, "%s", buf);
+        g_hover_state.ctx->log(level, "IconHover", buf);
     }
 }
-#define TE_LogWrite PluginLog
+
+/* ── Configuration ────────────────────────────────────────────────── */
+
+static const char* s_curve_names[] = { "gaussian", "cubic", "cosine", "linear" };
+
+static TE_MagnifyCurveType ParseCurveType(const char* name) {
+    if (!name) return TE_CURVE_GAUSSIAN;
+    for (int i = 0; i < 4; i++) {
+        if (_stricmp(name, s_curve_names[i]) == 0) {
+            return (TE_MagnifyCurveType)i;
+        }
+    }
+    return TE_CURVE_GAUSSIAN;
+}
+
+static void ParseConfig(const cJSON* config) {
+    if (!config) return;
+
+    const cJSON* node;
+
+    node = cJSON_GetObjectItemCaseSensitive(config, "max_scale");
+    if (!node) node = cJSON_GetObjectItemCaseSensitive(config, "scale");
+    if (cJSON_IsNumber(node)) {
+        float v = (float)node->valuedouble;
+        if (v >= 1.0f && v <= 10.0f) g_hover_state.config.max_scale = v;
+    }
+
+    node = cJSON_GetObjectItemCaseSensitive(config, "radius");
+    if (cJSON_IsNumber(node)) {
+        int v = node->valueint;
+        if (v >= 40 && v <= 500) g_hover_state.config.radius = v;
+    }
+
+    node = cJSON_GetObjectItemCaseSensitive(config, "curve");
+    if (cJSON_IsString(node) && node->valuestring) {
+        g_hover_state.config.curve = ParseCurveType(node->valuestring);
+    }
+
+    node = cJSON_GetObjectItemCaseSensitive(config, "speed_ms");
+    if (cJSON_IsNumber(node)) {
+        int v = node->valueint;
+        if (v >= 50 && v <= 500) g_hover_state.config.speed_ms = v;
+    }
+
+    node = cJSON_GetObjectItemCaseSensitive(config, "bounce_enabled");
+    if (cJSON_IsBool(node)) {
+        g_hover_state.config.bounce_enabled = cJSON_IsTrue(node) ? 1 : 0;
+    }
+
+    node = cJSON_GetObjectItemCaseSensitive(config, "bounce_strength");
+    if (cJSON_IsNumber(node)) {
+        float v = (float)node->valuedouble;
+        if (v >= 100.0f && v <= 2000.0f) g_hover_state.config.bounce_strength = v;
+    }
+
+    node = cJSON_GetObjectItemCaseSensitive(config, "tilt_enabled");
+    if (cJSON_IsBool(node)) {
+        g_hover_state.config.tilt_enabled = cJSON_IsTrue(node) ? 1 : 0;
+    }
+
+    node = cJSON_GetObjectItemCaseSensitive(config, "max_tilt_angle");
+    if (cJSON_IsNumber(node)) {
+        float v = (float)node->valuedouble;
+        if (v >= 0.0f && v <= 45.0f) g_hover_state.config.max_tilt_angle = v;
+    }
+
+    node = cJSON_GetObjectItemCaseSensitive(config, "drag_drop_enabled");
+    if (cJSON_IsBool(node)) {
+        g_hover_state.config.drag_drop_enabled = cJSON_IsTrue(node) ? 1 : 0;
+    }
+
+    node = cJSON_GetObjectItemCaseSensitive(config, "drag_recession_scale");
+    if (cJSON_IsNumber(node)) {
+        float v = (float)node->valuedouble;
+        if (v >= 0.3f && v <= 1.0f) g_hover_state.config.drag_recession_scale = v;
+    }
+
+    node = cJSON_GetObjectItemCaseSensitive(config, "drop_zone_push");
+    if (cJSON_IsNumber(node)) {
+        float v = (float)node->valuedouble;
+        if (v >= 5.0f && v <= 200.0f) g_hover_state.config.drop_zone_push = v;
+    }
+
+    node = cJSON_GetObjectItemCaseSensitive(config, "keep_on_top");
+    if (cJSON_IsBool(node)) {
+        g_hover_state.config.keep_on_top = cJSON_IsTrue(node) ? 1 : 0;
+    }
+
+    node = cJSON_GetObjectItemCaseSensitive(config, "start_image_path");
+    if (!node) node = cJSON_GetObjectItemCaseSensitive(config, "start_button_image");
+    if (cJSON_IsString(node) && node->valuestring && node->valuestring[0]) {
+        size_t converted = 0;
+        mbstowcs_s(&converted, g_hover_state.config.start_image_path, MAX_PATH, node->valuestring, _TRUNCATE);
+    }
+}
+
+/* ── Settings Schema ──────────────────────────────────────────────── */
+
+static const char* s_curve_options[] = { "gaussian", "cubic", "cosine", "linear" };
+
+static const SettingDescriptor g_settings[] = {
+    {
+        "max_scale", "Max Hover Scale",
+        "Peak magnification multiplier when cursor is directly over an icon",
+        TE_SETTING_FLOAT,
+        { .float_val = { 1.3f, 1.0f, 10.0f, 0.05f } }
+    },
+    {
+        "radius", "Effect Radius",
+        "Distance in pixels over which neighboring icons are influenced",
+        TE_SETTING_INT,
+        { .int_val = { 120, 40, 500, 10 } }
+    },
+    {
+        "curve", "Easing Curve",
+        "Mathematical curve controlling the magnification falloff profile",
+        TE_SETTING_ENUM,
+        { .enum_val = { 0, s_curve_options, 4 } }
+    },
+    {
+        "speed_ms", "Animation Duration",
+        "Duration in milliseconds for the settle animation when mouse leaves",
+        TE_SETTING_INT,
+        { .int_val = { 150, 50, 500, 10 } }
+    },
+    {
+        "bounce_enabled", "Enable Notification Bounce",
+        "Whether icons perform an elastic spring bounce when receiving notifications",
+        TE_SETTING_BOOL,
+        { .bool_val = { TRUE } }
+    },
+    {
+        "bounce_strength", "Bounce Impulse Strength",
+        "Initial upward launch velocity applied when an app receives a notification",
+        TE_SETTING_FLOAT,
+        { .float_val = { 600.0f, 200.0f, 1500.0f, 25.0f } }
+    },
+    {
+        "tilt_enabled", "Enable 3D Tilt Perspective",
+        "DirectComposition 3D matrix transformation tilting icons toward cursor",
+        TE_SETTING_BOOL,
+        { .bool_val = { TRUE } }
+    },
+    {
+        "max_tilt_angle", "Max Tilt Angle",
+        "Maximum pitch and yaw rotation angle in degrees (0 to 45)",
+        TE_SETTING_FLOAT,
+        { .float_val = { 20.0f, 0.0f, 45.0f, 1.0f } }
+    },
+    {
+        "drag_drop_enabled", "Enable Drag-and-Drop Physics",
+        "Scale down held icon and widen drop target zone during drag",
+        TE_SETTING_BOOL,
+        { .bool_val = { TRUE } }
+    },
+    {
+        "drag_recession_scale", "Drag Recession Scale",
+        "Scale multiplier when icon is held or dragged (0.50 to 1.00)",
+        TE_SETTING_FLOAT,
+        { .float_val = { 0.80f, 0.50f, 1.0f, 0.05f } }
+    },
+    {
+        "drop_zone_push", "Drop Zone Push Factor",
+        "Horizontal parting distance in pixels for neighbor icons during drag (10 to 120)",
+        TE_SETTING_FLOAT,
+        { .float_val = { 50.0f, 10.0f, 120.0f, 5.0f } }
+    },
+    {
+        "keep_on_top", "Keep Overlay On Top",
+        "Continuously enforce HWND_TOPMOST so taskbar clicks do not obscure magnification",
+        TE_SETTING_BOOL,
+        { .bool_val = { TRUE } }
+    }
+};
+
+static const PluginSettings g_plugin_settings = {
+    g_settings,
+    12
+};
+
+/* ── Plugin Metadata ──────────────────────────────────────────────── */
 
 static const PluginMetadata g_metadata = {
     "icon_hover",
-    "0.4.0",
+    "Icon Hover",
+    "macOS Dock-style icon magnification with DirectComposition GPU-accelerated animation.",
     "TaskbarEngine",
-    "Magnifies taskbar icons on hover using DirectComposition and smooth animation curves.",
-    100,
-    { 22621, 26100 }
+    100,    /* version 1.0.0 */
+    110,    /* priority: visual overlay layer (100-199 band) */
+    TE_API_VERSION
 };
 
-static const char* g_curve_options[] = { "gaussian", "cubic", "linear", "cosine" };
+/* ── Event Handlers ───────────────────────────────────────────────── */
 
-static const SettingDescriptor g_descriptors[] = {
-    { "scale", "Scale", "Maximum icon scale.", TE_SETTING_FLOAT, { .f = { 1.3f, 1.0f, 2.0f, 0.1f } } },
-    { "radius", "Radius", "Magnification radius in px.", TE_SETTING_INT, { .i = { 120, 40, 300, 10 } } },
-    { "curve", "Curve", "Magnification falloff curve.", TE_SETTING_ENUM, { .e = { "gaussian", g_curve_options, 4 } } },
-    { "speed_ms", "Speed", "Settle animation speed in ms.", TE_SETTING_INT, { .i = { 150, 50, 500, 10 } } }
-};
+/**
+ * Query taskbar_resize.height from the shared state store.
+ * Updates the cached taskbarHeight in hover state.
+ */
+static void QueryTaskbarHeight(void) {
+    if (!g_hover_state.ctx || !g_hover_state.ctx->query_state) return;
 
-static const PluginSettings g_settings_schema = {
-    g_descriptors,
-    sizeof(g_descriptors) / sizeof(g_descriptors[0])
-};
-
-static void ParseConfig(const cJSON* config)
-{
-    if (!config) return;
-    AcquireSRWLockExclusive(&g_state.icon_lock);
-    const cJSON* scale = cJSON_GetObjectItemCaseSensitive(config, "scale");
-    if (scale && cJSON_IsNumber(scale)) {
-        g_state.max_scale = (float)scale->valuedouble;
-        if (g_state.max_scale < 1.0f) g_state.max_scale = 1.0f;
-        if (g_state.max_scale > 2.0f) g_state.max_scale = 2.0f;
+    StateValue val;
+    HRESULT hr = g_hover_state.ctx->query_state("taskbar_resize.height", &val);
+    if (TE_SUCCEEDED(hr) && val.type == TE_STATE_INT) {
+        g_hover_state.geometry.taskbarHeight = val.data.int_val;
+        HoverLog(TE_LOG_DEBUG, "Queried taskbar height: %d", g_hover_state.geometry.taskbarHeight);
     }
-    const cJSON* radius = cJSON_GetObjectItemCaseSensitive(config, "radius");
-    if (radius && cJSON_IsNumber(radius)) {
-        g_state.radius = radius->valueint;
-        if (g_state.radius < 40) g_state.radius = 40;
-        if (g_state.radius > 300) g_state.radius = 300;
-    }
-    const cJSON* speed = cJSON_GetObjectItemCaseSensitive(config, "speed_ms");
-    if (speed && cJSON_IsNumber(speed)) {
-        g_state.speed_ms = speed->valueint;
-        if (g_state.speed_ms < 50) g_state.speed_ms = 50;
-        if (g_state.speed_ms > 500) g_state.speed_ms = 500;
-    }
-    const cJSON* curve = cJSON_GetObjectItemCaseSensitive(config, "curve");
-    if (curve && cJSON_IsString(curve) && curve->valuestring) {
-        if (strcmp(curve->valuestring, "gaussian") == 0) g_state.curve = TE_CURVE_GAUSSIAN;
-        else if (strcmp(curve->valuestring, "cubic") == 0) g_state.curve = TE_CURVE_CUBIC;
-        else if (strcmp(curve->valuestring, "linear") == 0) g_state.curve = TE_CURVE_LINEAR;
-        else if (strcmp(curve->valuestring, "cosine") == 0) g_state.curve = TE_CURVE_COSINE;
-    }
-    ReleaseSRWLockExclusive(&g_state.icon_lock);
 }
 
-static HRESULT OnConfigChanged(uint32_t event_type, const void* event_data, void* user_data)
-{
-    (void)event_type; (void)user_data;
-    if (event_data) {
-        const TE_ConfigChangedEvent* evt = (const TE_ConfigChangedEvent*)event_data;
-        AcquireSRWLockExclusive(&g_state.icon_lock);
-        g_state.ctx.config = evt->new_config;
-        ReleaseSRWLockExclusive(&g_state.icon_lock);
-        ParseConfig(evt->new_config);
-    }
-    return S_OK;
-}
+static void RebuildGeometry(void) {
+    HWND taskbar_hwnd = g_hover_state.ctx->taskbar_hwnd;
+    if (!taskbar_hwnd) return;
 
-static HRESULT OnShellHook(uint32_t event_type, const void* event_data, void* user_data)
-{
-    (void)event_type; (void)event_data; (void)user_data;
-    /* Do not refresh UIA from shell hook notifications for now. Explorer sends
-     * bursts of shell hook messages while its XAML taskbar tree is mutating;
-     * repeated UIA descendant walks from inside that stream make Shell_TrayWnd
-     * silently disappear. Initial discovery remains enabled at startup. */
-    TE_DebugTrace("[TE-DBG] IconHover: ShellHook ignored for stability\n");
-    return S_OK;
-}
+    GetWindowRect(taskbar_hwnd, &g_hover_state.geometry.taskbarRect);
 
-static HRESULT OnDpiChanged(uint32_t event_type, const void* event_data, void* user_data)
-{
-    (void)event_type; (void)user_data;
-    if (event_data) {
-        const TE_DpiChangedEvent* evt = (const TE_DpiChangedEvent*)event_data;
-        g_state.ctx.dpi = evt->new_dpi;
-    }
-    return S_OK;
-}
-
-static BOOL CALLBACK EnumSecondaryTaskbars(HWND hwnd, LPARAM lParam)
-{
-    wchar_t class_name[64] = {0};
-    GetClassNameW(hwnd, class_name, 64);
-    if (wcscmp(class_name, L"Shell_SecondaryTrayWnd") == 0) {
-        TE_IconHoverState* state = (TE_IconHoverState*)lParam;
-        if (state->secondary_count < sizeof(state->secondary_taskbars) / sizeof(state->secondary_taskbars[0])) {
-            state->secondary_taskbars[state->secondary_count++] = hwnd;
-        }
-    }
-    return TRUE;
-}
-
-static HRESULT OnTaskbarMouse(uint32_t event_type, const void* event_data, void* user_data)
-{
-    (void)event_type; (void)user_data;
-    if (g_state.enabled && event_data) {
-        const TE_TaskbarMouseEvent* evt = (const TE_TaskbarMouseEvent*)event_data;
-        if (evt->x >= 0 && evt->y >= 0) {
-            /* Activate the frame loop timer on-demand when mouse is over taskbar.
-             * TE_FrameLoopActivate is a thread-safe no-op if the timer is already active. */
-            TE_FrameLoopActivate();
-        }
-    }
-    return S_OK;
-}
-
-static HRESULT IconHover_Init(const PluginContext* ctx) {
-    TE_DebugTraceFmt("[TE-DBG] IconHover: Init entering ctx=0x%p taskbar=0x%p\n",
-                     (void*)ctx, ctx ? (void*)ctx->taskbar_hwnd : NULL);
-    if (!ctx) return E_POINTER;
-    ZeroMemory(&g_state, sizeof(g_state));
-    InitializeSRWLock(&g_state.icon_lock);
-    g_state.ctx = *ctx;
-    g_state.max_scale = 1.3f;
-    g_state.radius = 120;
-    g_state.speed_ms = 150;
-    g_state.curve = TE_CURVE_GAUSSIAN;
-    ParseConfig(ctx->config);
-
-    if (ctx->subscribe) {
-        ctx->subscribe(TE_EVENT_CONFIG_CHANGED, OnConfigChanged, NULL);
-        ctx->subscribe(TE_EVENT_SHELL_HOOK, OnShellHook, NULL);
-        ctx->subscribe(TE_EVENT_DPI_CHANGED, OnDpiChanged, NULL);
-        ctx->subscribe(TE_EVENT_TASKBAR_MOUSE, OnTaskbarMouse, NULL);
-    }
-    
-    InterlockedExchange(&g_state.initialized, 1);
-    TE_LogWrite(TE_LOG_INFO, "IconHover plugin initialized");
-    TE_DebugTrace("[TE-DBG] IconHover: Init complete\n");
-    return S_OK;
-}
-
-#define ICON_HOVER_INIT_TIMER_ID 0x54454948 /* 'TEIH' */
-static bool g_deferred_init_pending = false;
-
-static void DeferredInitTimerCallback(void* user_data)
-{
-    (void)user_data;
-    g_deferred_init_pending = false;
-    
-    TE_LogWrite(TE_LOG_INFO, "IconHover running deferred initialization...");
-    
-    HWND taskbar_hwnd = g_state.ctx.taskbar_hwnd;
-    if (!taskbar_hwnd) {
-        taskbar_hwnd = FindWindowW(L"Shell_TrayWnd", NULL);
-    }
-    if (!taskbar_hwnd) {
-        taskbar_hwnd = FindWindowExW(NULL, NULL, L"Shell_TrayWnd", NULL);
-    }
-    if (!taskbar_hwnd) {
-        TE_LogWrite(TE_LOG_WARN, "IconHover deferred init: Shell_TrayWnd not currently present");
-        TE_DebugTrace("[TE-DBG] IconHover: Deferred init aborting, no taskbar HWND\n");
-        return;
-    }
-    TE_DebugTraceFmt("[TE-DBG] IconHover: Deferred init using taskbar=0x%p\n", (void*)taskbar_hwnd);
-
-    g_state.secondary_count = 0;
-    EnumWindows(EnumSecondaryTaskbars, (LPARAM)&g_state);
-    TE_DebugTraceFmt("[TE-DBG] IconHover: EnumSecondaryTaskbars count=%u\n", g_state.secondary_count);
-
-    HRESULT capture_hr = TE_IconCaptureInit();
-    TE_DebugTraceFmt("[TE-DBG] IconHover: IconCaptureInit hr=0x%08X\n", (unsigned int)capture_hr);
-    if (FAILED(capture_hr)) return;
-
-    HRESULT uia_hr = TE_UiaInit();
-    TE_DebugTraceFmt("[TE-DBG] IconHover: UiaInit hr=0x%08X\n", (unsigned int)uia_hr);
-    if (FAILED(uia_hr)) {
-        TE_IconCaptureShutdown();
-        return;
-    }
-
-    AcquireSRWLockExclusive(&g_state.icon_lock);
-    TE_UiaDiscoverIcons(taskbar_hwnd, g_state.icons, TE_MAX_TASKBAR_ICONS, &g_state.icon_count);
-    ReleaseSRWLockExclusive(&g_state.icon_lock);
-    TE_DebugTraceFmt("[TE-DBG] IconHover: UiaDiscoverIcons count=%d\n", g_state.icon_count);
-
-    HRESULT hr = TE_DcompInit(taskbar_hwnd);
-    TE_DebugTraceFmt("[TE-DBG] IconHover: DcompInit hr=0x%08X\n", (unsigned int)hr);
-    if (FAILED(hr)) {
-        TE_UiaCleanup();
-        TE_IconCaptureShutdown();
-        return;
-    }
-
-    TE_DcompLoadIconSurfaces(&g_state);
-
-    RECT tb_rect;
-    GetWindowRect(taskbar_hwnd, &tb_rect);
-    g_state.taskbar_rect = tb_rect;
-
-    int tb_height = tb_rect.bottom - tb_rect.top;
-    if (g_state.ctx.query_state) {
-        StateValue height_val;
-        if (SUCCEEDED(g_state.ctx.query_state("taskbar_resize.height", &height_val)) && height_val.type == TE_STATE_TYPE_INT) {
-            tb_height = height_val.value.i;
-        }
-    }
-    g_state.icon_size = (float)tb_height * 0.70f;
-    if (g_state.icon_size < 24.0f) g_state.icon_size = 24.0f;
-
-    hr = TE_FrameLoopStart(&g_state);
-    TE_DebugTraceFmt("[TE-DBG] IconHover: FrameLoopStart hr=0x%08X\n", (unsigned int)hr);
-    if (FAILED(hr)) {
-        TE_LogWrite(TE_LOG_ERROR, "IconHover FrameLoopStart failed: 0x%08X", hr);
-        TE_DcompShutdown();
-        TE_UiaCleanup();
-        TE_IconCaptureShutdown();
-        return;
-    }
-
-    InterlockedExchange(&g_state.enabled, 1);
-    TE_LogWrite(TE_LOG_INFO, "IconHover plugin fully enabled after deferred init");
-    TE_DebugTrace("[TE-DBG] IconHover: Deferred init complete, plugin enabled\n");
-}
-
-static HRESULT IconHover_Enable(void) {
-    TE_DebugTrace("[TE-DBG] IconHover: Enable entering\n");
-    if (!g_state.initialized) {
-        TE_LogWrite(TE_LOG_ERROR, "IconHover_Enable failed: plugin not initialized");
-        return E_FAIL;
-    }
-    
-    HWND taskbar = g_state.ctx.taskbar_hwnd;
-    if (!taskbar || !IsWindow(taskbar)) {
-        TE_LogWrite(TE_LOG_ERROR, "IconHover_Enable: no valid taskbar HWND");
-        return E_HANDLE;
-    }
-
-    TE_LogWrite(TE_LOG_INFO, "IconHover deferring enable to UI-thread timer");
-    if (g_state.ctx.register_timer) {
-        HRESULT hr = g_state.ctx.register_timer(50, FALSE, DeferredInitTimerCallback, NULL);
-        if (FAILED(hr)) {
-            TE_LogWrite(TE_LOG_ERROR, "IconHover register_timer failed (hr=0x%08X)", hr);
-            return hr;
-        }
-        g_deferred_init_pending = true;
+    HWND bridge = FindWindowExA(taskbar_hwnd, NULL, "Windows.UI.Composition.DesktopWindowContentBridge", NULL);
+    if (bridge) {
+        RECT bridgeRect;
+        GetWindowRect(bridge, &bridgeRect);
+        g_hover_state.geometry.bridgeOffsetY = bridgeRect.top - g_hover_state.geometry.taskbarRect.top;
     } else {
-        return E_NOTIMPL;
+        g_hover_state.geometry.bridgeOffsetY = 0;
     }
-    return S_OK;
+
+    QueryTaskbarHeight();
+    g_hover_state.geometry.baselineY = g_hover_state.geometry.taskbarRect.bottom;
+    g_hover_state.geometry.headroom_y = (TE_HOVER_HEADROOM_BASE_PX * g_hover_state.current_dpi) / 96;
+    g_hover_state.geometry.generation++;
+    g_hover_state.geometry.valid = 1;
 }
 
-static HRESULT IconHover_Disable(void) {
-    TE_DebugTrace("[TE-DBG] IconHover: Disable entering\n");
-    InterlockedExchange(&g_state.enabled, 0);
-    
-    if (g_deferred_init_pending && g_state.ctx.cancel_timer) {
-        g_state.ctx.cancel_timer(DeferredInitTimerCallback);
-        g_deferred_init_pending = false;
+/**
+ * Rebuild icon discovery, capture, and visual tree.
+ * Called on initial enable and when apps change (shell hook).
+ */
+static void RebuildIconData(void) {
+    HWND taskbar_hwnd = g_hover_state.ctx->taskbar_hwnd;
+    if (!taskbar_hwnd) return;
+
+    /* Stop timer to prevent concurrent DComp tree modification */
+    int was_active = TE_FrameLoopIsActive();
+    if (was_active) {
+        TE_FrameLoopStop();
     }
+
+    /* Save old animation state to preserve scales across rebuilds */
+    TE_IconAnimState old_anim[TE_HOVER_MAX_ICONS];
+    TE_IconElementInfo old_items[TE_HOVER_MAX_ICONS];
+    int old_count = g_hover_state.anim_count;
+    if (old_count > 0) {
+        memcpy(old_anim, g_hover_state.anim, sizeof(TE_IconAnimState) * old_count);
+        memcpy(old_items, g_hover_state.icon_cache.items, sizeof(TE_IconElementInfo) * old_count);
+    }
+
+    /* Discover icons via UIA */
+    TE_UiaCacheInvalidate(&g_hover_state.icon_cache);
+    HRESULT hr = TE_UiaDiscoverIcons(taskbar_hwnd, &g_hover_state.icon_cache);
+    if (TE_FAILED(hr)) {
+        HoverLog(TE_LOG_WARNING, "UIA icon discovery failed");
+        if (was_active) TE_FrameLoopStart();
+        return;
+    }
+
+    uint32_t count = g_hover_state.icon_cache.count;
+    if (count == 0) {
+        HoverLog(TE_LOG_WARNING, "No taskbar icons discovered");
+        if (was_active) TE_FrameLoopStart();
+        return;
+    }
+
+    /* Initialize animation state from discovered bounds */
+    g_hover_state.anim_count = (int)count;
+    for (uint32_t i = 0; i < count; i++) {
+        const RECT* b = &g_hover_state.icon_cache.items[i].buttonRect;
+        float w = (float)(b->right - b->left);
+        float h = (float)(b->bottom - b->top);
+
+        float initial_scale = 1.0f;
+        float initial_target = 1.0f;
+        
+        for (int j = 0; j < old_count; j++) {
+            if (wcscmp(g_hover_state.icon_cache.items[i].app_id, old_items[j].app_id) == 0 ||
+                abs(b->left - old_items[j].buttonRect.left) < 10) {
+                initial_scale = old_anim[j].current_scale;
+                initial_target = old_anim[j].target_scale;
+                break;
+            }
+        }
+
+        g_hover_state.anim[i].center_x = (float)b->left + w / 2.0f;
+        g_hover_state.anim[i].center_y = (float)b->top + h / 2.0f;
+        g_hover_state.anim[i].base_width = w;
+        g_hover_state.anim[i].base_height = h;
+        g_hover_state.anim[i].current_scale = initial_scale;
+        g_hover_state.anim[i].target_scale = initial_target;
+        g_hover_state.anim[i].geometry_generation = g_hover_state.geometry.generation;
+        g_hover_state.anim[i].current_tilt_x = 0.0f;
+        g_hover_state.anim[i].target_tilt_x = 0.0f;
+        g_hover_state.anim[i].velocity_tilt_x = 0.0f;
+        g_hover_state.anim[i].current_tilt_y = 0.0f;
+        g_hover_state.anim[i].target_tilt_y = 0.0f;
+        g_hover_state.anim[i].velocity_tilt_y = 0.0f;
+        g_hover_state.anim[i].current_pos_x = 0.0f;
+    }
+
+    /* Capture icon bitmaps */
+    HBITMAP bitmaps[TE_HOVER_MAX_ICONS] = { 0 };
+    for (uint32_t i = 0; i < count; i++) {
+        if (g_hover_state.icon_cache.items[i].element_type == TE_ELEM_START_BUTTON) {
+            /* Custom start button uses loaded Direct2D bitmap, skip GDI icon_capture */
+            bitmaps[i] = NULL;
+        } else {
+            TE_IconCaptureGetBitmapWithBounds(
+                g_hover_state.icon_cache.items[i].app_id,
+                g_hover_state.icon_cache.items[i].icon_index,
+                &g_hover_state.icon_cache.items[i].glyphRect,
+                &bitmaps[i]
+            );
+        }
+    }
+
+    /* Build/rebuild DComp visual tree */
+    int overlay_x = g_hover_state.geometry.taskbarRect.left;
+    int overlay_y = g_hover_state.geometry.taskbarRect.top - g_hover_state.geometry.headroom_y;
+    int baseline_y = g_hover_state.geometry.baselineY;
+
+    TE_DCompBuildVisualTree(
+        (int)count,
+        g_hover_state.icon_cache.items,
+        bitmaps,
+        baseline_y,
+        overlay_x,
+        overlay_y
+    );
+
+    if (was_active) {
+        TE_FrameLoopStart();
+    }
+
+    HoverLog(TE_LOG_INFO, "Icon data rebuilt: %u icons", count);
+}
+
+#ifndef HSHELL_REDRAW
+#define HSHELL_REDRAW 6
+#endif
+#ifndef HSHELL_FLASH
+#define HSHELL_FLASH (HSHELL_REDRAW | 0x8000)
+#endif
+
+static int StrCaseContains(const wchar_t* haystack, const wchar_t* needle) {
+    if (!haystack || !needle || !*haystack || !*needle) return 0;
+    size_t h_len = wcslen(haystack);
+    size_t n_len = wcslen(needle);
+    if (n_len > h_len) return 0;
+    for (size_t i = 0; i <= h_len - n_len; i++) {
+        if (_wcsnicmp(haystack + i, needle, n_len) == 0) return 1;
+    }
+    return 0;
+}
+
+/**
+ * Resolve an application HWND to its corresponding taskbar icon index.
+ */
+static int ResolveHwndToIconIndex(HWND hwnd) {
+    if (!hwnd || !IsWindow(hwnd)) return -1;
+    if (g_hover_state.icon_cache.count == 0) return -1;
+
+    DWORD pid = 0;
+    GetWindowThreadProcessId(hwnd, &pid);
+
+    wchar_t exe_path[MAX_PATH] = { 0 };
+    wchar_t exe_name[MAX_PATH] = { 0 };
+    wchar_t exe_base[MAX_PATH] = { 0 };
+    wchar_t aumid[256] = { 0 };
+    wchar_t window_title[256] = { 0 };
+
+    if (pid != 0) {
+        HANDLE h_proc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+        if (h_proc) {
+            DWORD size = MAX_PATH;
+            if (QueryFullProcessImageNameW(h_proc, 0, exe_path, &size)) {
+                const wchar_t* p = wcsrchr(exe_path, L'\\');
+                if (p) {
+                    wcscpy_s(exe_name, MAX_PATH, p + 1);
+                } else {
+                    wcscpy_s(exe_name, MAX_PATH, exe_path);
+                }
+                wcscpy_s(exe_base, MAX_PATH, exe_name);
+                wchar_t* dot = wcsrchr(exe_base, L'.');
+                if (dot) *dot = L'\0';
+            }
+
+            /* Query AUMID for packaged/UWP apps if possible */
+            typedef LONG (WINAPI *pfnGetApplicationUserModelId)(HANDLE, UINT32*, PWSTR);
+            HMODULE h_kernel = GetModuleHandleW(L"kernel32.dll");
+            if (h_kernel) {
+                pfnGetApplicationUserModelId pfnGetAUMID = 
+                    (pfnGetApplicationUserModelId)(void*)GetProcAddress(h_kernel, "GetApplicationUserModelId");
+                if (pfnGetAUMID) {
+                    UINT32 aumid_len = 256;
+                    pfnGetAUMID(h_proc, &aumid_len, aumid);
+                }
+            }
+
+            CloseHandle(h_proc);
+        }
+    }
+
+    GetWindowTextW(hwnd, window_title, 256);
+
+    /* Search through discovered icon cache */
+    for (uint32_t i = 0; i < g_hover_state.icon_cache.count; i++) {
+        const wchar_t* app_id = g_hover_state.icon_cache.items[i].app_id;
+        if (!app_id || !*app_id) continue;
+
+        if (aumid[0] && StrCaseContains(app_id, aumid)) {
+            return (int)i;
+        }
+        if (exe_path[0] && StrCaseContains(app_id, exe_path)) {
+            return (int)i;
+        }
+        if (exe_name[0] && StrCaseContains(app_id, exe_name)) {
+            return (int)i;
+        }
+        if (exe_base[0] && StrCaseContains(app_id, exe_base)) {
+            return (int)i;
+        }
+        if (window_title[0] && (StrCaseContains(app_id, window_title) || StrCaseContains(window_title, app_id))) {
+            return (int)i;
+        }
+    }
+
+    /* Fallback: if only one icon is managed, map to it */
+    if (g_hover_state.icon_cache.count == 1) {
+        return 0;
+    }
+
+    return -1;
+}
+
+/**
+ * Shell hook event handler — app opened/closed/activated or notifications.
+ * Triggers icon re-discovery or inertial bouncing.
+ */
+static void OnShellHook(uint32_t type, const void* data, void* user_data) {
+    (void)type; (void)user_data;
+
+    if (!g_hover_state.enabled) return;
+
+    const TE_ShellHookData* hook_data = (const TE_ShellHookData*)data;
+    if (!hook_data) return;
+
+    int msg = hook_data->shell_msg;
+
+    /* Check for flashing notification event (HSHELL_FLASH) */
+    if (msg == HSHELL_FLASH || ((msg & 0x8000) && ((msg & 0x7FFF) == HSHELL_REDRAW))) {
+        if (!g_hover_state.config.bounce_enabled) return;
+        HWND flash_hwnd = hook_data->target_hwnd;
+        int icon_index = ResolveHwndToIconIndex(flash_hwnd);
+        if (icon_index >= 0) {
+            float strength = g_hover_state.config.bounce_strength > 0.0f ? g_hover_state.config.bounce_strength : 600.0f;
+            HoverLog(TE_LOG_INFO, "Notification flash for HWND %p -> icon %d, triggering inertial bounce (strength=%.1f)",
+                     (void*)flash_hwnd, icon_index, strength);
+            TE_FrameLoopTriggerIconBounce(icon_index, strength);
+        } else {
+            HoverLog(TE_LOG_DEBUG, "Notification flash for HWND %p could not be resolved to icon",
+                     (void*)flash_hwnd);
+        }
+        return;
+    }
+
+    int base_msg = msg & 0x7FFF;
+    /* Only rebuild icon cache when windows are actually created, destroyed, or replaced */
+    if (base_msg != HSHELL_WINDOWCREATED &&
+        base_msg != HSHELL_WINDOWDESTROYED &&
+        base_msg != HSHELL_WINDOWREPLACED) {
+        return;
+    }
+
+    HoverLog(TE_LOG_INFO, "Shell hook window change received (%d), rebuilding icon cache",
+             hook_data->shell_msg);
+    TE_IconCaptureInvalidate();
+    RebuildIconData();
+}
+
+/**
+ * Config changed event handler — re-parse settings.
+ */
+static void OnConfigChanged(uint32_t type, const void* data, void* user_data) {
+    (void)type; (void)user_data;
+    const TE_ConfigChangedData* changed = (const TE_ConfigChangedData*)data;
+    ParseConfig((const cJSON*)changed->new_config);
+    if (g_hover_state.config.start_image_path[0] != L'\0') {
+        TE_DCompLoadStartImage(g_hover_state.config.start_image_path);
+        if (TE_DCompIsCustomStartButtonEnabled() && g_hover_state.ctx) {
+            TE_UiaHideStartButton(g_hover_state.ctx->taskbar_hwnd, TRUE);
+        }
+    }
+    QueryTaskbarHeight();
+    RebuildIconData();
+    HoverLog(TE_LOG_INFO, "Config updated: max_scale=%.2f, radius=%d, curve=%d, speed_ms=%d",
+             g_hover_state.config.max_scale, g_hover_state.config.radius,
+             (int)g_hover_state.config.curve, g_hover_state.config.speed_ms);
+}
+
+/**
+ * Taskbar mouse movement / leave event handler.
+ */
+static void OnTaskbarMouse(uint32_t type, const void* data, void* user_data) {
+    (void)type; (void)user_data;
+    if (!g_hover_state.enabled) return;
+
+    const TE_TaskbarMouseData* mouse_data = (const TE_TaskbarMouseData*)data;
+    if (!mouse_data) return;
+
+    if (mouse_data->is_in_taskbar) {
+        TE_FrameLoopOnMouseMove((float)mouse_data->cursor_pos.x, (float)mouse_data->cursor_pos.y, mouse_data->is_dragging);
+    } else {
+        TE_FrameLoopOnMouseLeave();
+    }
+}
+
+/**
+ * Display DPI change event handler.
+ */
+static void OnDpiChanged(uint32_t type, const void* data, void* user_data) {
+    (void)type; (void)user_data;
+    if (!g_hover_state.enabled) return;
+
+    const TE_DpiChangedData* dpi_data = (const TE_DpiChangedData*)data;
+    if (!dpi_data) return;
+
+    HoverLog(TE_LOG_INFO, "DPI changed from %u to %u", dpi_data->old_dpi, dpi_data->new_dpi);
+    g_hover_state.current_dpi = dpi_data->new_dpi;
 
     TE_FrameLoopStop();
-    TE_DcompShutdown();
+    RebuildGeometry();
+
+    HWND taskbar_hwnd = g_hover_state.ctx->taskbar_hwnd;
+    if (taskbar_hwnd && IsWindow(taskbar_hwnd)) {
+        int tb_width = g_hover_state.geometry.taskbarRect.right - g_hover_state.geometry.taskbarRect.left;
+        int tb_height = g_hover_state.geometry.taskbarRect.bottom - g_hover_state.geometry.taskbarRect.top;
+        int overlay_x = g_hover_state.geometry.taskbarRect.left;
+        int overlay_y = g_hover_state.geometry.taskbarRect.top - g_hover_state.geometry.headroom_y;
+        int overlay_w = tb_width;
+        int overlay_h = tb_height + g_hover_state.geometry.headroom_y;
+
+        TE_DCompMoveOverlayWindow(g_hover_state.overlay_hwnd, overlay_x, overlay_y, overlay_w, overlay_h);
+    }
+
+    TE_IconCaptureInvalidate();
+    RebuildIconData();
+}
+
+/**
+ * Taskbar geometry change event handler.
+ */
+static void OnTaskbarGeometry(uint32_t type, const void* data, void* user_data) {
+    (void)type; (void)data; (void)user_data;
+    if (!g_hover_state.enabled) return;
+
+    TE_FrameLoopStop();
+    RebuildGeometry();
+
+    int tb_width = g_hover_state.geometry.taskbarRect.right - g_hover_state.geometry.taskbarRect.left;
+    int tb_height = g_hover_state.geometry.taskbarRect.bottom - g_hover_state.geometry.taskbarRect.top;
+    int overlay_x = g_hover_state.geometry.taskbarRect.left;
+    int overlay_y = g_hover_state.geometry.taskbarRect.top - g_hover_state.geometry.headroom_y;
+    int overlay_w = tb_width;
+    int overlay_h = tb_height + g_hover_state.geometry.headroom_y;
+
+    TE_DCompMoveOverlayWindow(g_hover_state.overlay_hwnd, overlay_x, overlay_y, overlay_w, overlay_h);
+    RebuildIconData();
+}
+
+/* ── Plugin Lifecycle ─────────────────────────────────────────────── */
+
+static HRESULT Initialize(const PluginContext* ctx) {
+    memset(&g_hover_state, 0, sizeof(g_hover_state));
+    g_hover_state.ctx = ctx;
+    InitializeSRWLock(&g_hover_state.state_lock);
+
+    if (ctx && ctx->log) {
+        TE_LogSetCallback(ctx->log);
+    }
+
+    /* Set defaults */
+    g_hover_state.config.max_scale = 1.3f;
+    g_hover_state.config.radius = 120;
+    g_hover_state.config.curve = TE_CURVE_GAUSSIAN;
+    g_hover_state.config.speed_ms = 150;
+    g_hover_state.config.bounce_enabled = 1;
+    g_hover_state.config.bounce_strength = 600.0f;
+    g_hover_state.config.tilt_enabled = 1;
+    g_hover_state.config.max_tilt_angle = 20.0f;
+    g_hover_state.config.drag_drop_enabled = 1;
+    g_hover_state.config.drag_recession_scale = 0.80f;
+    g_hover_state.config.drop_zone_push = 50.0f;
+    g_hover_state.config.keep_on_top = 1;
+    g_hover_state.geometry.taskbarHeight = 48; /* Default until state store provides real value */
+
+    g_hover_state.current_dpi = (ctx && ctx->dpi) ? ctx->dpi : 96;
+    g_hover_state.geometry.headroom_y = (TE_HOVER_HEADROOM_BASE_PX * g_hover_state.current_dpi) / 96;
+    if (ctx && ctx->taskbar_hwnd) {
+        GetWindowRect(ctx->taskbar_hwnd, &g_hover_state.geometry.taskbarRect);
+    }
+
+    ParseConfig(ctx ? ctx->config : NULL);
+    HoverLog(TE_LOG_INFO, "Initialize: max_scale=%.2f, radius=%d, curve=%d, speed_ms=%d",
+             g_hover_state.config.max_scale, g_hover_state.config.radius,
+             (int)g_hover_state.config.curve, g_hover_state.config.speed_ms);
+
+    return TE_S_OK;
+}
+
+static HRESULT Enable(void) {
+    HoverLog(TE_LOG_INFO, "Enable: starting IconHover");
+
+    /* Query current taskbar height from state store */
+    QueryTaskbarHeight();
+
+    /* Initialize icon capture subsystem */
+    HRESULT hr = TE_IconCaptureInit();
+    if (TE_FAILED(hr)) {
+        HoverLog(TE_LOG_WARNING, "Icon capture init failed (non-fatal)");
+    }
+
+    /* Get taskbar dimensions and position for overlay */
+    HWND taskbar_hwnd = g_hover_state.ctx->taskbar_hwnd;
+    g_hover_state.current_dpi = g_hover_state.ctx->dpi ? g_hover_state.ctx->dpi : 96;
+    RebuildGeometry();
+
+    int tb_width = g_hover_state.geometry.taskbarRect.right - g_hover_state.geometry.taskbarRect.left;
+    int tb_height = g_hover_state.geometry.taskbarRect.bottom - g_hover_state.geometry.taskbarRect.top;
+
+    int overlay_x = g_hover_state.geometry.taskbarRect.left;
+    int overlay_y = g_hover_state.geometry.taskbarRect.top - g_hover_state.geometry.headroom_y;
+    int overlay_w = tb_width;
+    int overlay_h = tb_height + g_hover_state.geometry.headroom_y;
+
+    /* Create overlay window (WS_POPUP layered window with headroom) */
+    g_hover_state.overlay_hwnd = TE_DCompCreateOverlayWindow(taskbar_hwnd, overlay_x, overlay_y, overlay_w, overlay_h);
+    if (!g_hover_state.overlay_hwnd) {
+        HoverLog(TE_LOG_ERROR, "Failed to create overlay window — disabling IconHover");
+        TE_IconCaptureShutdown();
+        return TE_E_FAIL;
+    }
+
+    /* Initialize DirectComposition */
+    hr = TE_DCompInitDevice(g_hover_state.overlay_hwnd);
+    if (TE_FAILED(hr)) {
+        HoverLog(TE_LOG_ERROR, "DComp init failed — disabling IconHover gracefully");
+        TE_DCompDestroyOverlayWindow(g_hover_state.overlay_hwnd);
+        g_hover_state.overlay_hwnd = NULL;
+        TE_IconCaptureShutdown();
+        return TE_E_FAIL;
+    }
+
+    /* Load custom start button image if specified or default present */
+    if (g_hover_state.config.start_image_path[0] != L'\0') {
+        TE_DCompLoadStartImage(g_hover_state.config.start_image_path);
+    } else {
+        if (GetFileAttributesW(L"Config\\start_button.png") != INVALID_FILE_ATTRIBUTES) {
+            TE_DCompLoadStartImage(L"Config\\start_button.png");
+        } else if (GetFileAttributesW(L"Config\\start_button.svg") != INVALID_FILE_ATTRIBUTES) {
+            TE_DCompLoadStartImage(L"Config\\start_button.svg");
+        } else {
+            TE_DCompLoadStartImage(L"start_button.png");
+        }
+    }
+
+    if (TE_DCompIsCustomStartButtonEnabled()) {
+        TE_UiaHideStartButton(taskbar_hwnd, TRUE);
+    }
+
+    /* Discover icons and build visual tree */
+    RebuildIconData();
+
+    /* Subscribe to engine events */
+    g_hover_state.ctx->subscribe(TE_EVENT_SHELL_HOOK, OnShellHook, NULL);
+    g_hover_state.ctx->subscribe(TE_EVENT_CONFIG_CHANGED, OnConfigChanged, NULL);
+    g_hover_state.ctx->subscribe(TE_EVENT_TASKBAR_MOUSE, OnTaskbarMouse, NULL);
+    g_hover_state.ctx->subscribe(TE_EVENT_DPI_CHANGED, OnDpiChanged, NULL);
+    g_hover_state.ctx->subscribe(TE_EVENT_TASKBAR_GEOMETRY, OnTaskbarGeometry, NULL);
+
+    /* Register for mouse tracking via message filter (v2 API) */
+    if (TE_CTX_HAS_FIELD(g_hover_state.ctx, subscribe_message) &&
+        g_hover_state.ctx->subscribe_message) {
+        g_hover_state.ctx->subscribe_message(WM_MOUSEMOVE);
+        g_hover_state.ctx->subscribe_message(WM_MOUSELEAVE);
+    }
+
+    g_hover_state.enabled = 1;
+    HoverLog(TE_LOG_INFO, "Enable complete: %d icons, overlay ready", g_hover_state.anim_count);
+
+    return TE_S_OK;
+}
+
+static HRESULT Disable(void) {
+    HoverLog(TE_LOG_INFO, "Disable: stopping IconHover");
+    g_hover_state.enabled = 0;
+
+    /* Stop animation */
+    TE_FrameLoopStop();
+
+    /* Restore native start button */
+    if (g_hover_state.ctx && g_hover_state.ctx->taskbar_hwnd) {
+        TE_UiaHideStartButton(g_hover_state.ctx->taskbar_hwnd, FALSE);
+    }
+
+    /* Unsubscribe message filters */
+    if (TE_CTX_HAS_FIELD(g_hover_state.ctx, unsubscribe_message) &&
+        g_hover_state.ctx->unsubscribe_message) {
+        g_hover_state.ctx->unsubscribe_message(WM_MOUSEMOVE);
+        g_hover_state.ctx->unsubscribe_message(WM_MOUSELEAVE);
+    }
+
+    /* Unsubscribe events */
+    g_hover_state.ctx->unsubscribe(TE_EVENT_SHELL_HOOK, OnShellHook);
+    g_hover_state.ctx->unsubscribe(TE_EVENT_CONFIG_CHANGED, OnConfigChanged);
+    g_hover_state.ctx->unsubscribe(TE_EVENT_TASKBAR_MOUSE, OnTaskbarMouse);
+    g_hover_state.ctx->unsubscribe(TE_EVENT_DPI_CHANGED, OnDpiChanged);
+    g_hover_state.ctx->unsubscribe(TE_EVENT_TASKBAR_GEOMETRY, OnTaskbarGeometry);
+
+    /* Tear down DComp */
+    TE_DCompDestroyDevice();
+    TE_DCompDestroyOverlayWindow(g_hover_state.overlay_hwnd);
+    g_hover_state.overlay_hwnd = NULL;
+
+    /* Release icon cache */
     TE_IconCaptureShutdown();
-    TE_UiaCleanup();
-    
-    AcquireSRWLockExclusive(&g_state.icon_lock);
-    g_state.icon_count = 0;
-    ReleaseSRWLockExclusive(&g_state.icon_lock);
 
-    TE_LogWrite(TE_LOG_INFO, "IconHover plugin disabled");
-    TE_DebugTrace("[TE-DBG] IconHover: Disable complete\n");
-    return S_OK;
+    HoverLog(TE_LOG_INFO, "Disable complete");
+    return TE_S_OK;
 }
 
-static HRESULT IconHover_Update(float deltaTime) {
-    (void)deltaTime;
-    return S_OK;
+static HRESULT Update(float delta_time) {
+    (void)delta_time;
+    /* Animation runs on timer thread via frame_loop, not the UI Update tick */
+    return TE_S_OK;
 }
 
-static HRESULT IconHover_Shutdown(void) {
-    if (g_state.enabled) {
-        IconHover_Disable();
-    }
-    if (g_state.ctx.unsubscribe) {
-        g_state.ctx.unsubscribe(TE_EVENT_CONFIG_CHANGED, OnConfigChanged);
-        g_state.ctx.unsubscribe(TE_EVENT_SHELL_HOOK, OnShellHook);
-        g_state.ctx.unsubscribe(TE_EVENT_DPI_CHANGED, OnDpiChanged);
-        g_state.ctx.unsubscribe(TE_EVENT_TASKBAR_MOUSE, OnTaskbarMouse);
-    }
-    InterlockedExchange(&g_state.initialized, 0);
-    return S_OK;
+static HRESULT Shutdown(void) {
+    HoverLog(TE_LOG_INFO, "Shutdown called");
+    g_hover_state.ctx = NULL;
+    return TE_S_OK;
 }
 
-static const PluginMetadata* IconHover_GetMetadata(void) {
+static const PluginMetadata* GetMetadata(void) {
     return &g_metadata;
 }
 
-static const PluginSettings* IconHover_GetSettings(void) {
-    return &g_settings_schema;
+static const PluginSettings* GetSettings(void) {
+    return &g_plugin_settings;
 }
 
-static const PluginInterface g_plugin = {
-    IconHover_Init,
-    IconHover_Enable,
-    IconHover_Disable,
-    IconHover_Update,
-    IconHover_Shutdown,
-    IconHover_GetMetadata,
-    IconHover_GetSettings
+/* ── Plugin Interface (frozen ABI) ────────────────────────────────── */
+
+static const PluginInterface g_interface = {
+    Initialize,
+    Enable,
+    Disable,
+    Update,
+    Shutdown,
+    GetMetadata,
+    GetSettings
 };
 
+#ifndef TE_HOVER_TESTLIB
 TE_EXPORT const PluginInterface* GetPluginInterface(void) {
-    return &g_plugin;
+    return &g_interface;
 }
+#endif

@@ -1,354 +1,466 @@
 #include "taskbar_resize.h"
+#include <sdk/te_plugin.h>
 #include <sdk/te_events.h>
+#include <sdk/te_jsonc.h>
+#include <cJSON.h>
+#include <windows.h>
 #include <commctrl.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <stdarg.h>
 
-typedef struct TE_TaskbarResizeSettings {
-    int height;
-    int padding;
-    int margins;
-    int icon_spacing;
-} TE_TaskbarResizeSettings;
+#define SUBCLASS_RESIZE_ID 0x5442525A /* 'TBRZ' */
+#define SUBCLASS_BRIDGE_ID 0x54425242 /* 'TBRB' */
 
-typedef struct TE_TaskbarBarState {
-    HWND hwnd;
-    HMONITOR monitor;
-    RECT original_rect;
-    RECT original_work_area;
-    bool saved_original;
-    bool updates_work_area;
-} TE_TaskbarBarState;
+static const PluginContext* g_ctx = NULL;
 
-typedef struct TE_TaskbarResizeState {
-    PluginContext ctx;
-    bool initialized;
-    bool enabled;
-    HWND taskbar_hwnd;
-    HMONITOR monitor;
-    TE_TaskbarResizeSettings settings;
-    TE_TaskbarBarState bars[8];
-    uint32_t bar_count;
-} TE_TaskbarResizeState;
+static void ResizeLog(TE_LogLevel level, const char* fmt, ...) {
+    if (g_ctx && g_ctx->log) {
+        char buf[256];
+        va_list args;
+        va_start(args, fmt);
+        vsnprintf(buf, sizeof(buf), fmt, args);
+        va_end(args);
+        g_ctx->log(level, "TaskbarResize", buf);
+    }
+}
 
-static TE_TaskbarResizeState g_state = { 0 };
+static TE_ResizeConfig g_config = {
+    32, /* 32px default: calibrated sweet spot with 4px symmetric padding */
+    0,  /* padding_top adjustment */
+    0,  /* padding_bottom adjustment */
+    4   /* icon_spacing */
+};
+
+static const SettingDescriptor g_settings[] = {
+    { "height", "Taskbar Height", "Height of the taskbar in logical pixels (default 32, compact 30-36, ultra 24)", TE_SETTING_INT, { .int_val = { 32, 20, 128, 1 } } },
+    { "padding_top", "Top Padding Adjustment", "Fine-tune vertical offset from top in logical pixels", TE_SETTING_INT, { .int_val = { 0, -20, 20, 1 } } },
+    { "padding_bottom", "Bottom Padding Adjustment", "Fine-tune vertical offset from bottom in logical pixels", TE_SETTING_INT, { .int_val = { 0, -20, 20, 1 } } },
+    { "icon_spacing", "Icon Spacing", "Horizontal spacing between icons in logical pixels", TE_SETTING_INT, { .int_val = { 4, 0, 32, 1 } } }
+};
+
+static const PluginSettings g_plugin_settings = {
+    g_settings,
+    4
+};
 
 static const PluginMetadata g_metadata = {
     "taskbar_resize",
-    "0.3.0",
+    "Taskbar Resize",
+    "Dynamically resize the Windows taskbar with pixel-perfect icon centering and multi-DPI work area synchronization.",
     "TaskbarEngine",
-    "Resizes the Windows taskbar and restores it on disable.",
-    10,
-    { 22621, 26100 }
+    110,
+    10, /* low priority to resize before visual overlays */
+    TE_API_VERSION
 };
 
-static const SettingDescriptor g_descriptors[] = {
-    { "height", "Height", "Taskbar height in logical pixels.", TE_SETTING_INT, { .i = { TE_TASKBAR_RESIZE_DEFAULT_HEIGHT, TE_TASKBAR_RESIZE_MIN_HEIGHT, TE_TASKBAR_RESIZE_MAX_HEIGHT, 1 } } },
-    { "padding", "Padding", "Reserved padding around taskbar content.", TE_SETTING_INT, { .i = { 4, 0, 20, 1 } } },
-    { "margins", "Margins", "Reserved taskbar edge margin.", TE_SETTING_INT, { .i = { 0, 0, 20, 1 } } },
-    { "icon_spacing", "Icon spacing", "Reserved spacing between taskbar icons.", TE_SETTING_INT, { .i = { 8, 0, 32, 1 } } }
-};
+static uint32_t g_current_dpi = 96;
+static RECT g_original_work_area;
+static BOOL g_work_area_saved = FALSE;
 
-static const PluginSettings g_settings_schema = {
-    g_descriptors,
-    sizeof(g_descriptors) / sizeof(g_descriptors[0])
-};
+static int g_current_child_y_offset = 0;
+static int g_current_child_cy = 0;
+static HWND g_bridge_hwnd = NULL;
 
-int TE_TaskbarResizeClampHeight(int height)
-{
-    if (height < TE_TASKBAR_RESIZE_MIN_HEIGHT) return TE_TASKBAR_RESIZE_MIN_HEIGHT;
-    if (height > TE_TASKBAR_RESIZE_MAX_HEIGHT) return TE_TASKBAR_RESIZE_MAX_HEIGHT;
-    return height;
-}
-
-int TE_TaskbarResizeScaleForDpi(int value, uint32_t dpi)
-{
+int TE_CalculateCenteringOffset(int new_height, int default_height, int padding_top, int padding_bottom, uint32_t dpi) {
     if (dpi == 0) dpi = 96;
-    return MulDiv(value, (int)dpi, 96);
+    int new_cy = TE_ScaleDPI(new_height, dpi);
+    int default_cy = TE_ScaleDPI(default_height, dpi);
+    int base_offset = (new_cy - default_cy) / 2;
+    int custom_offset = TE_ScaleDPI(padding_top - padding_bottom, dpi) / 2;
+    return base_offset + custom_offset;
 }
 
-static int ConfigReadInt(const cJSON* config, const char* key, int fallback)
-{
-    const cJSON* item = config ? cJSON_GetObjectItemCaseSensitive(config, key) : NULL;
-    if (!item || !cJSON_IsNumber(item)) return fallback;
-    return item->valueint;
+BOOL TE_CalculateWorkArea(const RECT* monitor_rect, int taskbar_height, uint32_t dpi, RECT* out_work_area) {
+    if (!monitor_rect || !out_work_area) return FALSE;
+    *out_work_area = *monitor_rect;
+    int bar_cy = TE_ScaleDPI(taskbar_height, dpi);
+    out_work_area->bottom -= bar_cy;
+    return TRUE;
 }
 
-static void LoadSettings(const cJSON* config)
-{
-    g_state.settings.height = TE_TaskbarResizeClampHeight(ConfigReadInt(config, "height", TE_TASKBAR_RESIZE_DEFAULT_HEIGHT));
-    g_state.settings.padding = max(0, min(20, ConfigReadInt(config, "padding", 4)));
-    g_state.settings.margins = max(0, min(20, ConfigReadInt(config, "margins", 0)));
-    g_state.settings.icon_spacing = max(0, min(32, ConfigReadInt(config, "icon_spacing", 8)));
-}
-
-static uint32_t CurrentDpi(void)
-{
-    return g_state.ctx.dpi ? g_state.ctx.dpi : 96;
-}
-
-static uint32_t WindowDpi(HWND hwnd)
-{
-    uint32_t dpi = hwnd ? GetDpiForWindow(hwnd) : 0;
-    return dpi ? dpi : CurrentDpi();
-}
-
-static TE_TaskbarBarState* FindOrAddBar(HWND hwnd)
-{
-    if (!hwnd || !IsWindow(hwnd)) return NULL;
-
-    for (uint32_t i = 0; i < g_state.bar_count; i++) {
-        if (g_state.bars[i].hwnd == hwnd) {
-            return &g_state.bars[i];
+static void ApplyWorkArea(int new_height) {
+    RECT screen_rect;
+    if (SystemParametersInfoW(SPI_GETWORKAREA, 0, &screen_rect, 0)) {
+        if (!g_work_area_saved) {
+            g_original_work_area = screen_rect;
+            g_work_area_saved = TRUE;
+        }
+        
+        HMONITOR hMon = (g_ctx && g_ctx->monitor) ? g_ctx->monitor : MonitorFromWindow(g_ctx ? g_ctx->taskbar_hwnd : NULL, MONITOR_DEFAULTTOPRIMARY);
+        MONITORINFO mi;
+        memset(&mi, 0, sizeof(mi));
+        mi.cbSize = sizeof(MONITORINFO);
+        if (GetMonitorInfoW(hMon, &mi)) {
+            RECT new_wa;
+            if (TE_CalculateWorkArea(&mi.rcMonitor, new_height, g_current_dpi, &new_wa)) {
+                SystemParametersInfoW(SPI_SETWORKAREA, 0, &new_wa, SPIF_SENDCHANGE | SPIF_UPDATEINIFILE);
+                ResizeLog(TE_LOG_INFO, "ApplyWorkArea: new work area bottom=%d (monitor bottom=%d, taskbar height=%d)",
+                          new_wa.bottom, mi.rcMonitor.bottom, TE_ScaleDPI(new_height, g_current_dpi));
+            }
         }
     }
-
-    if (g_state.bar_count >= sizeof(g_state.bars) / sizeof(g_state.bars[0])) return NULL;
-
-    TE_TaskbarBarState* bar = &g_state.bars[g_state.bar_count++];
-    ZeroMemory(bar, sizeof(*bar));
-    bar->hwnd = hwnd;
-    bar->monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
-    return bar;
 }
 
-static void SaveOriginalGeometry(TE_TaskbarBarState* bar)
-{
-    if (!bar || bar->saved_original || !bar->hwnd || !IsWindow(bar->hwnd)) return;
+static void RestoreWorkArea(void) {
+    if (g_work_area_saved) {
+        SystemParametersInfoW(SPI_SETWORKAREA, 0, &g_original_work_area, SPIF_SENDCHANGE | SPIF_UPDATEINIFILE);
+        g_work_area_saved = FALSE;
+        ResizeLog(TE_LOG_INFO, "RestoreWorkArea: restored original bottom=%d", g_original_work_area.bottom);
+    }
+}
 
-    GetWindowRect(bar->hwnd, &bar->original_rect);
+static LRESULT CALLBACK BridgeSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData) {
+    (void)uIdSubclass;
+    (void)dwRefData;
+    switch (msg) {
+        case WM_WINDOWPOSCHANGING: {
+            WINDOWPOS* wp = (WINDOWPOS*)lParam;
+            if (g_current_child_cy > 0) {
+                wp->y = g_current_child_y_offset;
+                wp->cy = g_current_child_cy;
+                wp->flags &= ~(SWP_NOMOVE | SWP_NOSIZE);
+            }
+            break;
+        }
+    }
+    return DefSubclassProc(hwnd, msg, wParam, lParam);
+}
 
+static void ResizeChildWindows(HWND parent, int new_height) {
+    (void)new_height;
+    int default_cy = TE_ScaleDPI(TE_DEFAULT_TASKBAR_HEIGHT, g_current_dpi);
+    int y_offset = TE_CalculateCenteringOffset(g_config.height, TE_DEFAULT_TASKBAR_HEIGHT,
+                                               g_config.padding_top, g_config.padding_bottom,
+                                               g_current_dpi);
+    int target_child_cy = default_cy;
+
+    g_current_child_y_offset = y_offset;
+    g_current_child_cy = target_child_cy;
+
+    RECT pr;
+    GetClientRect(parent, &pr);
+    int parent_w = pr.right - pr.left;
+
+    HWND child = GetWindow(parent, GW_CHILD);
+    while (child) {
+        RECT cr;
+        if (GetWindowRect(child, &cr)) {
+            int cw = cr.right - cr.left;
+            POINT pt = { cr.left, cr.top };
+            ScreenToClient(parent, &pt);
+
+            WCHAR className[256];
+            GetClassNameW(child, className, ARRAYSIZE(className));
+
+            if (wcsstr(className, L"DesktopWindowContentBridge") != NULL) {
+                g_bridge_hwnd = child;
+                SetWindowSubclass(child, BridgeSubclassProc, SUBCLASS_BRIDGE_ID, 0);
+                SetWindowPos(child, NULL, 0, y_offset, parent_w, target_child_cy,
+                             SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+            } else if (_wcsicmp(className, L"TrayNotifyWnd") == 0 ||
+                       _wcsicmp(className, L"ReBarWindow32") == 0 ||
+                       _wcsicmp(className, L"Start") == 0) {
+                SetWindowPos(child, NULL, pt.x, y_offset, cw, target_child_cy,
+                             SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+            } else {
+                SetWindowPos(child, NULL, pt.x, y_offset, cw, target_child_cy,
+                             SWP_NOZORDER | SWP_NOACTIVATE);
+            }
+        }
+        child = GetWindow(child, GW_HWNDNEXT);
+    }
+}
+
+static void RestoreChildWindows(HWND parent) {
+    int default_cy = TE_ScaleDPI(TE_DEFAULT_TASKBAR_HEIGHT, g_current_dpi);
+    g_current_child_y_offset = 0;
+    g_current_child_cy = default_cy;
+
+    if (g_bridge_hwnd && IsWindow(g_bridge_hwnd)) {
+        RemoveWindowSubclass(g_bridge_hwnd, BridgeSubclassProc, SUBCLASS_BRIDGE_ID);
+        g_bridge_hwnd = NULL;
+    }
+
+    HWND child = GetWindow(parent, GW_CHILD);
+    while (child) {
+        RECT cr;
+        if (GetWindowRect(child, &cr)) {
+            int cw = cr.right - cr.left;
+            POINT pt = { cr.left, cr.top };
+            ScreenToClient(parent, &pt);
+            SetWindowPos(child, NULL, pt.x, 0, cw, default_cy,
+                         SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+        }
+        child = GetWindow(child, GW_HWNDNEXT);
+    }
+}
+
+typedef UINT (WINAPI *GetDpiForWindow_t)(HWND);
+
+static void QueryDpi(HWND hwnd) {
+    GetDpiForWindow_t pGetDpiForWindow = (GetDpiForWindow_t)(void*)GetProcAddress(GetModuleHandleW(L"user32.dll"), "GetDpiForWindow");
+    if (pGetDpiForWindow && hwnd) {
+        UINT dpi = pGetDpiForWindow(hwnd);
+        if (dpi > 0) {
+            g_current_dpi = dpi;
+        }
+    }
+}
+
+static void ApplySecondaryTaskbars(int height) {
+    HWND sec = NULL;
+    while ((sec = FindWindowExW(NULL, sec, L"Shell_SecondaryTrayWnd", NULL)) != NULL) {
+        UINT sec_dpi = g_current_dpi;
+        GetDpiForWindow_t pGetDpiForWindow = (GetDpiForWindow_t)(void*)GetProcAddress(GetModuleHandleW(L"user32.dll"), "GetDpiForWindow");
+        if (pGetDpiForWindow) {
+            UINT d = pGetDpiForWindow(sec);
+            if (d > 0) sec_dpi = d;
+        }
+
+        int new_cy = TE_ScaleDPI(height, sec_dpi);
+        HMONITOR hMon = MonitorFromWindow(sec, MONITOR_DEFAULTTONEAREST);
+        MONITORINFO mi;
+        memset(&mi, 0, sizeof(mi));
+        mi.cbSize = sizeof(MONITORINFO);
+        if (GetMonitorInfoW(hMon, &mi)) {
+            int x = mi.rcMonitor.left;
+            int y = mi.rcMonitor.bottom - new_cy;
+            int cx = mi.rcMonitor.right - mi.rcMonitor.left;
+            SetWindowPos(sec, NULL, x, y, cx, new_cy, SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+            ResizeChildWindows(sec, new_cy);
+        }
+    }
+}
+
+static void RestoreSecondaryTaskbars(void) {
+    HWND sec = NULL;
+    while ((sec = FindWindowExW(NULL, sec, L"Shell_SecondaryTrayWnd", NULL)) != NULL) {
+        UINT sec_dpi = g_current_dpi;
+        GetDpiForWindow_t pGetDpiForWindow = (GetDpiForWindow_t)(void*)GetProcAddress(GetModuleHandleW(L"user32.dll"), "GetDpiForWindow");
+        if (pGetDpiForWindow) {
+            UINT d = pGetDpiForWindow(sec);
+            if (d > 0) sec_dpi = d;
+        }
+
+        int default_cy = TE_ScaleDPI(TE_DEFAULT_TASKBAR_HEIGHT, sec_dpi);
+        HMONITOR hMon = MonitorFromWindow(sec, MONITOR_DEFAULTTONEAREST);
+        MONITORINFO mi;
+        memset(&mi, 0, sizeof(mi));
+        mi.cbSize = sizeof(MONITORINFO);
+        if (GetMonitorInfoW(hMon, &mi)) {
+            int x = mi.rcMonitor.left;
+            int y = mi.rcMonitor.bottom - default_cy;
+            int cx = mi.rcMonitor.right - mi.rcMonitor.left;
+            SetWindowPos(sec, NULL, x, y, cx, default_cy, SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+            RestoreChildWindows(sec);
+        }
+    }
+}
+
+static void ApplyTaskbarSize(HWND hwnd) {
+    if (!hwnd) return;
+    QueryDpi(hwnd);
+    int new_cy = TE_ScaleDPI(g_config.height, g_current_dpi);
+    HMONITOR hMon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTOPRIMARY);
     MONITORINFO mi;
-    ZeroMemory(&mi, sizeof(mi));
-    mi.cbSize = sizeof(mi);
-    bar->monitor = MonitorFromWindow(bar->hwnd, MONITOR_DEFAULTTONEAREST);
-    if (bar->monitor && GetMonitorInfoW(bar->monitor, &mi)) {
-        bar->original_work_area = mi.rcWork;
-    }
-
-    bar->saved_original = true;
-}
-
-static void ApplyWorkArea(TE_TaskbarBarState* bar, const RECT* taskbar_rect)
-{
-    if (!taskbar_rect) return;
-
-    /* Validate: reject obviously invalid rects (e.g. during XAML partial layout) */
-    if (taskbar_rect->top <= 0 || taskbar_rect->bottom <= taskbar_rect->top) return;
-
-    RECT work;
-    ZeroMemory(&work, sizeof(work));
-    if (bar) {
-        work = bar->original_work_area;
-    }
-    if (IsRectEmpty(&work)) {
-        SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
-    }
-
-    work.bottom = taskbar_rect->top;
-    SystemParametersInfoW(SPI_SETWORKAREA, 0, &work, SPIF_UPDATEINIFILE);
-    DWORD_PTR res = 0;
-    SendMessageTimeoutW(HWND_BROADCAST, WM_SETTINGCHANGE, SPI_SETWORKAREA, (LPARAM)L"WindowsMetrics", SMTO_ABORTIFHUNG, 100, &res);
-}
-
-static void ApplyHeightToWindow(HWND hwnd, bool update_work_area)
-{
-    if (!g_state.enabled || !hwnd || !IsWindow(hwnd)) return;
-
-    TE_TaskbarBarState* bar = FindOrAddBar(hwnd);
-    SaveOriginalGeometry(bar);
-    if (bar) bar->updates_work_area = update_work_area;
-
-    RECT rc;
-    GetWindowRect(hwnd, &rc);
-
-    int target_height = TE_TaskbarResizeScaleForDpi(g_state.settings.height, WindowDpi(hwnd));
-    int width = rc.right - rc.left;
-    rc.top = rc.bottom - target_height;
-
-    /* SWP_FRAMECHANGED removed: it triggers WM_NCCALCSIZE which causes the
-     * XAML layout engine to fight our height override via re-entrant
-     * WM_WINDOWPOSCHANGING messages, creating a feedback loop. */
-    SetWindowPos(hwnd, NULL, rc.left, rc.top, width, target_height,
-                 SWP_NOZORDER | SWP_NOACTIVATE);
-    if (bar && bar->updates_work_area) {
-        ApplyWorkArea(bar, &rc);
+    memset(&mi, 0, sizeof(mi));
+    mi.cbSize = sizeof(MONITORINFO);
+    if (GetMonitorInfoW(hMon, &mi)) {
+        int x = mi.rcMonitor.left;
+        int y = mi.rcMonitor.bottom - new_cy;
+        int cx = mi.rcMonitor.right - mi.rcMonitor.left;
+        ResizeLog(TE_LOG_INFO, "ApplyTaskbarSize: rect=(%d, %d, %d, %d), height=%d, dpi=%u",
+                  x, y, cx, new_cy, g_config.height, g_current_dpi);
+        SetWindowPos(hwnd, NULL, x, y, cx, new_cy, SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+        ApplyWorkArea(g_config.height);
+        ResizeChildWindows(hwnd, new_cy);
+        ApplySecondaryTaskbars(g_config.height);
     }
 }
 
-static void ApplyHeight(void)
-{
-    HWND primary = FindWindowW(L"Shell_TrayWnd", NULL);
-    ApplyHeightToWindow(primary ? primary : g_state.taskbar_hwnd, true);
-
-    HWND secondary = NULL;
-    while ((secondary = FindWindowExW(NULL, secondary, L"Shell_SecondaryTrayWnd", NULL)) != NULL) {
-        ApplyHeightToWindow(secondary, false);
-    }
-
-    if (g_state.ctx.publish_state) {
-        StateValue val;
-        val.type = TE_STATE_TYPE_INT;
-        val.value.i = TE_TaskbarResizeScaleForDpi(g_state.settings.height, CurrentDpi());
-        g_state.ctx.publish_state("taskbar_resize.height", &val);
-    }
-}
-
-static void RestoreGeometry(void)
-{
-    for (uint32_t i = 0; i < g_state.bar_count; i++) {
-        TE_TaskbarBarState* bar = &g_state.bars[i];
-        if (!bar->saved_original || !bar->hwnd || !IsWindow(bar->hwnd)) continue;
-
-        int width = bar->original_rect.right - bar->original_rect.left;
-        int height = bar->original_rect.bottom - bar->original_rect.top;
-        SetWindowPos(bar->hwnd, NULL, bar->original_rect.left, bar->original_rect.top,
-                     width, height, SWP_NOZORDER | SWP_NOACTIVATE);
-
-        if (bar->updates_work_area && !IsRectEmpty(&bar->original_work_area)) {
-            SystemParametersInfoW(SPI_SETWORKAREA, 0, &bar->original_work_area, SPIF_UPDATEINIFILE);
-            DWORD_PTR res = 0;
-            SendMessageTimeoutW(HWND_BROADCAST, WM_SETTINGCHANGE, SPI_SETWORKAREA, (LPARAM)L"WindowsMetrics", SMTO_ABORTIFHUNG, 100, &res);
-        }
+static void RestoreTaskbarSize(HWND hwnd) {
+    if (!hwnd) return;
+    QueryDpi(hwnd);
+    int default_cy = TE_ScaleDPI(TE_DEFAULT_TASKBAR_HEIGHT, g_current_dpi);
+    HMONITOR hMon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTOPRIMARY);
+    MONITORINFO mi;
+    memset(&mi, 0, sizeof(mi));
+    mi.cbSize = sizeof(MONITORINFO);
+    if (GetMonitorInfoW(hMon, &mi)) {
+        int x = mi.rcMonitor.left;
+        int y = mi.rcMonitor.bottom - default_cy;
+        int cx = mi.rcMonitor.right - mi.rcMonitor.left;
+        ResizeLog(TE_LOG_INFO, "RestoreTaskbarSize: rect=(%d, %d, %d, %d)", x, y, cx, default_cy);
+        SetWindowPos(hwnd, NULL, x, y, cx, default_cy, SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+        RestoreWorkArea();
+        RestoreChildWindows(hwnd);
+        RestoreSecondaryTaskbars();
     }
 }
 
-void TE_TaskbarResizeEnforceWindowPos(WINDOWPOS* wp, int target_height, uint32_t dpi)
-{
-    if (!wp) return;
-
-    int old_cy = wp->cy;
-    int scaled_height = TE_TaskbarResizeScaleForDpi(target_height, dpi);
-    wp->cy = scaled_height;
-    wp->y += old_cy - scaled_height;
-}
-
-static void EnforceWindowPos(WINDOWPOS* wp, HWND taskbar_hwnd)
-{
-    if (!g_state.enabled || !wp) return;
-
-    TE_TaskbarResizeEnforceWindowPos(wp, g_state.settings.height, WindowDpi(taskbar_hwnd));
-}
-
-static HRESULT OnEvent(uint32_t type, const void* event_data, void* user_data)
-{
-    (void)user_data;
-
-    switch ((TE_EventType)type) {
-        case TE_EVENT_TASKBAR_GEOMETRY: {
-            const TE_TaskbarGeometryEvent* evt = (const TE_TaskbarGeometryEvent*)event_data;
-            if (evt) {
-                g_state.taskbar_hwnd = evt->taskbar_hwnd;
-                FindOrAddBar(evt->taskbar_hwnd);
-                EnforceWindowPos(evt->window_pos, evt->taskbar_hwnd);
+static LRESULT CALLBACK ResizeSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData) {
+    (void)uIdSubclass;
+    (void)dwRefData;
+    
+    switch (msg) {
+        case WM_GETMINMAXINFO: {
+            LRESULT res = DefSubclassProc(hwnd, msg, wParam, lParam);
+            MINMAXINFO* mmi = (MINMAXINFO*)lParam;
+            int new_cy = TE_ScaleDPI(g_config.height, g_current_dpi);
+            if (mmi->ptMinTrackSize.y > new_cy) {
+                mmi->ptMinTrackSize.y = new_cy;
             }
-            break;
+            return res;
         }
-
-        case TE_EVENT_CONFIG_CHANGED: {
-            const TE_ConfigChangedEvent* evt = (const TE_ConfigChangedEvent*)event_data;
-            if (evt) g_state.ctx.config = evt->new_config;
-            LoadSettings(evt ? evt->new_config : g_state.ctx.config);
-            ApplyHeight();
-            break;
-        }
-
-        case TE_EVENT_DPI_CHANGED: {
-            const TE_DpiChangedEvent* evt = (const TE_DpiChangedEvent*)event_data;
-            if (evt) {
-                g_state.ctx.dpi = evt->new_dpi;
+        case WM_WINDOWPOSCHANGING: {
+            LRESULT res = DefSubclassProc(hwnd, msg, wParam, lParam);
+            WINDOWPOS* wp = (WINDOWPOS*)lParam;
+            int new_cy = TE_ScaleDPI(g_config.height, g_current_dpi);
+            HMONITOR hMon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTOPRIMARY);
+            MONITORINFO mi;
+            memset(&mi, 0, sizeof(mi));
+            mi.cbSize = sizeof(MONITORINFO);
+            if (GetMonitorInfoW(hMon, &mi)) {
+                wp->y = mi.rcMonitor.bottom - new_cy;
+                wp->cy = new_cy;
+                wp->x = mi.rcMonitor.left;
+                wp->cx = mi.rcMonitor.right - mi.rcMonitor.left;
+                wp->flags &= ~(SWP_NOMOVE | SWP_NOSIZE);
             }
-            ApplyHeight();
+            return res;
+        }
+        case WM_SIZE:
+        case WM_WINDOWPOSCHANGED: {
+            LRESULT res = DefSubclassProc(hwnd, msg, wParam, lParam);
+            int new_cy = TE_ScaleDPI(g_config.height, g_current_dpi);
+            ResizeChildWindows(hwnd, new_cy);
+            return res;
+        }
+        case WM_DPICHANGED: {
+            g_current_dpi = HIWORD(wParam);
+            ApplyTaskbarSize(hwnd);
             break;
         }
-
-        case TE_EVENT_DISPLAY_CHANGED:
-            ApplyHeight();
-            break;
-
-        default:
-            break;
     }
-
-    return S_OK;
+    return DefSubclassProc(hwnd, msg, wParam, lParam);
 }
 
-static HRESULT PluginInitialize(const PluginContext* ctx)
-{
-    if (!ctx) return E_POINTER;
-
-    ZeroMemory(&g_state, sizeof(g_state));
-    g_state.ctx = *ctx;
-    g_state.taskbar_hwnd = ctx->taskbar_hwnd;
-    g_state.monitor = ctx->monitor;
-    LoadSettings(ctx->config);
-
-    if (ctx->subscribe) {
-        ctx->subscribe(TE_EVENT_TASKBAR_GEOMETRY, OnEvent, NULL);
-        ctx->subscribe(TE_EVENT_CONFIG_CHANGED, OnEvent, NULL);
-        ctx->subscribe(TE_EVENT_DPI_CHANGED, OnEvent, NULL);
-        ctx->subscribe(TE_EVENT_DISPLAY_CHANGED, OnEvent, NULL);
+static void ParseConfig(const cJSON* config) {
+    if (!config) return;
+    const cJSON* height_node = cJSON_GetObjectItemCaseSensitive(config, "height");
+    if (cJSON_IsNumber(height_node)) {
+        int h = height_node->valueint;
+        if (h >= 20 && h <= 128) {
+            g_config.height = h;
+        }
     }
-
-    g_state.initialized = true;
-    return S_OK;
-}
-
-static HRESULT PluginEnable(void)
-{
-    if (!g_state.initialized) return E_UNEXPECTED;
-    g_state.enabled = true;
-    ApplyHeight();
-    return S_OK;
-}
-
-static HRESULT PluginDisable(void)
-{
-    if (!g_state.enabled && g_state.bar_count == 0) return S_OK;
-    g_state.enabled = false;
-    RestoreGeometry();
-    g_state.bar_count = 0;
-    return S_OK;
-}
-
-static HRESULT PluginUpdate(float deltaTime)
-{
-    (void)deltaTime;
-    return S_OK;
-}
-
-static HRESULT PluginShutdown(void)
-{
-    PluginDisable();
-    if (g_state.ctx.unsubscribe) {
-        g_state.ctx.unsubscribe(TE_EVENT_TASKBAR_GEOMETRY, OnEvent);
-        g_state.ctx.unsubscribe(TE_EVENT_CONFIG_CHANGED, OnEvent);
-        g_state.ctx.unsubscribe(TE_EVENT_DPI_CHANGED, OnEvent);
-        g_state.ctx.unsubscribe(TE_EVENT_DISPLAY_CHANGED, OnEvent);
+    const cJSON* pt_node = cJSON_GetObjectItemCaseSensitive(config, "padding_top");
+    if (cJSON_IsNumber(pt_node)) {
+        g_config.padding_top = pt_node->valueint;
     }
-    ZeroMemory(&g_state, sizeof(g_state));
-    return S_OK;
+    const cJSON* pb_node = cJSON_GetObjectItemCaseSensitive(config, "padding_bottom");
+    if (cJSON_IsNumber(pb_node)) {
+        g_config.padding_bottom = pb_node->valueint;
+    }
+    const cJSON* is_node = cJSON_GetObjectItemCaseSensitive(config, "icon_spacing");
+    if (cJSON_IsNumber(is_node)) {
+        g_config.icon_spacing = is_node->valueint;
+    }
 }
 
-static const PluginMetadata* PluginGetMetadata(void)
-{
+static void OnConfigChanged(uint32_t type, const void* data, void* user_data) {
+    (void)type; (void)user_data;
+    const TE_ConfigChangedData* changed = (const TE_ConfigChangedData*)data;
+    ParseConfig((const cJSON*)changed->new_config);
+    ResizeLog(TE_LOG_INFO, "OnConfigChanged: new height=%d, padding_top=%d, padding_bottom=%d, icon_spacing=%d",
+              g_config.height, g_config.padding_top, g_config.padding_bottom, g_config.icon_spacing);
+    ApplyTaskbarSize(g_ctx->taskbar_hwnd);
+
+    /* Re-publish updated height to shared state store */
+    if (g_ctx->publish_state) {
+        StateValue height_val;
+        height_val.type = TE_STATE_INT;
+        height_val.data.int_val = g_config.height;
+        g_ctx->publish_state("taskbar_resize.height", &height_val);
+    }
+}
+
+static void OnDpiChanged(uint32_t type, const void* data, void* user_data) {
+    (void)type; (void)user_data;
+    const TE_DpiChangedData* dpi_data = (const TE_DpiChangedData*)data;
+    g_current_dpi = dpi_data->new_dpi;
+    ResizeLog(TE_LOG_INFO, "OnDpiChanged: new dpi=%u", g_current_dpi);
+    ApplyTaskbarSize(g_ctx->taskbar_hwnd);
+}
+
+static HRESULT Initialize(const PluginContext* ctx) {
+    g_ctx = ctx;
+    g_current_dpi = ctx->dpi ? ctx->dpi : 96;
+    ParseConfig(g_ctx->config);
+    ResizeLog(TE_LOG_INFO, "Initialize: configured height=%d, dpi=%u", g_config.height, g_current_dpi);
+    return TE_S_OK;
+}
+
+static HRESULT Enable(void) {
+    ResizeLog(TE_LOG_INFO, "Enable: height=%d, applying subclass and resizing", g_config.height);
+    SetWindowSubclass(g_ctx->taskbar_hwnd, ResizeSubclassProc, SUBCLASS_RESIZE_ID, 0);
+    g_ctx->subscribe(TE_EVENT_CONFIG_CHANGED, OnConfigChanged, NULL);
+    g_ctx->subscribe(TE_EVENT_DPI_CHANGED, OnDpiChanged, NULL);
+    
+    ApplyTaskbarSize(g_ctx->taskbar_hwnd);
+
+    /* Publish current height to shared state store for inter-plugin communication */
+    if (g_ctx->publish_state) {
+        StateValue height_val;
+        height_val.type = TE_STATE_INT;
+        height_val.data.int_val = g_config.height;
+        g_ctx->publish_state("taskbar_resize.height", &height_val);
+    }
+    
+    return TE_S_OK;
+}
+
+static HRESULT Disable(void) {
+    ResizeLog(TE_LOG_INFO, "Disable: restoring default height");
+    RemoveWindowSubclass(g_ctx->taskbar_hwnd, ResizeSubclassProc, SUBCLASS_RESIZE_ID);
+    g_ctx->unsubscribe(TE_EVENT_CONFIG_CHANGED, OnConfigChanged);
+    g_ctx->unsubscribe(TE_EVENT_DPI_CHANGED, OnDpiChanged);
+    
+    RestoreTaskbarSize(g_ctx->taskbar_hwnd);
+    
+    return TE_S_OK;
+}
+
+static HRESULT Update(float delta_time) {
+    (void)delta_time;
+    return TE_S_OK;
+}
+
+static HRESULT Shutdown(void) {
+    ResizeLog(TE_LOG_INFO, "Shutdown called");
+    g_ctx = NULL;
+    return TE_S_OK;
+}
+
+static const PluginMetadata* GetMetadata(void) {
     return &g_metadata;
 }
 
-static const PluginSettings* PluginGetSettings(void)
-{
-    return &g_settings_schema;
+static const PluginSettings* GetSettings(void) {
+    return &g_plugin_settings;
 }
 
 static const PluginInterface g_interface = {
-    PluginInitialize,
-    PluginEnable,
-    PluginDisable,
-    PluginUpdate,
-    PluginShutdown,
-    PluginGetMetadata,
-    PluginGetSettings
+    Initialize,
+    Enable,
+    Disable,
+    Update,
+    Shutdown,
+    GetMetadata,
+    GetSettings
 };
 
-TE_EXPORT const PluginInterface* GetPluginInterface(void)
-{
+TE_EXPORT const PluginInterface* GetPluginInterface(void) {
     return &g_interface;
 }

@@ -1,31 +1,47 @@
 add_executable(TaskbarEngine WIN32
     src/main.c
     src/tray.c
-    src/tray_menu.c
     src/ipc_client.c
+    src/tray_menu.c
     src/crash_recovery.c
-    src/scheduler.cpp
-    res/app.rc
+    res/app.manifest
 )
 
-target_include_directories(TaskbarEngine PUBLIC
-    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+add_executable(TaskbarEngineHost WIN32
+    TaskbarEngineHost.cpp
+)
+
+
+target_include_directories(TaskbarEngine PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
 target_link_libraries(TaskbarEngine PRIVATE
     te_sdk
+    comctl32
     shell32
-    user32
-    taskschd
 )
 
-if(MSVC)
-    target_link_libraries(TaskbarEngine PRIVATE comsuppw)
+# MinGW needs -municode for wWinMain entry point
+if(NOT MSVC)
+    target_link_options(TaskbarEngine PRIVATE -municode)
 endif()
 
-set_target_properties(TaskbarEngine PROPERTIES
-    OUTPUT_NAME "TaskbarEngine"
+target_include_directories(TaskbarEngineHost PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/ThirdParty/cJSON
 )
+
+target_link_libraries(TaskbarEngineHost PRIVATE
+    te_sdk
+    shell32
+    cjson
+)
+
+if(NOT MSVC)
+    target_link_options(TaskbarEngineHost PRIVATE -municode)
+endif()
+
 
 # GUI Target (Requires C++17, MSVC, and Windows App SDK)
 if(MSVC)
@@ -62,6 +78,7 @@ find_program(MT_EXECUTABLE mt.exe
 set(SETTINGS_BASE_MANIFEST "${CMAKE_CURRENT_SOURCE_DIR}/res/settings.manifest")
 set(WINAPPSDK_FOUNDATION_MANIFEST "${WINAPPSDK_ROOT}/manifests/Microsoft.WindowsAppSdk.Foundation.manifest")
 set(WINAPPSDK_WINUI_MANIFEST "${WINAPPSDK_ROOT}/manifests/manifests/Microsoft.WindowsAppSdk.WinUI.manifest")
+set(WINAPPSDK_INTERACTIVE_MANIFEST "${WINAPPSDK_ROOT}/manifests/Microsoft.InteractiveExperiences.manifest")
 set(SETTINGS_MERGED_MANIFEST "${CMAKE_CURRENT_SOURCE_DIR}/res/settings_merged.manifest")
 
 if(MT_EXECUTABLE)
@@ -71,11 +88,13 @@ if(MT_EXECUTABLE)
             -manifest "${SETTINGS_BASE_MANIFEST}"
                       "${WINAPPSDK_FOUNDATION_MANIFEST}"
                       "${WINAPPSDK_WINUI_MANIFEST}"
+                      "${WINAPPSDK_INTERACTIVE_MANIFEST}"
             -out:"${SETTINGS_MERGED_MANIFEST}"
         DEPENDS
             "${SETTINGS_BASE_MANIFEST}"
             "${WINAPPSDK_FOUNDATION_MANIFEST}"
             "${WINAPPSDK_WINUI_MANIFEST}"
+            "${WINAPPSDK_INTERACTIVE_MANIFEST}"
         COMMENT "Generating merged SxS manifest for TaskbarEngineSettings"
     )
 
@@ -92,14 +111,17 @@ add_executable(TaskbarEngineSettings WIN32
     src/gui_ipc_client.cpp
     src/config_io.cpp
     res/settings.rc
+    ${SETTINGS_MERGED_MANIFEST}
 )
 
 target_compile_definitions(TaskbarEngineSettings PRIVATE
     MICROSOFT_WINDOWSAPPSDK_SELFCONTAINED=1
+    _CRT_SECURE_NO_WARNINGS
 )
 
 target_include_directories(TaskbarEngineSettings PRIVATE
     ${CMAKE_SOURCE_DIR}/SDK/include
+    ${CMAKE_SOURCE_DIR}/ThirdParty/cJSON
     ${WINAPPSDK_CPPWINRT}
     ${WINAPPSDK_ROOT}/include
 )
@@ -112,20 +134,25 @@ target_link_libraries(TaskbarEngineSettings PRIVATE
     te_sdk
     windowsapp
     Microsoft.WindowsAppRuntime
+    CoreMessaging
 )
 
 set_target_properties(TaskbarEngineSettings PROPERTIES
     VS_PACKAGE_REFERENCES "Microsoft.WindowsAppSDK_1.5.240311000;Microsoft.Windows.CppWinRT_2.0.240111.5"
 )
 
+if(MT_EXECUTABLE)
+    target_link_options(TaskbarEngineSettings PRIVATE "/MANIFESTINPUT:${SETTINGS_MERGED_MANIFEST}")
+endif()
+
 # Post-build: Copy Windows App SDK runtime DLLs and resources next to the executable
 add_custom_command(TARGET TaskbarEngineSettings POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E echo "Deploying self-contained Windows App SDK runtime binaries to bin folder..."
     COMMAND ${CMAKE_COMMAND} -E copy_directory
         "${WINAPPSDK_FRAMEWORK_DIR}"
-        "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}"
+        "$<TARGET_FILE_DIR:TaskbarEngineSettings>"
     COMMENT "Copying Windows App SDK self-contained binaries to output directory"
 )
 
 endif()
-set_target_properties(TaskbarEngine PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+

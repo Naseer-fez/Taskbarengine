@@ -1,14 +1,13 @@
 #pragma once
-
-#include "core/event_dispatch.h"
+#include <windows.h>
+#include <sdk/te_types.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-HRESULT TE_VDesktopNotifyStart(TE_EventEntry* event_table, uint32_t* sub_count);
-void TE_VDesktopNotifyStop(void);
-void TE_VDesktopNotifyDispatchTest(const GUID* desktop_id);
+HRESULT TE_VDesktopInit(void);
+void TE_VDesktopShutdown(void);
 
 #ifdef __cplusplus
 }

@@ -1,48 +1,37 @@
 #pragma once
-
-#include "te_log.h"
-#include <wchar.h>
+#include <sdk/te_types.h>
+#include <sdk/te_log.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-/* TE_LOG_RING_SIZE: 256 entries * 256 bytes per entry = 64 KB pre-allocated circular buffer */
-#define TE_LOG_RING_SIZE 256
-#define TE_LOG_MESSAGE_SIZE 244
-
-enum {
-    TE_LOG_STATE_EMPTY = 0,
-    TE_LOG_STATE_WRITING = 1,
-    TE_LOG_STATE_UNREAD = 2,
-    TE_LOG_STATE_READING = 3
-};
-
-typedef struct TE_LogEntry {
-    volatile LONG state; /* TE_LOG_STATE_* transitions */
-    uint32_t level;
-    uint32_t timestamp_ms;
-    char message[TE_LOG_MESSAGE_SIZE];
-} TE_LogEntry;
-
 /**
- * @brief Initialize the ring buffer logging system and start the flush thread.
- * @param log_dir Directory where logs will be stored (or NULL to auto-resolve %LOCALAPPDATA%\TaskbarEngine\logs).
- * @param min_level Minimum log level to record.
- * @param to_file Whether to write log entries to disk.
- * @return S_OK on success.
+ * Initialize the ring buffer logging subsystem.
+ * Creates the background flush thread and opens the log file.
+ *
+ * @param log_dir   Directory path for log files. Must not be NULL.
+ * @param min_level Minimum severity level to record.
+ * @return TE_S_OK on success, TE_E_INVALIDARG or TE_E_FAIL on error.
+ *
+ * @note Thread Safety: Call once during engine startup, before other threads.
  */
-HRESULT TE_LogInit(const wchar_t* log_dir, TE_LogLevel min_level, bool to_file);
+HRESULT TE_LogInit(const wchar_t* log_dir, TE_LogLevel min_level);
 
 /**
- * @brief Flush and shutdown the ring buffer logger.
+ * Shut down the logging subsystem.
+ * Flushes remaining entries, stops the flush thread, and closes the log file.
+ *
+ * @note Thread Safety: Call once during engine shutdown, after other threads stopped.
  */
 void TE_LogShutdown(void);
 
 /**
- * @brief Format and push log entry into ring buffer.
+ * Force an immediate flush of all pending ring buffer entries to the log file.
+ *
+ * @note Thread Safety: Safe to call from any thread.
  */
-void TE_LogWriteV(TE_LogLevel level, const char* fmt, va_list args);
+void TE_LogFlush(void);
 
 #ifdef __cplusplus
 }

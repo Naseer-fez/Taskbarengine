@@ -1,107 +1,76 @@
 #pragma once
-
 #include <sdk/te_types.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
+/** IPC command types marshaled via WM_TE_IPC_COMMAND wParam. */
+#define TE_CMD_RELOAD_CONFIG  1
+#define TE_CMD_ENABLE_PLUGIN  2
+#define TE_CMD_DISABLE_PLUGIN 3
+#define TE_CMD_SHUTDOWN       4
+
 /**
- * @brief Opaque structure representing internal Core Manager state.
+ * Initialize the Core Manager (Phase B initialization).
+ * Loads config, starts logging, initializes event dispatch, starts config
+ * watcher, scans and loads plugins, enables all plugins.
  *
- * ## Ownership & Threading Model
- * - **Singleton Instance**: A single heap-allocated `TE_CoreState` instance is created
- *   per injected Explorer process during Phase A and freed during Shutdown.
- * - **Thread Affinity**: Core manager initialization and state mutations execute
- *   strictly on Explorer's main UI thread (the message pump owning `Shell_TrayWnd`).
- * - **Lifecycle**:
- *   1. `TE_CoreManagerInitPhaseA`: Allocates state, initializes event tables, installs subclass.
- *   2. `TE_CoreManagerInitPhaseB`: Triggered via `WM_TE_INIT` outside loader lock; loads config,
- *      message filters, timers, scans plugins, and enables active plugins.
- *   3. `TE_CoreManagerShutdown`: Tears down timers, watchers, plugins, subclass, and frees state.
+ * @param taskbar_hwnd  Handle to Shell_TrayWnd.
+ * @return TE_S_OK on success, or error HRESULT.
+ * @note Thread Safety: Must be called on UI thread.
  */
-typedef struct TE_CoreState TE_CoreState;
+HRESULT TE_CoreManagerInit(HWND taskbar_hwnd);
 
 /**
- * @brief Initialize the Core Manager Phase A: allocate state, subclass taskbar.
- * @param hinstance Engine DLL module instance handle.
- * @return S_OK on success, or failure HRESULT.
- * @note Must be called on the UI thread owning Shell_TrayWnd.
- */
-HRESULT TE_CoreManagerInitPhaseA(HINSTANCE hinstance);
-
-/**
- * @brief Initialize the Core Manager Phase B: config, watcher, plugins, IPC.
- * @return S_OK on success, or failure HRESULT.
- * @note Executed outside loader lock in response to deferred WM_TE_INIT message.
- */
-HRESULT TE_CoreManagerInitPhaseB(void);
-
-/**
- * @brief Shutdown the Core Manager, stop watcher, disable plugins, and free state.
+ * Shut down the Core Manager.
+ * Disables all plugins (reverse priority), shuts down plugins, stops
+ * config watcher, stops logger, frees config.
+ *
+ * @note Thread Safety: Must be called on UI thread.
  */
 void TE_CoreManagerShutdown(void);
 
 /**
- * @brief Disable plugins and release core state without stopping the IPC server thread.
- * @note Used by the IPC server so it can send SHUTDOWN_COMPLETE before exiting.
+ * Reload configuration from disk and dispatch CONFIG_CHANGED events.
+ * Called on the UI thread (marshaled from config watcher or IPC).
+ *
+ * @return TE_S_OK on success, or error HRESULT.
+ * @note Thread Safety: Must be called on UI thread.
  */
-void TE_CoreManagerShutdownFromIpc(void);
+HRESULT TE_CoreManagerReloadConfig(void);
 
 /**
- * @brief Re-read config and dispatch hot-reload events for changed plugin sections.
+ * Handle a marshaled IPC command on the UI thread.
+ * @param cmd_type  Command type (TE_CMD_* constant).
+ * @param payload   Command-specific payload (may be NULL).
+ * @note Thread Safety: Must be called on UI thread.
  */
-void TE_CoreManagerReloadConfig(void);
+void TE_CoreManagerHandleCommand(int cmd_type, void* payload);
 
 /**
- * @brief Enable or disable a plugin by metadata name.
+ * Get the active taskbar HWND.
+ * @return The Shell_TrayWnd handle, or NULL if not initialized.
  */
-HRESULT TE_CoreManagerSetPluginEnabledByName(const char* plugin_name, bool enabled);
+HWND TE_CoreManagerGetTaskbarHwnd(void);
 
 /**
- * @brief Write a newline-separated plugin status list into a caller-provided buffer.
+ * Check whether the core manager has been initialized.
+ * @return TRUE if initialized, FALSE otherwise.
  */
-uint32_t TE_CoreManagerBuildPluginList(char* buffer, size_t buffer_len);
+BOOL TE_CoreManagerIsInitialized(void);
 
 /**
- * @brief Process config file change notification, re-parse config, and dispatch targeted events.
- * @param core_state_ptr Opaque pointer to TE_CoreState instance.
+ * Get the current cached taskbar DPI scaling value.
+ * @return Current DPI (e.g., 96, 120, 144, 192).
  */
-void TE_CoreManagerOnConfigChanged(void* core_state_ptr);
+uint32_t TE_CoreManagerGetDpi(void);
 
 /**
- * @brief Get the active plugin ID context.
- * @return Active 1-based plugin ID, or 0 if none active.
+ * Update the cached taskbar DPI scaling value.
+ * @param dpi New DPI value.
  */
-uint32_t TE_CoreManagerGetCurrentPluginId(void);
-
-/**
- * @brief Set the active plugin ID context for event subscription attribution.
- * @param plugin_id Active 1-based plugin ID, or 0 to clear.
- */
-void TE_CoreManagerSetCurrentPluginId(uint32_t plugin_id);
-
-/**
- * @brief Serialize all loaded plugin settings schemas into a JSON string.
- * @param buffer Output buffer for the JSON string.
- * @param buffer_len Size of the output buffer.
- * @return Number of bytes written (including null terminator), or 0 on failure.
- */
-uint32_t TE_CoreManagerBuildSettingsSchema(char* buffer, size_t buffer_len);
-
-/**
- * @brief Serialize current performance statistics into a JSON string.
- * @param buffer Output buffer for the JSON string.
- * @param buffer_len Size of the output buffer.
- * @return Number of bytes written (including null terminator), or 0 on failure.
- */
-uint32_t TE_CoreManagerBuildPerfStats(char* buffer, size_t buffer_len);
-
-/**
- * @brief Evaluates whether a plugin's configuration section indicates it is enabled.
- */
-struct cJSON;
-bool TE_CoreManagerIsPluginEnabledInConfig(const struct cJSON* config);
+void TE_CoreManagerSetDpi(uint32_t dpi);
 
 #ifdef __cplusplus
 }

@@ -23,7 +23,7 @@ static const char* MOCK_CONFIG = R"(
 static void BM_JsoncParse(benchmark::State& state) {
     for (auto _ : state) {
         cJSON* root = nullptr;
-        HRESULT hr = TE_JsoncParseString(MOCK_CONFIG, &root);
+        HRESULT hr = TE_JsoncParse(MOCK_CONFIG, &root);
         if (SUCCEEDED(hr) && root) {
             TE_JsoncFree(root);
         }

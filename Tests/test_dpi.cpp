@@ -1,25 +1,52 @@
 #include <catch2/catch_test_macros.hpp>
+
+extern "C" {
 #include <sdk/te_dpi.h>
+}
 
-TEST_CASE("TE_ScaleDPI scaling calculation", "[dpi]") {
-    SECTION("100% scaling (96 DPI)") {
-        REQUIRE(TE_ScaleDPI(48, 96) == 48);
-        REQUIRE(TE_ScaleDPI(32, 96) == 32);
-        REQUIRE(TE_ScaleDPI(0, 96) == 0);
+TEST_CASE("DPI scaling", "[dpi]") {
+    SECTION("Identity at 96 DPI") {
+        CHECK(TE_ScaleDPI(48, 96) == 48);
+        CHECK(TE_ScaleDPI(100, 96) == 100);
+        CHECK(TE_ScaleDPI(0, 96) == 0);
     }
 
-    SECTION("150% scaling (144 DPI)") {
-        REQUIRE(TE_ScaleDPI(48, 144) == 72);
-        REQUIRE(TE_ScaleDPI(32, 144) == 48);
+    SECTION("Scale up at 120 DPI (125%)") {
+        CHECK(TE_ScaleDPI(48, 120) == 60);
+        CHECK(TE_ScaleDPI(96, 120) == 120);
     }
 
-    SECTION("200% scaling (192 DPI)") {
-        REQUIRE(TE_ScaleDPI(48, 192) == 96);
-        REQUIRE(TE_ScaleDPI(32, 192) == 64);
+    SECTION("Scale up at 144 DPI (150%)") {
+        CHECK(TE_ScaleDPI(48, 144) == 72);
+        CHECK(TE_ScaleDPI(96, 144) == 144);
     }
 
-    SECTION("Rounding behavior") {
-        /* 1 * 144 = 144, 144 / 96 = 1.5 -> rounds to 2 */
-        REQUIRE(TE_ScaleDPI(1, 144) == 2);
+    SECTION("Scale up at 192 DPI (200%)") {
+        CHECK(TE_ScaleDPI(48, 192) == 96);
+        CHECK(TE_ScaleDPI(96, 192) == 192);
+    }
+
+    SECTION("DPI of zero returns zero") {
+        CHECK(TE_ScaleDPI(48, 0) == 0);
+        CHECK(TE_ScaleDPI(0, 0) == 0);
+    }
+
+    SECTION("Negative value") {
+        CHECK(TE_ScaleDPI(-48, 192) == -96);
+    }
+}
+
+TEST_CASE("DPI unscaling", "[dpi]") {
+    SECTION("Round-trip at 144 DPI") {
+        int scaled = TE_ScaleDPI(48, 144);
+        CHECK(TE_UnscaleDPI(scaled, 144) == 48);
+    }
+
+    SECTION("Identity at 96 DPI") {
+        CHECK(TE_UnscaleDPI(48, 96) == 48);
+    }
+
+    SECTION("DPI of zero returns zero") {
+        CHECK(TE_UnscaleDPI(48, 0) == 0);
     }
 }

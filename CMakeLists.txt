@@ -1,54 +1,60 @@
-cmake_minimum_required(VERSION 3.25)
+cmake_minimum_required(VERSION 3.24)
+project(TaskbarEngine VERSION 1.0.0 LANGUAGES C CXX)
 
-set(CMAKE_C_COMPILER_WORKS 1)
-set(CMAKE_CXX_COMPILER_WORKS 1)
-
-project(TaskbarEngine LANGUAGES C CXX)
-
+# C17 for all C code, C++17 for C++ code
 set(CMAKE_C_STANDARD 17)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-set(TE_VERSION_MAJOR 1)
-set(TE_VERSION_MINOR 0)
-set(TE_VERSION_PATCH 0)
-set(TE_VERSION_STRING "${TE_VERSION_MAJOR}.${TE_VERSION_MINOR}.${TE_VERSION_PATCH}")
-add_compile_definitions(TE_VERSION_STRING="${TE_VERSION_STRING}")
-
-# Global Compiler Flags
+# Strict warning levels
 if(MSVC)
-    # /wd5105: Windows SDK winbase.h macro expansion producing 'defined' triggers C5105 under /std:c17
-    # /wd4459: Third-party dependencies (Google Benchmark) hide global declarations
-    add_compile_options(/W4 /WX /wd5105 /wd4459)
-    add_compile_definitions(_CRT_SECURE_NO_WARNINGS WIN32_LEAN_AND_MEAN STRICT)
-    add_link_options(/MANIFEST:NO)
-    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+    add_compile_options(
+        $<$<COMPILE_LANGUAGE:C>:/W4>
+        $<$<COMPILE_LANGUAGE:C>:/WX>
+        $<$<COMPILE_LANGUAGE:C>:/wd5105>
+        $<$<COMPILE_LANGUAGE:C>:/wd4459>
+        $<$<COMPILE_LANGUAGE:CXX>:/W4>
+        $<$<COMPILE_LANGUAGE:CXX>:/WX>
+        $<$<COMPILE_LANGUAGE:CXX>:/wd5105>
+        $<$<COMPILE_LANGUAGE:CXX>:/wd4459>
+    )
 else()
-    add_compile_options(-Wall -Wextra -Werror)
-    add_link_options(-static-libgcc -static-libstdc++)
+    add_compile_options(
+        $<$<COMPILE_LANGUAGE:C>:-Wall>
+        $<$<COMPILE_LANGUAGE:C>:-Wextra>
+        $<$<COMPILE_LANGUAGE:C>:-Werror>
+        $<$<COMPILE_LANGUAGE:CXX>:-Wall>
+        $<$<COMPILE_LANGUAGE:CXX>:-Wextra>
+        $<$<COMPILE_LANGUAGE:CXX>:-Werror>
+    )
 endif()
 
-# Global Output Directories
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
-set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
-set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
-
-if(WIN32)
-    set(CMAKE_SHARED_LIBRARY_PREFIX "")
-    set(CMAKE_SHARED_MODULE_PREFIX "")
+# Release optimization flags
+if(MSVC)
+    set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} /O2 /GL")
+    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} /O2 /GL")
+    set(CMAKE_EXE_LINKER_FLAGS_RELEASE "${CMAKE_EXE_LINKER_FLAGS_RELEASE} /LTCG")
+    set(CMAKE_SHARED_LINKER_FLAGS_RELEASE "${CMAKE_SHARED_LINKER_FLAGS_RELEASE} /LTCG")
 endif()
 
-# Testing
-enable_testing()
-
-# Subdirectories
+# Sub-projects
+add_subdirectory(ThirdParty/cJSON)
 add_subdirectory(SDK)
 add_subdirectory(Core)
-add_subdirectory(App)
 add_subdirectory(Modules/dummy)
-add_subdirectory(Modules/fault)
 add_subdirectory(Modules/taskbar_resize)
 add_subdirectory(Modules/icon_hover)
-add_subdirectory(Tests)
+if (MSVC)
+    add_subdirectory(Modules/DockPhysics)
+    add_subdirectory(Modules/TaskbarPayload)
+endif()
+add_subdirectory(App)
 add_subdirectory(Benchmarks)
+
+# Tests (only when building tests)
+option(TE_BUILD_TESTS "Build unit tests" ON)
+if(TE_BUILD_TESTS)
+    enable_testing()
+    add_subdirectory(Tests)
+endif()

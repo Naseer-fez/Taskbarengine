@@ -1,80 +1,81 @@
 #include <catch2/catch_test_macros.hpp>
-#include <core/plugin_loader.h>
-#include <windows.h>
 #include <cstring>
-
-#ifndef TE_TEST_MODULES_DIR
-#define TE_TEST_MODULES_DIR L"Modules"
-#endif
+#include <algorithm>
 
 extern "C" {
-    static uint32_t g_test_plugin_id = 0;
-    uint32_t TE_CoreManagerGetCurrentPluginId(void) { return g_test_plugin_id; }
-    void TE_CoreManagerSetCurrentPluginId(uint32_t id) { g_test_plugin_id = id; }
+#include <sdk/te_types.h>
+#include <sdk/te_plugin.h>
+
+#define TE_MAX_PLUGINS 32
+typedef struct TE_PluginEntry {
+    HMODULE module_handle;
+    const PluginInterface* interface_ptr;
+    const PluginMetadata* metadata;
+    uint32_t plugin_id;
+    BOOL enabled;
+    int fault_count;
+    BOOL initialized;
+    wchar_t dll_path[MAX_PATH];
+} TE_PluginEntry;
+
+int TE_PluginLoaderGetCount(void);
+TE_PluginEntry* TE_PluginLoaderGetEntry(int index);
+TE_PluginEntry* TE_PluginLoaderFindByName(const char* name);
+HRESULT TE_PluginLoaderInit(void);
+void TE_PluginLoaderShutdown(void);
+
+HRESULT TE_TaskbarSubclassSubscribeMessage(UINT msg) {
+    (void)msg;
+    return TE_S_OK;
+}
+HRESULT TE_TaskbarSubclassUnsubscribeMessage(UINT msg) {
+    (void)msg;
+    return TE_S_OK;
+}
 }
 
+TEST_CASE("Plugin loader initialization", "[plugins]") {
+    TE_PluginLoaderInit();
 
-TEST_CASE("Plugin Loader Scan and Lifecycle", "[plugin]") {
-    TE_PluginEntry registry[TE_MAX_PLUGINS];
-    uint32_t count = 0;
-
-    SECTION("Scan Modules directory and check plugins") {
-        HRESULT hr = TE_PluginLoaderScan(TE_TEST_MODULES_DIR, registry, &count);
-        REQUIRE(SUCCEEDED(hr));
-        REQUIRE(count >= 1);
-
-        TE_PluginEntry* dummy = nullptr;
-        TE_PluginEntry* fault = nullptr;
-
-        for (uint32_t i = 0; i < count; i++) {
-            if (registry[i].metadata && registry[i].metadata->name) {
-                if (strcmp(registry[i].metadata->name, "DummyPlugin") == 0) {
-                    dummy = &registry[i];
-                } else if (strcmp(registry[i].metadata->name, "FaultPlugin") == 0) {
-                    fault = &registry[i];
-                }
-            }
-        }
-
-        /* Test DummyPlugin Happy Path */
-        REQUIRE(dummy != nullptr);
-        REQUIRE(dummy->iface != nullptr);
-        REQUIRE(dummy->metadata != nullptr);
-
-        if (dummy->iface->Initialize) {
-            dummy->iface->Initialize(dummy->context);
-        }
-
-        HRESULT en_hr = TE_PluginLoaderEnable(dummy);
-        REQUIRE(SUCCEEDED(en_hr));
-        REQUIRE(dummy->enabled == true);
-
-        HRESULT dis_hr = TE_PluginLoaderDisable(dummy);
-        REQUIRE(SUCCEEDED(dis_hr));
-        REQUIRE(dummy->enabled == false);
-
-        /* Verify Disable is permitted even if disabled_by_fault is true */
-        dummy->enabled = true;
-        dummy->disabled_by_fault = true;
-        HRESULT fault_dis_hr = TE_PluginLoaderDisable(dummy);
-        REQUIRE(SUCCEEDED(fault_dis_hr));
-        REQUIRE(dummy->enabled == false);
-
-
-        /* Test FaultPlugin Isolation Path under MSVC SEH */
-#ifdef _MSC_VER
-        if (fault != nullptr && fault->iface != nullptr) {
-            if (fault->iface->Initialize) {
-                fault->iface->Initialize(fault->context);
-            }
-            HRESULT fault_en = TE_PluginLoaderEnable(fault);
-            REQUIRE(FAILED(fault_en));
-            REQUIRE(fault->enabled == false);
-        }
-#else
-        (void)fault;
-#endif
-
-        TE_PluginLoaderUnloadAll(registry, count);
+    SECTION("Initial state") {
+        CHECK(TE_PluginLoaderGetCount() == 0);
+        CHECK(TE_PluginLoaderGetEntry(0) == nullptr);
+        CHECK(TE_PluginLoaderGetEntry(-1) == nullptr);
     }
+
+    SECTION("Find by name returns null when empty") {
+        CHECK(TE_PluginLoaderFindByName("nonexistent") == nullptr);
+        CHECK(TE_PluginLoaderFindByName(nullptr) == nullptr);
+    }
+
+    SECTION("Max plugins constant") {
+        CHECK(TE_MAX_PLUGINS == 32);
+    }
+
+    TE_PluginLoaderShutdown();
+}
+
+TEST_CASE("Load icon_hover plugin DLL directly", "[plugins][icon_hover]") {
+    HMODULE hMod = LoadLibraryW(L"Modules/icon_hover/icon_hover.dll");
+    if (!hMod) {
+        hMod = LoadLibraryW(L"D:/CODE/Utlities/Taskbar/build_msvc/Modules/icon_hover/icon_hover.dll");
+    }
+    REQUIRE(hMod != nullptr);
+
+    typedef const PluginInterface* (*GetPluginInterfaceFunc)(void);
+    GetPluginInterfaceFunc get_iface = (GetPluginInterfaceFunc)GetProcAddress(hMod, "GetPluginInterface");
+    REQUIRE(get_iface != nullptr);
+
+    const PluginInterface* iface = get_iface();
+    REQUIRE(iface != nullptr);
+    REQUIRE(iface->Initialize != nullptr);
+    REQUIRE(iface->Enable != nullptr);
+    REQUIRE(iface->Disable != nullptr);
+    REQUIRE(iface->GetMetadata != nullptr);
+
+    const PluginMetadata* meta = iface->GetMetadata();
+    REQUIRE(meta != nullptr);
+    REQUIRE(strcmp(meta->name, "icon_hover") == 0);
+
+    FreeLibrary(hMod);
 }

@@ -5,6 +5,9 @@
 #include <winrt/Microsoft.UI.Xaml.Media.h>
 #include <winrt/Microsoft.UI.Xaml.Controls.Primitives.h>
 #include <winrt/Microsoft.UI.Xaml.Documents.h>
+#undef FindText
+#undef FindTextW
+#undef FindTextA
 #include <winrt/Windows.UI.Text.h>
 #include <cJSON.h>
 #include <cstdio>
@@ -30,7 +33,8 @@ Page CreateAboutPage()
     
     TextBlock title;
     title.Text(L"About TaskbarEngine");
-    title.Style(Application::Current().Resources().Lookup(box_value(L"TitleTextBlockStyle")).as<Style>());
+    title.FontSize(24.0);
+    title.FontWeight(winrt::Windows::UI::Text::FontWeights::SemiBold());
     title.Margin(Thickness{ 0, 0, 0, 24 });
     panel.Children().Append(title);
 
@@ -54,7 +58,8 @@ Page CreateAboutPage()
 
     TextBlock perfTitle;
     perfTitle.Text(L"Live Performance Stats");
-    perfTitle.Style(Application::Current().Resources().Lookup(box_value(L"SubtitleTextBlockStyle")).as<Style>());
+    perfTitle.FontSize(20.0);
+    perfTitle.FontWeight(winrt::Windows::UI::Text::FontWeights::SemiBold());
     perfTitle.Margin(Thickness{ 0, 20, 0, 8 });
     panel.Children().Append(perfTitle);
     

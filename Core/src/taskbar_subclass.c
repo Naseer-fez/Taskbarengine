@@ -1,201 +1,165 @@
 #include "core/taskbar_subclass.h"
-#include "core/config_watcher.h"
+#include <windows.h>
+#include <commctrl.h>
 #include "core/core_manager.h"
+#include "core/event_dispatch.h"
 #include "core/shell_hook.h"
 #include "core/power_device.h"
-#include "core/te_msg_filter.h"
-#include "core/te_timer.h"
-#include <commctrl.h>
+#include <sdk/te_events.h>
 #include <sdk/te_log.h>
-#include <sdk/te_debug_trace.h>
-#include <stdio.h>
 
-#ifdef _MSC_VER
-#pragma comment(lib, "Comctl32.lib")
-#endif
+static UINT g_subscribed_messages[32];
+static int g_subscribed_count = 0;
 
-#define TASKBAR_SUBCLASS_ID 0x54455342 /* 'TESB' */
+static BOOL TE_IsMessageSubscribed(UINT msg) {
+    for (int i = 0; i < g_subscribed_count; i++) {
+        if (g_subscribed_messages[i] == msg) return TRUE;
+    }
+    return FALSE;
+}
 
-typedef struct SubclassRefData {
-    TE_EventEntry* event_table;
-    uint32_t* sub_count;
-    void* core_state_ptr;
-} SubclassRefData;
+HRESULT TE_TaskbarSubclassSubscribeMessage(UINT msg) {
+    if (TE_IsMessageSubscribed(msg)) return TE_S_OK;
+    if (g_subscribed_count >= 32) return TE_E_FAIL;
+    g_subscribed_messages[g_subscribed_count++] = msg;
+    return TE_S_OK;
+}
 
-static SubclassRefData g_subclass_ref = { 0 };
-static volatile LONG g_in_geometry_dispatch = 0;
+HRESULT TE_TaskbarSubclassUnsubscribeMessage(UINT msg) {
+    for (int i = 0; i < g_subscribed_count; i++) {
+        if (g_subscribed_messages[i] == msg) {
+            g_subscribed_messages[i] = g_subscribed_messages[g_subscribed_count - 1];
+            g_subscribed_count--;
+            return TE_S_OK;
+        }
+    }
+    return TE_S_OK;
+}
 
-/* TE_CoreManagerOnConfigChanged declared in core/core_manager.h (included above) */
 
-static LRESULT CALLBACK TaskbarSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam,
-                                           UINT_PTR uIdSubclass, DWORD_PTR dwRefData)
-{
+LRESULT CALLBACK TE_TaskbarSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData) {
     (void)uIdSubclass;
-    /* Only log specific messages to avoid flooding */
-    if (uMsg == WM_NCDESTROY || uMsg == (WM_APP + 100) || uMsg == (WM_APP + 102) || uMsg == WM_CLOSE || uMsg == WM_DESTROY) {
-        char dbg[128]; sprintf(dbg, "[TE-DBG] SubclassProc: msg=0x%04X wp=0x%llX\n", uMsg, (unsigned long long)wParam); TE_DebugTrace(dbg);
-    }
-    SubclassRefData* ref = (SubclassRefData*)dwRefData;
-
-    /* Process shell hook and power/device messages but let them pass through
-     * to DefSubclassProc so Explorer's own handlers still see them.  Swallowing
-     * these previously broke Explorer's internal task-list state management. */
-    TE_ShellHookHandleMessage(uMsg, wParam, lParam);
-    TE_PowerDeviceHandleMessage(uMsg, wParam, lParam);
-
-    switch (uMsg) {
-        case WM_SIZE:
-        case WM_WINDOWPOSCHANGING: {
-            /* Re-entrancy guard: SetWindowPos(SWP_FRAMECHANGED) from plugins
-             * generates another WM_WINDOWPOSCHANGING, creating a feedback loop
-             * with XAML's own layout engine.  Skip dispatch if already inside. */
-            if (InterlockedCompareExchange(&g_in_geometry_dispatch, 1, 0) == 0) {
-                if (ref && ref->event_table && ref->sub_count) {
-                    RECT rc;
-                    GetWindowRect(hWnd, &rc);
-                    TE_TaskbarGeometryEvent evt = { 0 };
-                    evt.taskbar_hwnd = hWnd;
-                    evt.taskbar_rect = rc;
-                    evt.window_pos = (uMsg == WM_WINDOWPOSCHANGING) ? (WINDOWPOS*)lParam : NULL;
-                    TE_EventDispatch(ref->event_table, *ref->sub_count, TE_EVENT_TASKBAR_GEOMETRY, &evt);
-                }
-                InterlockedExchange(&g_in_geometry_dispatch, 0);
+    (void)dwRefData;
+    
+    switch (msg) {
+        case WM_TE_INIT:
+            SetTimer(hwnd, 1001, 16, NULL);
+            TE_CoreManagerInit(hwnd);
+            return 0;
+            
+        case WM_TE_IPC_COMMAND:
+            if ((int)wParam == TE_CMD_SHUTDOWN) {
+                KillTimer(hwnd, 1001);
+                TE_CoreManagerHandleCommand((int)wParam, (void*)lParam);
+                TE_TaskbarSubclassRemove(hwnd);
+                return 0;
             }
-            break;
-        }
-
-        case WM_DISPLAYCHANGE: {
-            if (ref && ref->event_table && ref->sub_count) {
-                TE_DisplayChangedEvent evt = { 0 };
-                evt.monitor = MonitorFromWindow(hWnd, MONITOR_DEFAULTTONEAREST);
-                GetWindowRect(hWnd, &evt.monitor_rect);
-                TE_EventDispatch(ref->event_table, *ref->sub_count, TE_EVENT_DISPLAY_CHANGED, &evt);
-            }
-            break;
-        }
-
+            TE_CoreManagerHandleCommand((int)wParam, (void*)lParam);
+            return 0;
+            
         case WM_DPICHANGED: {
-            if (ref && ref->event_table && ref->sub_count) {
-                TE_DpiChangedEvent evt = { 0 };
-                evt.monitor = MonitorFromWindow(hWnd, MONITOR_DEFAULTTONEAREST);
-                evt.new_dpi = (uint32_t)LOWORD(wParam);
-                TE_EventDispatch(ref->event_table, *ref->sub_count, TE_EVENT_DPI_CHANGED, &evt);
-            }
+            TE_DpiChangedData data;
+            data.old_dpi = TE_CoreManagerGetDpi();
+            data.new_dpi = HIWORD(wParam);
+            data.hwnd = hwnd;
+            TE_CoreManagerSetDpi(data.new_dpi);
+            TE_EventDispatchFire(TE_EVENT_DPI_CHANGED, &data);
             break;
         }
-
-        case WM_TE_INIT: {
-            if (ref && ref->core_state_ptr) {
-                TE_LogWrite(TE_LOG_INFO, "Taskbar subclass received WM_TE_INIT, executing deferred init");
-                TE_DebugTrace("[TE-DBG] SubclassProc: WM_TE_INIT received, calling PhaseB\n");
-                TE_CoreManagerInitPhaseB();
-            }
-            return 0;
-        }
-
-        case WM_TE_CONFIG_CHANGED: {
-            TE_LogWrite(TE_LOG_INFO, "Taskbar subclass received WM_TE_CONFIG_CHANGED");
-            if (ref && ref->core_state_ptr) {
-                TE_CoreManagerOnConfigChanged(ref->core_state_ptr);
-            }
-            return 0;
-        }
-
-        case WM_TE_TIMER_FIRE: {
-            TE_TimerDispatchMessage(wParam, lParam);
-            return 0;
-        }
-
-        case WM_TE_IPC_COMMAND: {
-            TE_LogWrite(TE_LOG_INFO, "Taskbar subclass received WM_TE_IPC_COMMAND (cmd=%lu)", (unsigned long)wParam);
-            if (wParam == TE_IPC_CMD_RELOAD_CONFIG) {
-                TE_CoreManagerReloadConfig();
-            } else if (wParam == TE_IPC_CMD_ENABLE_PLUGIN || wParam == TE_IPC_CMD_DISABLE_PLUGIN) {
-                const char* name = (const char*)lParam;
-                if (name) {
-                    return (LRESULT)(LONG)TE_CoreManagerSetPluginEnabledByName(
-                        name, wParam == TE_IPC_CMD_ENABLE_PLUGIN);
-                }
-                return (LRESULT)(LONG)E_INVALIDARG;
-            } else if (wParam == TE_IPC_CMD_SHUTDOWN) {
-                TE_LogWrite(TE_LOG_INFO, "Taskbar subclass executing TE_IPC_CMD_SHUTDOWN on UI thread");
-                TE_CoreManagerShutdownFromIpc();
-            } else if (wParam == TE_IPC_CMD_GET_PLUGIN_LIST) {
-                TE_IpcSyncPayload* sync = (TE_IpcSyncPayload*)lParam;
-                if (sync) {
-                    sync->result_code = TE_CoreManagerBuildPluginList((char*)sync->buffer, sync->buffer_len);
-                    if (sync->completion_event) {
-                        SetEvent(sync->completion_event);
-                    }
-                }
-            } else if (wParam == TE_IPC_CMD_GET_SETTINGS) {
-                TE_IpcSyncPayload* sync = (TE_IpcSyncPayload*)lParam;
-                if (sync) {
-                    sync->result_code = TE_CoreManagerBuildSettingsSchema((char*)sync->buffer, sync->buffer_len);
-                    if (sync->completion_event) {
-                        SetEvent(sync->completion_event);
-                    }
-                }
-            } else if (wParam == TE_IPC_CMD_GET_PERF_STATS) {
-                TE_IpcSyncPayload* sync = (TE_IpcSyncPayload*)lParam;
-                if (sync) {
-                    sync->result_code = TE_CoreManagerBuildPerfStats((char*)sync->buffer, sync->buffer_len);
-                    if (sync->completion_event) {
-                        SetEvent(sync->completion_event);
-                    }
-                }
-            }
-            return 0;
-        }
-
-        case WM_MOUSEMOVE: {
-            if (TE_MsgFilterHasSubscriber(WM_MOUSEMOVE)) {
-                if (ref && ref->event_table && ref->sub_count) {
-                    TE_TaskbarMouseEvent evt = { 0 };
-                    evt.taskbar_hwnd = hWnd;
-                    evt.x = (int)(short)LOWORD(lParam);
-                    evt.y = (int)(short)HIWORD(lParam);
-                    TE_EventDispatch(ref->event_table, *ref->sub_count, TE_EVENT_TASKBAR_MOUSE, &evt);
-                }
-            }
+        
+        case WM_DISPLAYCHANGE: {
+            TE_DisplayChangedData data;
+            data.width = LOWORD(lParam);
+            data.height = HIWORD(lParam);
+            data.bits_per_pixel = (uint32_t)wParam;
+            TE_EventDispatchFire(TE_EVENT_DISPLAY_CHANGED, &data);
             break;
         }
-
-        case WM_NCDESTROY: {
-            TE_DebugTrace("[TE-DBG] SubclassProc: WM_NCDESTROY - Shell_TrayWnd is being DESTROYED!\n");
-            RemoveWindowSubclass(hWnd, TaskbarSubclassProc, TASKBAR_SUBCLASS_ID);
-            TE_LogWrite(TE_LOG_INFO, "Subclass automatically removed on WM_NCDESTROY, triggering Core Manager shutdown");
+        
+        case WM_DESTROY:
+        case WM_ENDSESSION:
+            KillTimer(hwnd, 1001);
             TE_CoreManagerShutdown();
+            TE_TaskbarSubclassRemove(hwnd);
+            break;
+            
+        case WM_TIMER: {
+            if (wParam == 1001) {
+                POINT pt;
+                GetCursorPos(&pt);
+                RECT rect;
+                GetWindowRect(hwnd, &rect);
+                
+                BOOL in_taskbar = FALSE;
+                if (PtInRect(&rect, pt)) {
+                    HWND hit_hwnd = WindowFromPoint(pt);
+                    if (hit_hwnd) {
+                        HWND root = GetAncestor(hit_hwnd, GA_ROOT);
+                        if (root == hwnd) {
+                            in_taskbar = TRUE;
+                        }
+                    }
+                }
+                
+                static BOOL s_was_in_taskbar = FALSE;
+                static BOOL s_was_dragging = FALSE;
+                static POINT s_last_pt = {0, 0};
+                BOOL is_dragging = ((GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0);
+                
+                if (in_taskbar || s_was_in_taskbar) {
+                    if (pt.x != s_last_pt.x || pt.y != s_last_pt.y || in_taskbar != s_was_in_taskbar || is_dragging != s_was_dragging) {
+                        TE_TaskbarMouseData mouse_data;
+                        mouse_data.cursor_pos = pt;
+                        mouse_data.is_in_taskbar = in_taskbar;
+                        mouse_data.is_dragging = is_dragging;
+                        TE_EventDispatchFire(TE_EVENT_TASKBAR_MOUSE, &mouse_data);
+                        
+                        s_last_pt = pt;
+                        s_was_in_taskbar = in_taskbar;
+                        s_was_dragging = is_dragging;
+                    }
+                }
+            }
             break;
         }
-    }
 
-    return DefSubclassProc(hWnd, uMsg, wParam, lParam);
+        case WM_WINDOWPOSCHANGED: {
+            const WINDOWPOS* wp = (const WINDOWPOS*)lParam;
+            if (wp && (!(wp->flags & SWP_NOMOVE) || !(wp->flags & SWP_NOSIZE))) {
+                TE_TaskbarGeometryData geom;
+                GetWindowRect(hwnd, &geom.new_rect);
+                geom.monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTOPRIMARY);
+                TE_EventDispatchFire(TE_EVENT_TASKBAR_GEOMETRY, &geom);
+            }
+            break;
+        }
+
+        case WM_POWERBROADCAST:
+            TE_PowerProcess(wParam, lParam);
+            break;
+
+        case WM_DEVICECHANGE:
+            TE_DeviceProcess(wParam, lParam);
+            break;
+            
+        default:
+            if (msg == TE_ShellHookGetMessageId() && msg != 0) {
+                TE_ShellHookProcess(wParam, lParam);
+            } else if (TE_IsMessageSubscribed(msg)) {
+                /* TODO(Phase3): Forward subscribed messages to plugins */
+            }
+            break;
+    }
+    return DefSubclassProc(hwnd, msg, wParam, lParam);
 }
 
-HRESULT TE_TaskbarSubclassInstall(HWND taskbar_hwnd, TE_EventEntry* event_table, uint32_t* sub_count, void* core_state_ptr)
-{
-    if (!taskbar_hwnd || !IsWindow(taskbar_hwnd)) return E_HANDLE;
-
-    g_subclass_ref.event_table = event_table;
-    g_subclass_ref.sub_count = sub_count;
-    g_subclass_ref.core_state_ptr = core_state_ptr;
-
-    BOOL ok = SetWindowSubclass(taskbar_hwnd, TaskbarSubclassProc, TASKBAR_SUBCLASS_ID, (DWORD_PTR)&g_subclass_ref);
-    if (!ok) {
-        TE_LogWrite(TE_LOG_ERROR, "SetWindowSubclass failed on Shell_TrayWnd");
-        return E_FAIL;
-    }
-    TE_DebugTrace("[TE-DBG] SubclassInstall: SetWindowSubclass succeeded\n");
-
-    TE_LogWrite(TE_LOG_INFO, "Subclassed Shell_TrayWnd successfully");
-    return S_OK;
+HRESULT TE_TaskbarSubclassInstall(HWND taskbar_hwnd) {
+    if (!taskbar_hwnd) return TE_E_INVALIDARG;
+    SetWindowSubclass(taskbar_hwnd, TE_TaskbarSubclassProc, TE_SUBCLASS_ID, 0);
+    return TE_S_OK;
 }
 
-void TE_TaskbarSubclassRemove(HWND taskbar_hwnd)
-{
-    if (taskbar_hwnd && IsWindow(taskbar_hwnd)) {
-        RemoveWindowSubclass(taskbar_hwnd, TaskbarSubclassProc, TASKBAR_SUBCLASS_ID);
-        TE_LogWrite(TE_LOG_INFO, "Removed subclass from Shell_TrayWnd");
-    }
+void TE_TaskbarSubclassRemove(HWND taskbar_hwnd) {
+    if (!taskbar_hwnd) return;
+    RemoveWindowSubclass(taskbar_hwnd, TE_TaskbarSubclassProc, TE_SUBCLASS_ID);
 }

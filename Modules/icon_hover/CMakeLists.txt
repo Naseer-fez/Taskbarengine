@@ -1,7 +1,9 @@
+# IconHover Plugin — macOS Dock-style icon magnification
+# Mixed C/C++ module: C for plugin ABI + magnification math, C++ for COM/DComp
+
 add_library(IconHoverPlugin SHARED
     icon_hover.c
     magnification.c
-    icon_layout.c
     uia_discovery.cpp
     icon_capture.cpp
     dcomp_overlay.cpp
@@ -10,31 +12,36 @@ add_library(IconHoverPlugin SHARED
 
 target_include_directories(IconHoverPlugin PRIVATE
     ${CMAKE_SOURCE_DIR}/SDK/include
-    ${CMAKE_SOURCE_DIR}/Modules/icon_hover
+    ${CMAKE_SOURCE_DIR}/ThirdParty/cJSON
+    ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
 target_link_libraries(IconHoverPlugin PRIVATE
     te_sdk
     dcomp
-    d3d11
     d2d1
-    dxgi
-    dwmapi
+    d3d11
+    dxguid
     ole32
-    user32
-    gdi32
-    shell32
     oleaut32
-    uiautomationcore
+    shell32
+    user32
+    comctl32
+    dwmapi
+    uuid
     windowscodecs
     shlwapi
 )
 
-set_target_properties(IconHoverPlugin PROPERTIES
-    PREFIX ""
-    OUTPUT_NAME "icon_hover"
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/Modules"
-    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/Modules"
-    ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib/Modules"
+# _USE_MATH_DEFINES for M_PI in magnification.c
+target_compile_definitions(IconHoverPlugin PRIVATE _USE_MATH_DEFINES)
+
+# Ensure the library name matches the folder name for auto-discovery
+set_target_properties(IconHoverPlugin PROPERTIES OUTPUT_NAME "icon_hover")
+
+# Copy the built plugin to the build modules directory
+add_custom_command(TARGET IconHoverPlugin POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy
+    $<TARGET_FILE:IconHoverPlugin>
+    ${CMAKE_BINARY_DIR}/Modules/icon_hover/$<TARGET_FILE_NAME:IconHoverPlugin>
 )
-set_target_properties(IconHoverPlugin PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")

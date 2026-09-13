@@ -1,7 +1,6 @@
 {
-    "version": 3,
+    "version": 6,
     "configurePresets": [
-
         {
             "name": "msvc-debug",
             "displayName": "MSVC Debug",
@@ -10,7 +9,8 @@
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Debug",
                 "CMAKE_C_COMPILER": "cl",
-                "CMAKE_CXX_COMPILER": "cl"
+                "CMAKE_CXX_COMPILER": "cl",
+                "TE_BUILD_TESTS": "ON"
             }
         },
         {
@@ -21,7 +21,8 @@
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Release",
                 "CMAKE_C_COMPILER": "cl",
-                "CMAKE_CXX_COMPILER": "cl"
+                "CMAKE_CXX_COMPILER": "cl",
+                "TE_BUILD_TESTS": "ON"
             }
         },
         {
@@ -32,27 +33,26 @@
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Debug",
                 "CMAKE_C_COMPILER": "clang-cl",
-                "CMAKE_CXX_COMPILER": "clang-cl"
+                "CMAKE_CXX_COMPILER": "clang-cl",
+                "TE_BUILD_TESTS": "ON",
+                "CMAKE_C_FLAGS": "-fsanitize=address",
+                "CMAKE_CXX_FLAGS": "-fsanitize=address"
             }
         },
         {
-            "name": "clang-asan",
-            "displayName": "Clang-cl ASan Debug",
+            "name": "clang-release",
+            "displayName": "Clang-cl Release",
             "generator": "Ninja",
-            "binaryDir": "${sourceDir}/build/clang-asan",
+            "binaryDir": "${sourceDir}/build/clang-release",
             "cacheVariables": {
-                "CMAKE_BUILD_TYPE": "Debug",
+                "CMAKE_BUILD_TYPE": "Release",
                 "CMAKE_C_COMPILER": "clang-cl",
                 "CMAKE_CXX_COMPILER": "clang-cl",
-                "CMAKE_C_FLAGS": "-fsanitize=address",
-                "CMAKE_CXX_FLAGS": "-fsanitize=address",
-                "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=address",
-                "CMAKE_SHARED_LINKER_FLAGS": "-fsanitize=address"
+                "TE_BUILD_TESTS": "ON"
             }
         }
     ],
     "buildPresets": [
-
         {
             "name": "msvc-debug",
             "configurePreset": "msvc-debug"
@@ -66,8 +66,17 @@
             "configurePreset": "clang-debug"
         },
         {
-            "name": "clang-asan",
-            "configurePreset": "clang-asan"
+            "name": "clang-release",
+            "configurePreset": "clang-release"
+        }
+    ],
+    "testPresets": [
+        {
+            "name": "msvc-debug",
+            "configurePreset": "msvc-debug",
+            "output": {
+                "outputOnFailure": true
+            }
         }
     ]
 }

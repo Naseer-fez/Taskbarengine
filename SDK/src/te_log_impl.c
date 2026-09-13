@@ -1,309 +1,246 @@
-#include "sdk/te_log_impl.h"
-#include <windows.h>
-#include <shlobj.h>
+#include <sdk/te_log_impl.h>
 #include <stdio.h>
-#include <stdarg.h>
+#include <string.h>
+#include <windows.h>
+#include <share.h>
 
-#ifdef _MSC_VER
-#pragma comment(lib, "Shell32.lib")
-#pragma comment(lib, "Ole32.lib")
-#endif
+#define MAX_LOG_FILES 5
+#define MAX_FILE_SIZE (5 * 1024 * 1024)
+#define RING_BUFFER_SIZE 256
+#define RING_BUFFER_MASK (RING_BUFFER_SIZE - 1)
 
-static TE_LogEntry g_ring_buffer[TE_LOG_RING_SIZE];
-static volatile LONG g_write_idx = 0;
-static volatile LONG g_read_idx = 0;
+typedef struct LogEntry {
+    volatile LONG ready;
+    TE_LogLevel level;
+    SYSTEMTIME timestamp;
+    char module[32];
+    char message[204];
+} LogEntry;
 
-static HANDLE g_flush_thread = NULL;
+static LogEntry g_ring_buffer[RING_BUFFER_SIZE];
+static volatile LONG g_write_pos = 0;
+static volatile LONG g_read_pos = 0;
+
 static HANDLE g_flush_event = NULL;
-static volatile LONG g_log_running = 0;
+static HANDLE g_shutdown_event = NULL;
+static HANDLE g_flush_thread = NULL;
+static CRITICAL_SECTION g_flush_cs;
+static BOOL g_flush_cs_init = FALSE;
 
-static wchar_t g_log_dir_path[MAX_PATH] = {0};
-static wchar_t g_log_file_path[MAX_PATH] = {0};
-static TE_LogLevel g_min_level = TE_LOG_INFO;
-static bool g_log_to_file = false;
+static TE_LogLevel g_min_level = TE_LOG_DEBUG;
+static TE_LogFunc g_log_callback = NULL;
 
-static LONG AtomicReadLong(volatile LONG* value)
-{
-    return InterlockedCompareExchange(value, 0, 0);
+static wchar_t g_log_dir[MAX_PATH] = {0};
+static FILE* g_log_file = NULL;
+
+static const char* GetLevelString(TE_LogLevel level) {
+    switch (level) {
+        case TE_LOG_DEBUG:   return "DEBUG";
+        case TE_LOG_INFO:    return "INFO ";
+        case TE_LOG_WARNING: return "WARN ";
+        case TE_LOG_ERROR:   return "ERROR";
+        default:             return "UNKNN";
+    }
 }
 
-static void TE_RotateLogs(const wchar_t* dir)
-{
-    wchar_t search_pattern[MAX_PATH];
-    swprintf(search_pattern, MAX_PATH, L"%s\\taskbarengine_*.log", dir);
-
-    WIN32_FIND_DATAW find_data;
-    HANDLE hfind = FindFirstFileW(search_pattern, &find_data);
-    if (hfind == INVALID_HANDLE_VALUE) {
-        return;
+static void RotateLogs(void) {
+    if (g_log_file) {
+        fclose(g_log_file);
+        g_log_file = NULL;
     }
 
-    typedef struct FileInfo {
+    wchar_t old_path[MAX_PATH];
+    wchar_t new_path[MAX_PATH];
+
+    for (int i = MAX_LOG_FILES - 2; i >= 0; --i) {
+        if (i == 0) {
+            _snwprintf_s(old_path, MAX_PATH, _TRUNCATE, L"%s\\taskbarengine.log", g_log_dir);
+        } else {
+            _snwprintf_s(old_path, MAX_PATH, _TRUNCATE, L"%s\\taskbarengine.%d.log", g_log_dir, i);
+        }
+        _snwprintf_s(new_path, MAX_PATH, _TRUNCATE, L"%s\\taskbarengine.%d.log", g_log_dir, i + 1);
+
+        MoveFileExW(old_path, new_path, MOVEFILE_REPLACE_EXISTING);
+    }
+
+    _snwprintf_s(old_path, MAX_PATH, _TRUNCATE, L"%s\\taskbarengine.log", g_log_dir);
+    _wfopen_s(&g_log_file, old_path, L"a");
+}
+
+static void CheckRotation(void) {
+    if (g_log_file) {
+        long size = ftell(g_log_file);
+        if (size >= MAX_FILE_SIZE) {
+            RotateLogs();
+        }
+    }
+}
+
+static void WriteEntryToFile(const LogEntry* entry) {
+    if (!g_log_file) {
         wchar_t path[MAX_PATH];
-        FILETIME ft;
-    } FileInfo;
-
-    FileInfo* files = (FileInfo*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(FileInfo) * 32);
-    if (!files) {
-        FindClose(hfind);
-        return;
-    }
-    int count = 0;
-
-    do {
-        if (!(find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
-            swprintf(files[count].path, MAX_PATH, L"%s\\%s", dir, find_data.cFileName);
-            files[count].ft = find_data.ftLastWriteTime;
-            count++;
-            if (count >= 32) break;
-        }
-    } while (FindNextFileW(hfind, &find_data));
-    FindClose(hfind);
-
-    /* Sort files by LastWriteTime ascending (oldest first) */
-    for (int i = 0; i < count - 1; i++) {
-        for (int j = i + 1; j < count; j++) {
-            if (CompareFileTime(&files[i].ft, &files[j].ft) > 0) {
-                FileInfo tmp = files[i];
-                files[i] = files[j];
-                files[j] = tmp;
-            }
-        }
+        _snwprintf_s(path, MAX_PATH, _TRUNCATE, L"%s\\taskbarengine.log", g_log_dir);
+        g_log_file = _wfsopen(path, L"a", _SH_DENYNO);
+        if (!g_log_file) return;
     }
 
-    /* Delete oldest if count > 5 */
-    while (count > 5) {
-        DeleteFileW(files[0].path);
-        for (int i = 0; i < count - 1; i++) {
-            files[i] = files[i + 1];
-        }
-        count--;
-    }
-
-    HeapFree(GetProcessHeap(), 0, files);
+    fprintf(g_log_file, "[%04d-%02d-%02d %02d:%02d:%02d.%03d] [%s] [%s] %s\n",
+            entry->timestamp.wYear, entry->timestamp.wMonth, entry->timestamp.wDay,
+            entry->timestamp.wHour, entry->timestamp.wMinute, entry->timestamp.wSecond,
+            entry->timestamp.wMilliseconds,
+            GetLevelString(entry->level),
+            entry->module,
+            entry->message);
+    fflush(g_log_file);
+    
+    CheckRotation();
 }
 
-static DWORD WINAPI TE_LogFlushThreadProc(LPVOID param)
-{
-    (void)param;
-    bool keep_running = true;
-    while (keep_running) {
-        keep_running = (g_log_running != 0);
-        
-        if (keep_running) {
-            WaitForSingleObject(g_flush_event, 100);
-        }
+static void FlushPendingEntries(void) {
+    EnterCriticalSection(&g_flush_cs);
 
-        if (!g_log_to_file || g_log_file_path[0] == L'\0') {
-            /* If file logging is disabled, drain and clear unread entries */
-            LONG r = AtomicReadLong(&g_read_idx);
-            LONG w = AtomicReadLong(&g_write_idx);
-            while (r != w) {
-                uint32_t idx = ((uint32_t)r) & (TE_LOG_RING_SIZE - 1);
-                TE_LogEntry* entry = &g_ring_buffer[idx];
-                if (InterlockedCompareExchange(&entry->state, TE_LOG_STATE_READING, TE_LOG_STATE_UNREAD) == TE_LOG_STATE_UNREAD) {
-                    InterlockedExchange(&entry->state, TE_LOG_STATE_EMPTY);
-                    r = (LONG)((ULONG)r + 1u);
-                } else {
-                    break;
-                }
-            }
-            InterlockedExchange(&g_read_idx, r);
-            continue;
-        }
-
-        LONG r = AtomicReadLong(&g_read_idx);
-        LONG w = AtomicReadLong(&g_write_idx);
-
-        if (r == w) continue;
-
-        HANDLE hfile = CreateFileW(g_log_file_path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
-                                   NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-        if (hfile == INVALID_HANDLE_VALUE) {
-            /* If we can't open the file, drain the entries to prevent ring buffer deadlock */
-            while (r != w) {
-                uint32_t idx = ((uint32_t)r) & (TE_LOG_RING_SIZE - 1);
-                TE_LogEntry* entry = &g_ring_buffer[idx];
-                if (InterlockedCompareExchange(&entry->state, TE_LOG_STATE_READING, TE_LOG_STATE_UNREAD) == TE_LOG_STATE_UNREAD) {
-                    InterlockedExchange(&entry->state, TE_LOG_STATE_EMPTY);
-                    r = (LONG)((ULONG)r + 1u);
-                } else {
-                    break;
-                }
-            }
-            InterlockedExchange(&g_read_idx, r);
-
-#ifdef TE_DEBUG
-            OutputDebugStringA("[TE_WARN] Logger flush thread failed to open log file, dropping messages.\n");
-#endif
-            continue;
-        }
-
-        while (r != w) {
-            uint32_t idx = ((uint32_t)r) & (TE_LOG_RING_SIZE - 1);
-            TE_LogEntry* entry = &g_ring_buffer[idx];
-
-            if (InterlockedCompareExchange(&entry->state, TE_LOG_STATE_READING, TE_LOG_STATE_UNREAD) != TE_LOG_STATE_UNREAD) {
-                /* Slot is not ready for reading */
-                break;
-            }
-
-            const char* level_str = "[INFO]";
-            switch (entry->level) {
-                case TE_LOG_DEBUG: level_str = "[DEBUG]"; break;
-                case TE_LOG_INFO:  level_str = "[INFO]";  break;
-                case TE_LOG_WARN:  level_str = "[WARN]";  break;
-                case TE_LOG_ERROR: level_str = "[ERROR]"; break;
-            }
-
-            char formatted[512];
-            int len = snprintf(formatted, sizeof(formatted), "%lu %s %s\r\n",
-                               (unsigned long)entry->timestamp_ms, level_str, entry->message);
-            if (len > 0) {
-                DWORD written = 0;
-                WriteFile(hfile, formatted, (DWORD)len, &written, NULL);
-            }
-
-            InterlockedExchange(&entry->state, TE_LOG_STATE_EMPTY);
-            r = (LONG)((ULONG)r + 1u);
-        }
-
-        CloseHandle(hfile);
-        InterlockedExchange(&g_read_idx, r);
+    LONG current_read = g_read_pos;
+    LONG current_write = g_write_pos;
+    
+    // If the buffer has wrapped around and overwritten read_pos, fast-forward read_pos
+    if (current_write - current_read > RING_BUFFER_SIZE) {
+        current_read = current_write - RING_BUFFER_SIZE;
+        g_read_pos = current_read;
     }
+
+    while (current_read < current_write) {
+        LONG index = current_read & RING_BUFFER_MASK;
+        if (InterlockedCompareExchange(&g_ring_buffer[index].ready, 0, 1) != 1) {
+            // Slot is currently being written by a producer thread; wait for next flush
+            break;
+        }
+        WriteEntryToFile(&g_ring_buffer[index]);
+        current_read++;
+        g_read_pos = current_read;
+    }
+
+    if (g_log_file) {
+        fflush(g_log_file);
+    }
+
+    LeaveCriticalSection(&g_flush_cs);
+}
+
+static DWORD WINAPI FlushThreadProc(LPVOID lpParam) {
+    (void)lpParam;
+    HANDLE handles[2] = { g_shutdown_event, g_flush_event };
+
+    while (TRUE) {
+        DWORD wait_result = WaitForMultipleObjects(2, handles, FALSE, 100);
+        if (wait_result == WAIT_OBJECT_0) {
+            // Shutdown signaled
+            break;
+        } else if (wait_result == WAIT_OBJECT_0 + 1) {
+            // Flush signaled
+            ResetEvent(g_flush_event);
+        }
+        FlushPendingEntries();
+    }
+
+    // Final flush before exiting
+    FlushPendingEntries();
     return 0;
 }
 
-HRESULT TE_LogInit(const wchar_t* log_dir, TE_LogLevel min_level, bool to_file)
-{
-    if (g_log_running) {
-        return S_OK;
-    }
+HRESULT TE_LogInit(const wchar_t* log_dir, TE_LogLevel min_level) {
+    if (!log_dir) return TE_E_INVALIDARG;
 
+    wcsncpy_s(g_log_dir, MAX_PATH, log_dir, _TRUNCATE);
     g_min_level = min_level;
-    g_log_to_file = to_file;
 
-    if (log_dir != NULL && log_dir[0] != L'\0') {
-        wcsncpy(g_log_dir_path, log_dir, MAX_PATH - 1);
-        g_log_dir_path[MAX_PATH - 1] = L'\0';
-    } else {
-        PWSTR local_appdata = NULL;
-        HRESULT hr = SHGetKnownFolderPath(&FOLDERID_LocalAppData, 0, NULL, &local_appdata);
-        if (TE_SUCCEEDED(hr)) {
-            swprintf(g_log_dir_path, MAX_PATH, L"%s\\TaskbarEngine\\logs", local_appdata);
-            CoTaskMemFree(local_appdata);
-        } else {
-            wcscpy(g_log_dir_path, L"logs");
-        }
+    if (!g_flush_cs_init) {
+        InitializeCriticalSection(&g_flush_cs);
+        g_flush_cs_init = TRUE;
     }
 
-    if (SHCreateDirectoryExW(NULL, g_log_dir_path, NULL) != ERROR_SUCCESS) {
-        DWORD err = GetLastError();
-        if (err != ERROR_ALREADY_EXISTS && err != ERROR_ACCESS_DENIED) {
-            /* Log directory creation warning in debug output */
-#ifdef TE_DEBUG
-            OutputDebugStringA("[TE_WARN] Failed to create log directory\n");
-#endif
-        }
+    memset(g_ring_buffer, 0, sizeof(g_ring_buffer));
+    g_write_pos = 0;
+    g_read_pos = 0;
+
+    g_flush_event = CreateEventW(NULL, TRUE, FALSE, NULL);
+    g_shutdown_event = CreateEventW(NULL, TRUE, FALSE, NULL);
+
+    if (!g_flush_event || !g_shutdown_event) {
+        if (g_flush_event) { CloseHandle(g_flush_event); g_flush_event = NULL; }
+        if (g_shutdown_event) { CloseHandle(g_shutdown_event); g_shutdown_event = NULL; }
+        return TE_E_FAIL;
     }
 
-    if (g_log_to_file) {
-        TE_RotateLogs(g_log_dir_path);
-
-        SYSTEMTIME st;
-        GetLocalTime(&st);
-        swprintf(g_log_file_path, MAX_PATH, L"%s\\taskbarengine_%04d-%02d-%02d.log",
-                 g_log_dir_path, st.wYear, st.wMonth, st.wDay);
-    }
-
-    g_write_idx = 0;
-    g_read_idx = 0;
-    ZeroMemory(g_ring_buffer, sizeof(g_ring_buffer));
-    g_flush_event = CreateEventW(NULL, FALSE, FALSE, NULL);
-    if (!g_flush_event) {
-        return HRESULT_FROM_WIN32(GetLastError());
-    }
-    g_log_running = 1;
-
-    g_flush_thread = CreateThread(NULL, 0, TE_LogFlushThreadProc, NULL, 0, NULL);
+    g_flush_thread = CreateThread(NULL, 0, FlushThreadProc, NULL, 0, NULL);
     if (!g_flush_thread) {
-        g_log_running = 0;
         CloseHandle(g_flush_event);
+        CloseHandle(g_shutdown_event);
         g_flush_event = NULL;
-        return E_FAIL;
+        g_shutdown_event = NULL;
+        return TE_E_FAIL;
     }
 
-    return S_OK;
+    return TE_S_OK;
 }
 
-void TE_LogShutdown(void)
-{
-    if (!g_log_running) return;
-
-    g_log_running = 0;
-    if (g_flush_event) {
-        SetEvent(g_flush_event);
+void TE_LogShutdown(void) {
+    if (g_shutdown_event) {
+        SetEvent(g_shutdown_event);
     }
-
     if (g_flush_thread) {
-        WaitForSingleObject(g_flush_thread, 2000);
+        WaitForSingleObject(g_flush_thread, INFINITE);
         CloseHandle(g_flush_thread);
         g_flush_thread = NULL;
     }
-
+    if (g_shutdown_event) {
+        CloseHandle(g_shutdown_event);
+        g_shutdown_event = NULL;
+    }
     if (g_flush_event) {
         CloseHandle(g_flush_event);
         g_flush_event = NULL;
     }
+    if (g_flush_cs_init) {
+        EnterCriticalSection(&g_flush_cs);
+        if (g_log_file) {
+            fclose(g_log_file);
+            g_log_file = NULL;
+        }
+        LeaveCriticalSection(&g_flush_cs);
+        DeleteCriticalSection(&g_flush_cs);
+        g_flush_cs_init = FALSE;
+    }
 }
 
-void TE_LogWriteV(TE_LogLevel level, const char* fmt, va_list args)
-{
-    if (!g_log_running || level < g_min_level || !fmt) return;
+void TE_LogFlush(void) {
+    if (g_flush_cs_init) {
+        FlushPendingEntries();
+    }
+}
 
-    LONG w = 0;
-    for (;;) {
-        LONG read_idx = AtomicReadLong(&g_read_idx);
-        LONG write_idx = AtomicReadLong(&g_write_idx);
-        if ((uint32_t)((ULONG)write_idx - (ULONG)read_idx) >= TE_LOG_RING_SIZE) {
-            return;
-        }
-        LONG next_write_idx = (LONG)((ULONG)write_idx + 1u);
-        if (InterlockedCompareExchange(&g_write_idx, next_write_idx, write_idx) == write_idx) {
-            w = write_idx;
-            break;
-        }
+void TE_LogSetCallback(TE_LogFunc callback) {
+    g_log_callback = callback;
+}
+
+void TE_LogWrite(TE_LogLevel level, const char* module, const char* message) {
+    if (level < g_min_level) return;
+
+    if (g_log_callback) {
+        g_log_callback(level, module, message);
     }
 
-    uint32_t idx = ((uint32_t)w) & (TE_LOG_RING_SIZE - 1);
-    TE_LogEntry* entry = &g_ring_buffer[idx];
+    LONG pos = InterlockedIncrement(&g_write_pos) - 1;
+    LONG index = pos & RING_BUFFER_MASK;
+    LogEntry* entry = &g_ring_buffer[index];
 
-    /* A RESERVATION IS NEVER ABANDONED; otherwise the consumer would stall at
-     * the resulting gap in the ordered ring. Spin until the slot is empty. */
-    while (InterlockedCompareExchange(&entry->state, TE_LOG_STATE_WRITING, TE_LOG_STATE_EMPTY) != TE_LOG_STATE_EMPTY) {
-        YieldProcessor();
-    }
+    InterlockedExchange(&entry->ready, 0);
 
-    entry->level = (uint32_t)level;
-    entry->timestamp_ms = (uint32_t)GetTickCount64();
+    entry->level = level;
+    GetLocalTime(&entry->timestamp);
+    strncpy_s(entry->module, sizeof(entry->module), module ? module : "Unknown", _TRUNCATE);
+    strncpy_s(entry->message, sizeof(entry->message), message ? message : "", _TRUNCATE);
 
-    vsnprintf(entry->message, sizeof(entry->message), fmt, args);
-    entry->message[sizeof(entry->message) - 1] = '\0';
-
-    InterlockedExchange(&entry->state, TE_LOG_STATE_UNREAD);
-
-#ifdef TE_DEBUG
-    const char* prefix = "[TE_INFO]";
-    switch (level) {
-        case TE_LOG_DEBUG: prefix = "[TE_DEBUG]"; break;
-        case TE_LOG_INFO:  prefix = "[TE_INFO]";  break;
-        case TE_LOG_WARN:  prefix = "[TE_WARN]";  break;
-        case TE_LOG_ERROR: prefix = "[TE_ERROR]"; break;
-    }
-    char debug_buf[512];
-    snprintf(debug_buf, sizeof(debug_buf), "%s %s\n", prefix, entry->message);
-    OutputDebugStringA(debug_buf);
-#endif
+    InterlockedExchange(&entry->ready, 1);
 
     if (g_flush_event) {
         SetEvent(g_flush_event);

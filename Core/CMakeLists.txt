@@ -8,31 +8,33 @@ add_library(EngineDLL SHARED
     src/plugin_loader.c
     src/fault_isolation.c
     src/taskbar_subclass.c
+    src/state_store.c
     src/ipc_server.c
     src/shell_hook.c
     src/power_device.c
     src/vdesktop_notify.cpp
-    src/state_store.c
-    src/te_msg_filter.c
-    src/te_timer.c
 )
 
-target_include_directories(EngineDLL PUBLIC
-    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+set_target_properties(EngineDLL PROPERTIES PREFIX "")
+
+
+target_include_directories(EngineDLL PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/ThirdParty/cJSON
 )
 
 target_link_libraries(EngineDLL PRIVATE
     te_sdk
-    shlwapi
     comctl32
-    ole32
-    shell32
-    powrprof
-    advapi32
+    shlwapi
 )
 
-set_target_properties(EngineDLL PROPERTIES
-    PREFIX ""
-    OUTPUT_NAME "EngineDLL"
+# Export the CBT hook procedure
+target_compile_definitions(EngineDLL PRIVATE TE_ENGINE_EXPORTS)
+
+# Copy EngineDLL to the App directory next to TaskbarEngine.exe
+add_custom_command(TARGET EngineDLL POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy
+    $<TARGET_FILE:EngineDLL>
+    ${CMAKE_BINARY_DIR}/App/$<TARGET_FILE_NAME:EngineDLL>
 )
-set_target_properties(EngineDLL PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")

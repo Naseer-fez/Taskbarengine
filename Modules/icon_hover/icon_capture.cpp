@@ -1,228 +1,262 @@
+/**
+ * @file icon_capture.cpp
+ * @brief High-resolution icon bitmap extraction and caching for IconHover.
+ *
+ * Uses SHGetImageList(SHIL_JUMBO) to extract 256x256 icon bitmaps from the
+ * system image list. Bitmaps are cached in an unordered_map keyed by app ID
+ * to avoid re-querying the shell on each frame.
+ */
+
 #include "icon_capture.h"
-#include "icon_hover_internal.h"
+#include <sdk/te_log.h>
+
+#include <windows.h>
 #include <commctrl.h>
 #include <shellapi.h>
-#include <shlobj.h>
 #include <commoncontrols.h>
-#include <wrl/client.h>
+#include <shlobj.h>
+#include <stdio.h>
 
-using Microsoft::WRL::ComPtr;
+#include <unordered_map>
+#include <string>
 
-static TE_IconEntry g_cache[TE_MAX_TASKBAR_ICONS] = {};
+/** SHIL_JUMBO provides 256x256 icons (Windows Vista+). */
+#ifndef SHIL_JUMBO
+#define SHIL_JUMBO 4
+#endif
 
-HRESULT TE_IconCaptureInit(void)
+static const char* LOG_TAG = "IconCapture";
+
+/** GUID for IImageList: {46EB5926-582E-4017-9FDF-E899DE541EC5} */
+static const IID s_IID_IImageList = { 0x46EB5926, 0x582E, 0x4017, { 0x9F, 0xDF, 0xE8, 0x99, 0xDE, 0x54, 0x1E, 0xC5 } };
+
+/** Cache of extracted icon bitmaps keyed by app identifier. */
+static std::unordered_map<std::wstring, HBITMAP>* s_bitmap_cache = nullptr;
+
+/** System jumbo image list handle, acquired once and reused. */
+static IImageList* s_jumbo_list = nullptr;
+
+/**
+ * Convert an HICON to an HBITMAP with alpha channel preserved.
+ * Creates a 256x256 32-bit DIB section and draws the icon into it.
+ */
+static HBITMAP IconToBitmap(HICON hicon, int width, int height)
 {
-    return S_OK;
-}
+    if (!hicon) return NULL;
 
-static int FindCacheSlot(const wchar_t* app_id)
-{
-    if (!app_id) return -1;
-    for (int i = 0; i < TE_MAX_TASKBAR_ICONS; i++) {
-        if (g_cache[i].valid && wcscmp(g_cache[i].app_id, app_id) == 0) {
-            return i;
-        }
-    }
-    return -1;
-}
-
-static int FindFreeSlot(void)
-{
-    for (int i = 0; i < TE_MAX_TASKBAR_ICONS; i++) {
-        if (!g_cache[i].valid) return i;
-    }
-    return -1;
-}
-
-static HBITMAP CreateBitmapFromIcon(HICON hIcon, int width, int height)
-{
-    if (!hIcon || width <= 0 || height <= 0) return NULL;
-
-    HDC hdc = GetDC(NULL);
-    if (!hdc) return NULL;
-    HDC memDC = CreateCompatibleDC(hdc);
-    if (!memDC) {
-        ReleaseDC(NULL, hdc);
-        return NULL;
-    }
+    HDC hdc_screen = GetDC(NULL);
+    HDC hdc_mem = CreateCompatibleDC(hdc_screen);
 
     BITMAPINFO bmi = {};
     bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
     bmi.bmiHeader.biWidth = width;
-    bmi.bmiHeader.biHeight = -height; // Top-down 32-bit DIB
+    bmi.bmiHeader.biHeight = -height; /* Top-down DIB */
     bmi.bmiHeader.biPlanes = 1;
     bmi.bmiHeader.biBitCount = 32;
     bmi.bmiHeader.biCompression = BI_RGB;
 
     void* bits = nullptr;
-    HBITMAP hbm = CreateDIBSection(hdc, &bmi, DIB_RGB_COLORS, &bits, NULL, 0);
-    if (!hbm || !bits) {
-        if (hbm) DeleteObject(hbm);
-        DeleteDC(memDC);
-        ReleaseDC(NULL, hdc);
-        return NULL;
-    }
+    HBITMAP hbmp = CreateDIBSection(hdc_screen, &bmi, DIB_RGB_COLORS, &bits, NULL, 0);
+    if (hbmp && bits) {
+        HGDIOBJ old = SelectObject(hdc_mem, hbmp);
+        /* Clear to transparent black */
+        memset(bits, 0, (size_t)(width * height * 4));
+        DrawIconEx(hdc_mem, 0, 0, hicon, width, height, 0, NULL, DI_NORMAL);
+        SelectObject(hdc_mem, old);
 
-    memset(bits, 0, width * height * 4);
-
-    HBITMAP oldBmp = (HBITMAP)SelectObject(memDC, hbm);
-    DrawIconEx(memDC, 0, 0, hIcon, width, height, 0, NULL, DI_NORMAL);
-    SelectObject(memDC, oldBmp);
-    DeleteDC(memDC);
-    ReleaseDC(NULL, hdc);
-
-    // If icon does not have per-pixel alpha, set opaque alpha for non-black pixels
-    uint32_t* pPixels = (uint32_t*)bits;
-    bool has_alpha = false;
-    int total_pixels = width * height;
-    for (int i = 0; i < total_pixels; i++) {
-        if ((pPixels[i] & 0xFF000000) != 0) {
-            has_alpha = true;
-            break;
+        /* Ensure alpha channel is preserved/populated */
+        uint32_t* pixels = (uint32_t*)bits;
+        size_t total = (size_t)(width * height);
+        BOOL has_alpha = FALSE;
+        for (size_t p = 0; p < total; p++) {
+            if ((pixels[p] & 0xFF000000) != 0) {
+                has_alpha = TRUE;
+                break;
+            }
         }
-    }
-
-    if (!has_alpha) {
-        for (int i = 0; i < total_pixels; i++) {
-            if ((pPixels[i] & 0x00FFFFFF) != 0) {
-                pPixels[i] |= 0xFF000000;
+        if (!has_alpha) {
+            for (size_t p = 0; p < total; p++) {
+                if ((pixels[p] & 0x00FFFFFF) != 0) {
+                    pixels[p] |= 0xFF000000;
+                }
             }
         }
     }
 
-    return hbm;
+    DeleteDC(hdc_mem);
+    ReleaseDC(NULL, hdc_screen);
+
+    return hbmp;
 }
 
-HRESULT TE_IconCaptureGet(const wchar_t* app_id, TE_IconEntry* out_entry)
+static HBITMAP CreateSnapshotBitmap(const RECT* screen_bounds)
 {
-    if (!app_id || !out_entry) return E_POINTER;
-    out_entry->valid = false;
+    if (!screen_bounds) return NULL;
+    int w = screen_bounds->right - screen_bounds->left;
+    int h = screen_bounds->bottom - screen_bounds->top;
+    if (w <= 0 || h <= 0) return NULL;
 
-    int slot = FindCacheSlot(app_id);
-    if (slot >= 0) {
-        *out_entry = g_cache[slot];
-        return S_OK;
-    }
+    HDC hdc_screen = GetDC(NULL);
+    HDC hdc_mem = CreateCompatibleDC(hdc_screen);
 
-    slot = FindFreeSlot();
-    if (slot < 0) return E_OUTOFMEMORY;
+    BITMAPINFO bmi = {};
+    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth = w;
+    bmi.bmiHeader.biHeight = -h; /* Top-down DIB */
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
 
-    HICON hIcon = NULL;
-    ComPtr<IImageList> imageList;
-    HRESULT hr = SHGetImageList(SHIL_JUMBO, IID_PPV_ARGS(&imageList));
-    if (SUCCEEDED(hr) && imageList) {
-        SHFILEINFOW sfi = {};
-        DWORD_PTR res = SHGetFileInfoW(app_id, FILE_ATTRIBUTE_NORMAL, &sfi, sizeof(sfi), 
-                                      SHGFI_SYSICONINDEX | SHGFI_USEFILEATTRIBUTES);
-        if (res != 0) {
-            imageList->GetIcon(sfi.iIcon, ILD_TRANSPARENT, &hIcon);
+    void* bits = nullptr;
+    HBITMAP hbmp = CreateDIBSection(hdc_screen, &bmi, DIB_RGB_COLORS, &bits, NULL, 0);
+    if (hbmp && bits) {
+        HGDIOBJ old = SelectObject(hdc_mem, hbmp);
+        BitBlt(hdc_mem, 0, 0, w, h, hdc_screen, screen_bounds->left, screen_bounds->top, SRCCOPY);
+        SelectObject(hdc_mem, old);
+
+        /* Ensure fully opaque alpha for the captured taskbar button */
+        uint32_t* pixels = (uint32_t*)bits;
+        size_t total = (size_t)(w * h);
+        for (size_t p = 0; p < total; p++) {
+            pixels[p] |= 0xFF000000;
         }
     }
 
-    if (!hIcon) {
-        hr = SHGetImageList(SHIL_EXTRALARGE, IID_PPV_ARGS(&imageList));
-        if (SUCCEEDED(hr) && imageList) {
-            SHFILEINFOW sfi = {};
-            DWORD_PTR res = SHGetFileInfoW(app_id, FILE_ATTRIBUTE_NORMAL, &sfi, sizeof(sfi), 
-                                          SHGFI_SYSICONINDEX | SHGFI_USEFILEATTRIBUTES);
-            if (res != 0) {
-                imageList->GetIcon(sfi.iIcon, ILD_TRANSPARENT, &hIcon);
-            }
-        }
-    }
-
-    if (!hIcon) {
-        // Fallback to ExtractIconW
-        hIcon = ExtractIconW(GetModuleHandleW(NULL), app_id, 0);
-    }
-
-    HBITMAP hbm = NULL;
-    if (hIcon) {
-        hbm = CreateBitmapFromIcon(hIcon, 256, 256);
-        DestroyIcon(hIcon);
-    } else {
-        // Try IShellItemImageFactory for Windows 11 packaged/modern applications
-        ComPtr<IShellItemImageFactory> imageFactory;
-        if (SUCCEEDED(SHCreateItemFromParsingName(app_id, nullptr, IID_PPV_ARGS(&imageFactory)))) {
-            SIZE size = { 256, 256 };
-            imageFactory->GetImage(size, SIIGBF_BIGGERSIZEOK | SIIGBF_ICONONLY, &hbm);
-        }
-    }
-
-    if (!hbm) {
-        // Fallback colored fill for unresolvable icons
-        HDC hdc = GetDC(NULL);
-        if (!hdc) return E_OUTOFMEMORY;
-        HDC memDC = CreateCompatibleDC(hdc);
-        if (!memDC) {
-            ReleaseDC(NULL, hdc);
-            return E_OUTOFMEMORY;
-        }
-
-        BITMAPINFO bmi = {};
-        bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-        bmi.bmiHeader.biWidth = 256;
-        bmi.bmiHeader.biHeight = -256;
-        bmi.bmiHeader.biPlanes = 1;
-        bmi.bmiHeader.biBitCount = 32;
-        bmi.bmiHeader.biCompression = BI_RGB;
-
-        void* bits = nullptr;
-        hbm = CreateDIBSection(hdc, &bmi, DIB_RGB_COLORS, &bits, NULL, 0);
-        if (!hbm || !bits) {
-            if (hbm) DeleteObject(hbm);
-            DeleteDC(memDC);
-            ReleaseDC(NULL, hdc);
-            return E_OUTOFMEMORY;
-        }
-
-        HBITMAP oldBmp = (HBITMAP)SelectObject(memDC, hbm);
-        int hash = 0;
-        for (const wchar_t* p = app_id; *p; p++) hash += *p;
-        HBRUSH brush = CreateSolidBrush(RGB((hash * 17) % 256, (hash * 31) % 256, (hash * 47) % 256));
-        RECT r = {0, 0, 256, 256};
-        FillRect(memDC, &r, brush);
-        DeleteObject(brush);
-        SelectObject(memDC, oldBmp);
-        DeleteDC(memDC);
-        ReleaseDC(NULL, hdc);
-
-        // Ensure alpha is opaque for fallback tile
-        uint32_t* pPixels = (uint32_t*)bits;
-        for (int i = 0; i < 256 * 256; i++) {
-            pPixels[i] |= 0xFF000000;
-        }
-    }
-
-    if (!hbm) return E_OUTOFMEMORY;
-
-    g_cache[slot].bitmap = hbm;
-    g_cache[slot].width = 256;
-    g_cache[slot].height = 256;
-    wcsncpy(g_cache[slot].app_id, app_id, 255);
-    g_cache[slot].app_id[255] = L'\0';
-    g_cache[slot].valid = true;
-
-    *out_entry = g_cache[slot];
-    return S_OK;
+    DeleteDC(hdc_mem);
+    ReleaseDC(NULL, hdc_screen);
+    return hbmp;
 }
 
-void TE_IconCaptureInvalidate(const wchar_t* app_id)
+HRESULT TE_IconCaptureInit(void)
 {
-    if (!app_id) return;
-    int slot = FindCacheSlot(app_id);
-    if (slot >= 0) {
-        if (g_cache[slot].bitmap) DeleteObject(g_cache[slot].bitmap);
-        g_cache[slot].valid = false;
+    if (s_bitmap_cache) {
+        /* Already initialized */
+        return TE_S_OK;
     }
+
+    /* Acquire the system jumbo image list */
+    HRESULT hr = SHGetImageList(SHIL_JUMBO, s_IID_IImageList, (void**)&s_jumbo_list);
+    if (FAILED(hr) || !s_jumbo_list) {
+        TE_LogWrite(TE_LOG_WARNING, LOG_TAG,
+                    "SHGetImageList(SHIL_JUMBO) failed; falling back to no icon extraction");
+        s_jumbo_list = nullptr;
+        /* Don't fail init — icon capture is optional for basic magnification */
+    }
+
+    s_bitmap_cache = new (std::nothrow) std::unordered_map<std::wstring, HBITMAP>();
+    if (!s_bitmap_cache) {
+        TE_LogWrite(TE_LOG_ERROR, LOG_TAG, "Failed to allocate icon bitmap cache");
+        if (s_jumbo_list) {
+            s_jumbo_list->Release();
+            s_jumbo_list = nullptr;
+        }
+        return TE_E_OUTOFMEMORY;
+    }
+
+    TE_LogWrite(TE_LOG_INFO, LOG_TAG, "Icon capture subsystem initialized");
+    return TE_S_OK;
 }
 
 void TE_IconCaptureShutdown(void)
 {
-    for (int i = 0; i < TE_MAX_TASKBAR_ICONS; i++) {
-        if (g_cache[i].valid && g_cache[i].bitmap) {
-            DeleteObject(g_cache[i].bitmap);
-            g_cache[i].valid = false;
+    if (s_bitmap_cache) {
+        /* Release all cached bitmaps */
+        for (auto& pair : *s_bitmap_cache) {
+            if (pair.second) {
+                DeleteObject(pair.second);
+            }
+        }
+        delete s_bitmap_cache;
+        s_bitmap_cache = nullptr;
+    }
+
+    if (s_jumbo_list) {
+        s_jumbo_list->Release();
+        s_jumbo_list = nullptr;
+    }
+
+    TE_LogWrite(TE_LOG_INFO, LOG_TAG, "Icon capture subsystem shut down");
+}
+
+HRESULT TE_IconCaptureGetBitmapWithBounds(const wchar_t* app_id, int icon_index, const RECT* screen_bounds, HBITMAP* out_bitmap)
+{
+    if (!out_bitmap) {
+        return TE_E_INVALIDARG;
+    }
+
+    *out_bitmap = NULL;
+    if (!s_bitmap_cache) {
+        return TE_E_FAIL;
+    }
+
+    /* Check cache first */
+    std::wstring key = app_id ? app_id : L"";
+    if (key.empty() && screen_bounds) {
+        wchar_t buf[64];
+        swprintf_s(buf, L"rect_%d_%d", screen_bounds->left, screen_bounds->top);
+        key = buf;
+    }
+
+    auto it = s_bitmap_cache->find(key);
+    if (it != s_bitmap_cache->end() && it->second) {
+        *out_bitmap = it->second;
+        return TE_S_OK;
+    }
+
+    HICON hicon = NULL;
+
+    /* Tier 1: Try resolving via SHGetFileInfoW on app_id */
+    if (app_id && wcslen(app_id) > 0 && s_jumbo_list) {
+        SHFILEINFOW sfi = {};
+        if (SHGetFileInfoW(app_id, 0, &sfi, sizeof(sfi), SHGFI_SYSICONINDEX)) {
+            s_jumbo_list->GetIcon(sfi.iIcon, ILD_TRANSPARENT, &hicon);
         }
     }
+
+    /* Tier 2: Try icon_index with system jumbo list */
+    if (!hicon && s_jumbo_list && icon_index >= 0) {
+        s_jumbo_list->GetIcon(icon_index, ILD_TRANSPARENT, &hicon);
+    }
+
+    if (hicon) {
+        HBITMAP hbmp = IconToBitmap(hicon, 256, 256);
+        DestroyIcon(hicon);
+        if (hbmp) {
+            (*s_bitmap_cache)[key] = hbmp;
+            *out_bitmap = hbmp;
+            return TE_S_OK;
+        }
+    }
+
+    /* Tier 3: Fallback to screen snapshot */
+    if (screen_bounds) {
+        HBITMAP hbmp = CreateSnapshotBitmap(screen_bounds);
+        if (hbmp) {
+            (*s_bitmap_cache)[key] = hbmp;
+            *out_bitmap = hbmp;
+            return TE_S_OK;
+        }
+    }
+
+    return TE_E_FAIL;
+}
+
+HRESULT TE_IconCaptureGetBitmap(const wchar_t* app_id, int icon_index, HBITMAP* out_bitmap)
+{
+    return TE_IconCaptureGetBitmapWithBounds(app_id, icon_index, NULL, out_bitmap);
+}
+
+void TE_IconCaptureInvalidate(void)
+{
+    if (!s_bitmap_cache) return;
+
+    /* Destroy all cached bitmaps */
+    for (auto& pair : *s_bitmap_cache) {
+        if (pair.second) {
+            DeleteObject(pair.second);
+        }
+    }
+    s_bitmap_cache->clear();
+
+    TE_LogWrite(TE_LOG_INFO, LOG_TAG, "Icon bitmap cache invalidated");
 }

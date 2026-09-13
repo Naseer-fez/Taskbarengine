@@ -1,15 +1,8 @@
 #pragma once
+#include <windows.h>
+#include <sdk/te_types.h>
 
-#include "core/event_dispatch.h"
-
-#ifdef __cplusplus
-extern "C" {
-#endif
-
-HRESULT TE_ShellHookStart(HWND hwnd, TE_EventEntry* event_table, uint32_t* sub_count);
-void TE_ShellHookStop(HWND hwnd);
-bool TE_ShellHookHandleMessage(UINT msg, WPARAM wparam, LPARAM lparam);
-
-#ifdef __cplusplus
-}
-#endif
+HRESULT TE_ShellHookInit(HWND taskbar_hwnd);
+void TE_ShellHookShutdown(HWND taskbar_hwnd);
+UINT TE_ShellHookGetMessageId(void);
+void TE_ShellHookProcess(WPARAM wParam, LPARAM lParam);

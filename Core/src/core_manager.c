@@ -1,684 +1,250 @@
 #include "core/core_manager.h"
+#include <windows.h>
+#include <shlwapi.h>
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
 #include "core/config.h"
-#include "core/config_watcher.h"
 #include "core/event_dispatch.h"
 #include "core/plugin_loader.h"
-#include "core/fault_isolation.h"
-#include "core/taskbar_subclass.h"
+#include "core/config_watcher.h"
+#include "core/state_store.h"
 #include "core/ipc_server.h"
-#include "core/shell_hook.h"
-#include "core/power_device.h"
-#include "core/vdesktop_notify.h"
-#include "core/te_msg_filter.h"
-#include "core/te_timer.h"
 #include <sdk/te_log.h>
 #include <sdk/te_log_impl.h>
+#include <sdk/te_jsonc.h>
 #include <sdk/te_events.h>
-#include <sdk/te_version.h>
-#include "core/state_store.h"
-#include <sdk/te_debug_trace.h>
-#include <stdio.h>
-#include <wchar.h>
+#include <sdk/te_plugin.h>
+#include "core/engine.h"
+#include "core/shell_hook.h"
+#include "core/vdesktop_notify.h"
+#include "core/taskbar_subclass.h"
 
-struct TE_CoreState {
-    HINSTANCE      hinstance;
-    HWND           taskbar_hwnd;
-    wchar_t        config_path[MAX_PATH];
-    wchar_t        modules_dir[MAX_PATH];
-    cJSON*         config_root;
-    TE_PluginEntry plugins[TE_MAX_PLUGINS];
-    uint32_t       plugin_count;
-    TE_EventEntry  subscriptions[TE_MAX_SUBSCRIPTIONS];
-    uint32_t       subscription_count;
-    uint32_t       current_plugin_id;
-};
-
-static TE_CoreState* g_core_state = NULL;
-
-static HRESULT CoreSubscribeWrapper(uint32_t event_type, EventCallbackFunc callback, void* user_data)
-{
-    if (!g_core_state) return E_POINTER;
-    uint32_t plugin_id = g_core_state->current_plugin_id;
-    TE_PluginEntry* entry = (plugin_id > 0 && plugin_id <= g_core_state->plugin_count) ? &g_core_state->plugins[plugin_id - 1] : NULL;
-    if (event_type == TE_EVENT_TASKBAR_MOUSE) {
-        TE_MsgFilterSubscribe(plugin_id, WM_MOUSEMOVE);
-    }
-    return TE_EventSubscribeEx(g_core_state->subscriptions, &g_core_state->subscription_count,
-                               (TE_EventType)event_type, callback, user_data, plugin_id, entry);
-}
-
-static HRESULT CoreUnsubscribeWrapper(uint32_t event_type, EventCallbackFunc callback)
-{
-    if (!g_core_state) return E_POINTER;
-    uint32_t plugin_id = g_core_state->current_plugin_id;
-    if (event_type == TE_EVENT_TASKBAR_MOUSE) {
-        TE_MsgFilterUnsubscribe(plugin_id, WM_MOUSEMOVE);
-    }
-    return TE_EventUnsubscribe(g_core_state->subscriptions, &g_core_state->subscription_count,
-                               (TE_EventType)event_type, callback);
-}
-
-static HRESULT CoreSubscribeMessageWrapper(UINT win_msg)
-{
-    if (!g_core_state) return E_POINTER;
-    uint32_t plugin_id = g_core_state->current_plugin_id;
-    return TE_MsgFilterSubscribe(plugin_id, win_msg);
-}
-
-static HRESULT CoreUnsubscribeMessageWrapper(UINT win_msg)
-{
-    if (!g_core_state) return E_POINTER;
-    uint32_t plugin_id = g_core_state->current_plugin_id;
-    return TE_MsgFilterUnsubscribe(plugin_id, win_msg);
-}
-
-static HRESULT CoreRegisterTimerWrapper(uint32_t interval_ms, BOOL recurring,
-                                        TE_TimerCallback callback, void* user_data)
-{
-    if (!g_core_state) return E_POINTER;
-    uint32_t plugin_id = g_core_state->current_plugin_id;
-    return TE_TimerCreate(callback, user_data, interval_ms, recurring, plugin_id, NULL);
-}
-
-static HRESULT CoreCancelTimerWrapper(TE_TimerCallback callback)
-{
-    if (!g_core_state) return E_POINTER;
-    uint32_t plugin_id = g_core_state->current_plugin_id;
-    return TE_TimerCancelByCallback(callback, plugin_id);
-}
-
-static void CoreRequestRedrawNoop(void) {}
-
-static HRESULT CorePublishState(const char* key, const StateValue* val)
-{
-    return TE_StatePublish(key, val);
-}
-
-static HRESULT CoreQueryState(const char* key, StateValue* out_val)
-{
-    return TE_StateQuery(key, out_val);
-}
-
-bool TE_CoreManagerIsPluginEnabledInConfig(const cJSON* config)
-{
-    if (!config) return false;
-    const cJSON* item = cJSON_GetObjectItemCaseSensitive(config, "enabled");
-    if (!item || !cJSON_IsBool(item)) return false;
-    return cJSON_IsTrue(item);
-}
-
-HRESULT TE_CoreManagerInitPhaseA(HINSTANCE hinstance)
-{
-    TE_DebugTrace("[TE-DBG] PhaseA: Entering TE_CoreManagerInitPhaseA\n");
-    if (g_core_state) {
-        TE_DebugTrace("[TE-DBG] PhaseA: Already initialized\n");
-        return S_OK;
-    }
-
-    HWND taskbar_hwnd = FindWindowW(L"Shell_TrayWnd", NULL);
-    TE_DebugTraceFmt("[TE-DBG] PhaseA: FindWindowW returned HWND=0x%p\n", (void*)taskbar_hwnd);
-    if (!taskbar_hwnd) return E_PENDING;
-
-    DWORD taskbar_tid = GetWindowThreadProcessId(taskbar_hwnd, NULL);
-    if (GetCurrentThreadId() != taskbar_tid) {
-        TE_DebugTrace("[TE-DBG] PhaseA: Wrong thread, returning E_PENDING\n");
-        /* SetWindowSubclass must be called from the thread that owns the window */
-        return E_PENDING;
-    }
-
-    g_core_state = (TE_CoreState*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(TE_CoreState));
-    if (!g_core_state) return E_OUTOFMEMORY;
-    TE_DebugTrace("[TE-DBG] PhaseA: g_core_state allocated\n");
-
-    g_core_state->hinstance = hinstance;
-    g_core_state->taskbar_hwnd = taskbar_hwnd;
-
-    /* Initialize Event Dispatch Table */
-    TE_EventDispatchInit(g_core_state->subscriptions, &g_core_state->subscription_count);
-
-    /* Install Taskbar Subclass */
-    HRESULT sub_hr = TE_TaskbarSubclassInstall(g_core_state->taskbar_hwnd, g_core_state->subscriptions,
-                                              &g_core_state->subscription_count, g_core_state);
-    TE_DebugTraceFmt("[TE-DBG] PhaseA: SubclassInstall returned hr=0x%08X\n", (unsigned int)sub_hr);
-    if (SUCCEEDED(sub_hr)) {
-        PostMessageW(g_core_state->taskbar_hwnd, WM_APP + 100 /* WM_TE_INIT */, 0, 0);
-        TE_DebugTrace("[TE-DBG] PhaseA: Posted WM_TE_INIT to taskbar\n");
-    } else {
-        HeapFree(GetProcessHeap(), 0, g_core_state);
-        g_core_state = NULL;
-        return E_FAIL;
-    }
-
-    return S_OK;
-}
-
-HRESULT TE_CoreManagerInitPhaseB(void)
-{
-    TE_DebugTrace("[TE-DBG] PhaseB: Entering TE_CoreManagerInitPhaseB\n");
-    if (!g_core_state) return E_POINTER;
-
-    HRESULT path_hr = TE_ConfigResolvePath(g_core_state->config_path, MAX_PATH);
-    if (FAILED(path_hr)) {
-        wcsncpy(g_core_state->config_path, L"config.jsonc", MAX_PATH - 1);
-    }
-
-    /* Initialize State Store, Message Filter, and Timers */
-    TE_StateStoreInit();
-    TE_MsgFilterInit();
-    TE_TimerInit(g_core_state->taskbar_hwnd);
-
-    /* Load Configuration */
-    HRESULT hr = TE_ConfigLoad(g_core_state->config_path, &g_core_state->config_root);
-    TE_DebugTraceFmt("[TE-DBG] PhaseB: ConfigLoad returned hr=0x%08X\n", (unsigned int)hr);
-
-    TE_LogLevel min_level = TE_LOG_INFO;
-    bool log_to_file = true;
-    
-    if (SUCCEEDED(hr) && g_core_state->config_root) {
-        const cJSON* core_sec = TE_ConfigGetCoreSection(g_core_state->config_root);
-        if (core_sec) {
-            const cJSON* level_item = cJSON_GetObjectItemCaseSensitive(core_sec, "log_level");
-            if (level_item && cJSON_IsString(level_item)) {
-                if (_stricmp(level_item->valuestring, "debug") == 0) min_level = TE_LOG_DEBUG;
-                else if (_stricmp(level_item->valuestring, "info") == 0) min_level = TE_LOG_INFO;
-                else if (_stricmp(level_item->valuestring, "warn") == 0) min_level = TE_LOG_WARN;
-                else if (_stricmp(level_item->valuestring, "error") == 0) min_level = TE_LOG_ERROR;
-            }
-            
-            const cJSON* file_item = cJSON_GetObjectItemCaseSensitive(core_sec, "log_to_file");
-            if (file_item && cJSON_IsBool(file_item)) {
-                log_to_file = cJSON_IsTrue(file_item);
-            }
-        }
-    }
-
-    /* Initialize Logging */
+static struct {
+    BOOL initialized;
+    HWND taskbar_hwnd;
+    cJSON* config_root;
+    wchar_t config_path[MAX_PATH];
     wchar_t log_dir[MAX_PATH];
-    wcsncpy(log_dir, g_core_state->config_path, MAX_PATH - 1);
-    log_dir[MAX_PATH - 1] = L'\0';
-    wchar_t* last_slash = wcsrchr(log_dir, L'\\');
-    if (last_slash) {
-        wcsncpy(last_slash + 1, L"logs", MAX_PATH - (last_slash + 1 - log_dir) - 1);
-        TE_LogInit(log_dir, min_level, log_to_file);
-    } else {
-        TE_LogInit(NULL, min_level, log_to_file);
-    }
-
-    if (FAILED(hr)) {
-        TE_LogWrite(TE_LOG_WARN, "Failed to load config, starting with empty config");
-    }
-
-    TE_LogWrite(TE_LOG_INFO, "Core Manager initializing Phase B...");
-
-    /* Detect and log Windows version */
-    TE_WindowsVersion win_ver = { 0 };
-    if (SUCCEEDED(TE_GetWindowsVersion(&win_ver))) {
-        TE_LogWrite(TE_LOG_INFO, "Windows Version detected: %u.%u (Build %u, Revision %u, Server=%d)",
-                    win_ver.major, win_ver.minor, win_ver.build, win_ver.revision, (int)win_ver.is_server);
-    } else {
-        TE_LogWrite(TE_LOG_WARN, "Failed to query Windows version via RtlGetVersion");
-    }
-    
-    if (win_ver.build > 0 && !TE_IsBuildSupported(win_ver.build)) {
-        TE_LogWrite(TE_LOG_ERROR, "Windows Build %u is not supported. TaskbarEngine initialization aborted.", win_ver.build);
-        return HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
-    }
-
-    /* Start other event sources now that we are outside CBT hook.
-     * Keep RegisterShellHookWindow disabled for now: even with a helper HWND,
-     * registering it from inside Explorer produced delayed Shell_TrayWnd loss
-     * without a crash on Win11 XAML taskbar builds. */
-    if (g_core_state->taskbar_hwnd) {
-        TE_DebugTrace("[TE-DBG] PhaseB: ShellHookStart skipped for taskbar stability\n");
-        TE_PowerDeviceStart(g_core_state->taskbar_hwnd, g_core_state->subscriptions, &g_core_state->subscription_count);
-        TE_DebugTrace("[TE-DBG] PhaseB: PowerDeviceStart completed\n");
-        TE_VDesktopNotifyStart(g_core_state->subscriptions, &g_core_state->subscription_count);
-        TE_DebugTrace("[TE-DBG] PhaseB: VDesktopNotifyStart completed\n");
-    }
-
-    /* Resolve Modules Directory */
-    HINSTANCE mod_inst = g_core_state->hinstance ? g_core_state->hinstance : GetModuleHandleW(NULL);
-    wchar_t dll_path[MAX_PATH];
-    DWORD len = GetModuleFileNameW(mod_inst, dll_path, MAX_PATH);
-    if (len > 0 && len < MAX_PATH) {
-        wchar_t* slash = wcsrchr(dll_path, L'\\');
-        if (slash) {
-            *slash = L'\0';
-            swprintf(g_core_state->modules_dir, MAX_PATH, L"%s\\Modules", dll_path);
-        }
-    }
-    if (g_core_state->modules_dir[0] == L'\0') {
-        DWORD proc_len = GetModuleFileNameW(NULL, dll_path, MAX_PATH);
-        if (proc_len > 0 && proc_len < MAX_PATH) {
-            wchar_t* slash = wcsrchr(dll_path, L'\\');
-            if (slash) {
-                *slash = L'\0';
-                swprintf(g_core_state->modules_dir, MAX_PATH, L"%s\\Modules", dll_path);
-            }
-        }
-    }
-
-    /* Start Config Directory Watcher */
+    wchar_t modules_dir[MAX_PATH];
     wchar_t config_dir[MAX_PATH];
-    wcsncpy(config_dir, g_core_state->config_path, MAX_PATH - 1);
-    config_dir[MAX_PATH - 1] = L'\0';
-    wchar_t* cfg_dir_slash = wcsrchr(config_dir, L'\\');
-    if (cfg_dir_slash) {
-        *cfg_dir_slash = L'\0';
+    uint32_t dpi;
+} g_core;
+
+typedef UINT (WINAPI *GetDpiForWindow_t)(HWND);
+/* TE_JsoncFree is declared in te_jsonc.h */
+
+HRESULT TE_CoreManagerInit(HWND taskbar_hwnd) {
+    if (g_core.initialized) return TE_S_OK;
+    memset(&g_core, 0, sizeof(g_core));
+    g_core.taskbar_hwnd = taskbar_hwnd;
+    
+    GetDpiForWindow_t pGetDpiForWindow = (GetDpiForWindow_t)(void*)GetProcAddress(GetModuleHandleW(L"user32.dll"), "GetDpiForWindow");
+    if (pGetDpiForWindow) {
+        g_core.dpi = pGetDpiForWindow(taskbar_hwnd);
     } else {
-        wcscpy_s(config_dir, MAX_PATH, L".");
+        g_core.dpi = 96;
     }
-    HRESULT watch_hr = TE_ConfigWatcherStart(config_dir, g_core_state->taskbar_hwnd);
-    if (FAILED(watch_hr)) {
-        TE_LogWrite(TE_LOG_WARN, "Failed to start config watcher (hr: 0x%08X)", (unsigned int)watch_hr);
-    }
-
-    /* Discover & Load Plugins */
-    TE_PluginLoaderScan(g_core_state->modules_dir, g_core_state->plugins, &g_core_state->plugin_count);
-    TE_DebugTraceFmt("[TE-DBG] PhaseB: PluginLoaderScan found %u plugins\n", g_core_state->plugin_count);
-
-    /* Initialize and Enable Plugins */
-    for (uint32_t i = 0; i < g_core_state->plugin_count; i++) {
-        TE_PluginEntry* plugin = &g_core_state->plugins[i];
-        TE_DebugTraceFmt("[TE-DBG] PhaseB: Processing plugin[%u] name='%s'\n", i, (plugin->metadata && plugin->metadata->name) ? plugin->metadata->name : "NULL");
-        if (!plugin->context) continue;
-
-        g_core_state->current_plugin_id = i + 1;
-
-        plugin->context->struct_size = sizeof(PluginContext);
-        plugin->context->api_version = TE_API_VERSION;
-        plugin->context->taskbar_hwnd = g_core_state->taskbar_hwnd;
-        plugin->context->monitor = g_core_state->taskbar_hwnd ? MonitorFromWindow(g_core_state->taskbar_hwnd, MONITOR_DEFAULTTONEAREST) : NULL;
-        plugin->context->dpi = g_core_state->taskbar_hwnd ? GetDpiForWindow(g_core_state->taskbar_hwnd) : 96;
-        if (plugin->context->dpi == 0) plugin->context->dpi = 96;
-        plugin->context->config = TE_ConfigGetPluginSection(g_core_state->config_root, plugin->metadata->name);
-        plugin->context->log = TE_LogWrite;
-        plugin->context->subscribe = CoreSubscribeWrapper;
-        plugin->context->unsubscribe = CoreUnsubscribeWrapper;
-        plugin->context->request_redraw = CoreRequestRedrawNoop;
-        plugin->context->publish_state = CorePublishState;
-        plugin->context->query_state = CoreQueryState;
-        plugin->context->core_opaque = (void*)(uintptr_t)i;
-        plugin->context->subscribe_message = CoreSubscribeMessageWrapper;
-        plugin->context->unsubscribe_message = CoreUnsubscribeMessageWrapper;
-        plugin->context->register_timer = CoreRegisterTimerWrapper;
-        plugin->context->cancel_timer = CoreCancelTimerWrapper;
-
-        /* Check build compatibility */
-        plugin->compat_status = TE_COMPAT_OK;
-        if (plugin->metadata && win_ver.build > 0) {
-            uint32_t min_b = plugin->metadata->compatibility.min_build;
-            uint32_t max_b = plugin->metadata->compatibility.max_tested_build;
-            if (min_b > 0 && win_ver.build < min_b) {
-                plugin->compat_status = TE_COMPAT_UNSUPPORTED_BUILD;
-                TE_LogWrite(TE_LOG_WARN, "Plugin '%s' requires Windows build >= %u (current: %u) - skipping enable",
-                            plugin->metadata->name, min_b, win_ver.build);
-            } else if (max_b > 0 && win_ver.build > max_b) {
-                plugin->compat_status = TE_COMPAT_UNTESTED_BUILD;
-                TE_LogWrite(TE_LOG_WARN, "Plugin '%s' tested up to build %u running on newer build %u",
-                            plugin->metadata->name, max_b, win_ver.build);
+    
+    wchar_t dll_path[MAX_PATH];
+    if (GetModuleFileNameW(TE_EngineGetInstance(), dll_path, MAX_PATH)) {
+        PathRemoveFileSpecW(dll_path);
+        
+        wchar_t appdata[MAX_PATH] = {0};
+        DWORD appdata_len = GetEnvironmentVariableW(L"LOCALAPPDATA", appdata, MAX_PATH);
+        BOOL user_config_found = FALSE;
+        if (appdata_len > 0 && appdata_len < MAX_PATH) {
+            wchar_t user_config[MAX_PATH];
+            swprintf(user_config, MAX_PATH, L"%s\\TaskbarEngine\\config.jsonc", appdata);
+            if (GetFileAttributesW(user_config) != INVALID_FILE_ATTRIBUTES) {
+                wcsncpy_s(g_core.config_path, MAX_PATH, user_config, _TRUNCATE);
+                swprintf(g_core.config_dir, MAX_PATH, L"%s\\TaskbarEngine", appdata);
+                user_config_found = TRUE;
             }
         }
 
-        if (plugin->iface->Initialize) {
-            TE_DebugTraceFmt("[TE-DBG] PhaseB: Calling Initialize for '%s'\n", plugin->metadata->name);
-            TE_FaultIsolationCallPluginInit(plugin, plugin->iface->Initialize, plugin->context);
-            TE_DebugTraceFmt("[TE-DBG] PhaseB: Initialize returned for '%s'\n", plugin->metadata->name);
-        }
-
-        /* Check enabled setting in config, only if compatibility check passed */
-        if (plugin->compat_status != TE_COMPAT_UNSUPPORTED_BUILD && TE_CoreManagerIsPluginEnabledInConfig(plugin->context->config)) {
-            TE_DebugTraceFmt("[TE-DBG] PhaseB: Enabling plugin '%s'\n", plugin->metadata->name);
-            TE_PluginLoaderEnable(plugin);
-            TE_DebugTraceFmt("[TE-DBG] PhaseB: Plugin '%s' Enable returned\n", plugin->metadata->name);
-        }
-    }
-
-    g_core_state->current_plugin_id = 0;
-
-    HRESULT ipc_hr = TE_IpcServerStart();
-    TE_DebugTraceFmt("[TE-DBG] PhaseB: IpcServerStart returned hr=0x%08X\n", (unsigned int)ipc_hr);
-    if (FAILED(ipc_hr)) {
-        TE_LogWrite(TE_LOG_WARN, "Failed to start IPC server (hr: 0x%08X)", (unsigned int)ipc_hr);
-    }
-
-    TE_LogWrite(TE_LOG_INFO, "Core Manager initialization Phase B complete with %u plugins loaded", g_core_state->plugin_count);
-    TE_DebugTrace("[TE-DBG] PhaseB: COMPLETE - All initialization done\n");
-    return S_OK;
-}
-
-static void CoreManagerShutdownInternal(bool stop_ipc_server)
-{
-    if (!g_core_state) return;
-
-    TE_LogWrite(TE_LOG_INFO, "Core Manager shutting down...");
-
-    if (stop_ipc_server) {
-        TE_IpcServerStop();
-    }
-
-    TE_ConfigWatcherStop();
-
-    if (g_core_state->taskbar_hwnd) {
-        TE_ShellHookStop(g_core_state->taskbar_hwnd);
-        TE_TaskbarSubclassRemove(g_core_state->taskbar_hwnd);
-    }
-    TE_PowerDeviceStop();
-    TE_VDesktopNotifyStop();
-
-    for (uint32_t i = 0; i < g_core_state->plugin_count; i++) {
-        TE_TimerCancelAllForPlugin(i + 1);
-        TE_MsgFilterUnsubscribeAll(i + 1);
-    }
-    TE_TimerShutdown();
-    TE_MsgFilterInit();
-
-    TE_PluginLoaderUnloadAll(g_core_state->plugins, g_core_state->plugin_count);
-
-    if (g_core_state->config_root) {
-        cJSON_Delete(g_core_state->config_root);
-        g_core_state->config_root = NULL;
-    }
-
-    TE_StateStoreShutdown();
-
-    TE_LogShutdown();
-
-    HeapFree(GetProcessHeap(), 0, g_core_state);
-    g_core_state = NULL;
-}
-
-void TE_CoreManagerShutdown(void)
-{
-    CoreManagerShutdownInternal(true);
-}
-
-void TE_CoreManagerShutdownFromIpc(void)
-{
-    CoreManagerShutdownInternal(false);
-}
-
-void TE_CoreManagerOnConfigChanged(void* core_state_ptr)
-{
-    TE_CoreState* state = (TE_CoreState*)core_state_ptr;
-    if (!state) return;
-
-    TE_LogWrite(TE_LOG_INFO, "Core Manager processing config hot-reload...");
-
-    /* File readability check: verify file is not locked by editor */
-    HANDLE hfile = CreateFileW(state->config_path, GENERIC_READ, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (hfile == INVALID_HANDLE_VALUE) {
-        DWORD err = GetLastError();
-        if (err == ERROR_SHARING_VIOLATION || err == ERROR_LOCK_VIOLATION) {
-            TE_LogWrite(TE_LOG_WARN, "Config hot-reload: file locked by writer, skipping partial read");
-            return;
-        }
-    } else {
-        CloseHandle(hfile);
-    }
-
-    cJSON* new_root = NULL;
-    HRESULT hr = TE_ConfigLoad(state->config_path, &new_root);
-    if (FAILED(hr) || !new_root) {
-        TE_LogWrite(TE_LOG_ERROR, "Config hot-reload failed to parse new config file");
-        return;
-    }
-
-    /* Diff per plugin */
-    for (uint32_t i = 0; i < state->plugin_count; i++) {
-        TE_PluginEntry* plugin = &state->plugins[i];
-        if (!plugin->metadata || !plugin->metadata->name) continue;
-        const char* name = plugin->metadata->name;
-
-        const cJSON* old_sec = TE_ConfigGetPluginSection(state->config_root, name);
-        const cJSON* new_sec = TE_ConfigGetPluginSection(new_root, name);
-
-        char* old_str = old_sec ? cJSON_PrintUnformatted(old_sec) : NULL;
-        char* new_str = new_sec ? cJSON_PrintUnformatted(new_sec) : NULL;
-
-        bool changed = false;
-        if (!old_str && new_str) changed = true;
-        else if (old_str && !new_str) changed = true;
-        else if (old_str && new_str && strcmp(old_str, new_str) != 0) changed = true;
-
-        if (old_str) cJSON_free(old_str);
-        if (new_str) cJSON_free(new_str);
-
-        /* Every context points into the active configuration tree. Refresh even
-         * unchanged sections before the previous tree is released below. */
-        if (plugin->context) {
-            plugin->context->config = new_sec;
-        }
-
-        const bool should_enable = TE_CoreManagerIsPluginEnabledInConfig(new_sec);
-        if (should_enable && !plugin->enabled && plugin->compat_status != TE_COMPAT_UNSUPPORTED_BUILD) {
-            TE_PluginLoaderEnable(plugin);
-        } else if (!should_enable && plugin->enabled) {
-            TE_TimerCancelAllForPlugin(i + 1);
-            TE_MsgFilterUnsubscribeAll(i + 1);
-            TE_PluginLoaderDisable(plugin);
-        }
-
-        if (changed && plugin->enabled) {
-            TE_LogWrite(TE_LOG_INFO, "Config section for plugin '%s' changed", name);
-            /* Dispatch CONFIG_CHANGED targeted specifically to this plugin (plugin_id = i + 1) */
-            TE_ConfigChangedEvent evt = { .new_config = new_sec };
-            TE_EventDispatchTargeted(state->subscriptions, state->subscription_count,
-                                     TE_EVENT_CONFIG_CHANGED, &evt, i + 1);
-        }
-    }
-
-    /* Replace old root */
-    if (state->config_root) {
-        cJSON_Delete(state->config_root);
-    }
-    state->config_root = new_root;
-    TE_LogWrite(TE_LOG_INFO, "Config hot-reload complete");
-}
-
-void TE_CoreManagerReloadConfig(void)
-{
-    if (g_core_state) {
-        TE_CoreManagerOnConfigChanged(g_core_state);
-    }
-}
-
-HRESULT TE_CoreManagerSetPluginEnabledByName(const char* plugin_name, bool enabled)
-{
-    if (!g_core_state) return E_POINTER;
-
-    for (uint32_t i = 0; i < g_core_state->plugin_count; i++) {
-        TE_PluginEntry* plugin = &g_core_state->plugins[i];
-        if (plugin->metadata && plugin->metadata->name && strcmp(plugin->metadata->name, plugin_name) == 0) {
-            if (enabled && plugin->compat_status == TE_COMPAT_UNSUPPORTED_BUILD) {
-                TE_LogWrite(TE_LOG_WARN, "Cannot enable plugin '%s': incompatible with current Windows build", plugin_name);
-                return HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
-            }
-            HRESULT hr = enabled ? TE_PluginLoaderEnable(plugin) : TE_PluginLoaderDisable(plugin);
-            if (SUCCEEDED(hr) && !enabled) {
-                TE_TimerCancelAllForPlugin(i + 1);
-                TE_MsgFilterUnsubscribeAll(i + 1);
-            }
-            if (SUCCEEDED(hr) && enabled && plugin->enabled && plugin->context) {
-                TE_ConfigChangedEvent evt = { .new_config = plugin->context->config };
-                TE_EventDispatchTargeted(g_core_state->subscriptions, g_core_state->subscription_count,
-                                         TE_EVENT_CONFIG_CHANGED, &evt, i + 1);
-            }
-            return hr;
-        }
-    }
-
-    return HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
-}
-
-uint32_t TE_CoreManagerBuildPluginList(char* buffer, size_t buffer_len)
-{
-    if (!buffer || buffer_len == 0) return 0;
-    buffer[0] = '\0';
-    if (!g_core_state) return 0;
-
-    size_t used = 0;
-    for (uint32_t i = 0; i < g_core_state->plugin_count && used < buffer_len; i++) {
-        TE_PluginEntry* plugin = &g_core_state->plugins[i];
-        const char* name = (plugin->metadata && plugin->metadata->name) ? plugin->metadata->name : "unknown";
-        int wrote = snprintf(buffer + used, buffer_len - used, "%s\t%s\n", name, plugin->enabled ? "enabled" : "disabled");
-        if (wrote < 0) break;
-        if ((size_t)wrote >= buffer_len - used) {
-            used = buffer_len - 1;
-            buffer[used] = '\0';
-            break;
-        }
-        used += (size_t)wrote;
-    }
-
-    return (uint32_t)(used + 1);
-}
-
-uint32_t TE_CoreManagerGetCurrentPluginId(void)
-{
-    return g_core_state ? g_core_state->current_plugin_id : 0;
-}
-
-void TE_CoreManagerSetCurrentPluginId(uint32_t plugin_id)
-{
-    if (g_core_state) {
-        g_core_state->current_plugin_id = plugin_id;
-    }
-}
-
-uint32_t TE_CoreManagerBuildSettingsSchema(char* buffer, size_t buffer_len)
-{
-    if (!buffer || buffer_len == 0) return 0;
-    buffer[0] = '\0';
-    if (!g_core_state) return 0;
-
-    cJSON* root = cJSON_CreateObject();
-    cJSON* plugins_array = cJSON_CreateArray();
-    cJSON_AddItemToObject(root, "plugins", plugins_array);
-
-    for (uint32_t i = 0; i < g_core_state->plugin_count; i++) {
-        TE_PluginEntry* plugin = &g_core_state->plugins[i];
-        if (!plugin->iface || !plugin->iface->GetMetadata || !plugin->iface->GetSettings) continue;
-
-        const PluginMetadata* meta = plugin->iface->GetMetadata();
-        const PluginSettings* settings = plugin->iface->GetSettings();
-        if (!meta || !settings) continue;
-
-        cJSON* plugin_obj = cJSON_CreateObject();
-        cJSON_AddStringToObject(plugin_obj, "name", meta->name ? meta->name : "unknown");
-        cJSON_AddStringToObject(plugin_obj, "version", meta->version ? meta->version : "0.0.0");
-        cJSON_AddStringToObject(plugin_obj, "description", meta->description ? meta->description : "");
-
-        cJSON* settings_array = cJSON_CreateArray();
-        cJSON_AddItemToObject(plugin_obj, "settings", settings_array);
-
-        for (size_t j = 0; j < settings->count; j++) {
-            const SettingDescriptor* desc = &settings->descriptors[j];
-            cJSON* setting_obj = cJSON_CreateObject();
-            cJSON_AddStringToObject(setting_obj, "key", desc->key ? desc->key : "");
-            cJSON_AddStringToObject(setting_obj, "label", desc->label ? desc->label : "");
-            cJSON_AddStringToObject(setting_obj, "tooltip", desc->tooltip ? desc->tooltip : "");
-            
-            switch (desc->type) {
-                case TE_SETTING_BOOL:
-                    cJSON_AddStringToObject(setting_obj, "type", "bool");
-                    cJSON_AddBoolToObject(setting_obj, "default", desc->value.b.default_val);
-                    break;
-                case TE_SETTING_INT:
-                    cJSON_AddStringToObject(setting_obj, "type", "int");
-                    cJSON_AddNumberToObject(setting_obj, "default", desc->value.i.default_val);
-                    cJSON_AddNumberToObject(setting_obj, "min", desc->value.i.min);
-                    cJSON_AddNumberToObject(setting_obj, "max", desc->value.i.max);
-                    cJSON_AddNumberToObject(setting_obj, "step", desc->value.i.step);
-                    break;
-                case TE_SETTING_FLOAT:
-                    cJSON_AddStringToObject(setting_obj, "type", "float");
-                    cJSON_AddNumberToObject(setting_obj, "default", desc->value.f.default_val);
-                    cJSON_AddNumberToObject(setting_obj, "min", desc->value.f.min);
-                    cJSON_AddNumberToObject(setting_obj, "max", desc->value.f.max);
-                    cJSON_AddNumberToObject(setting_obj, "step", desc->value.f.step);
-                    break;
-                case TE_SETTING_STRING:
-                    cJSON_AddStringToObject(setting_obj, "type", "string");
-                    cJSON_AddStringToObject(setting_obj, "default", desc->value.s.default_val ? desc->value.s.default_val : "");
-                    break;
-                case TE_SETTING_ENUM: {
-                    cJSON_AddStringToObject(setting_obj, "type", "enum");
-                    cJSON_AddStringToObject(setting_obj, "default", desc->value.e.default_val ? desc->value.e.default_val : "");
-                    cJSON* options_array = cJSON_CreateArray();
-                    for (int k = 0; k < desc->value.e.count; k++) {
-                        cJSON_AddItemToArray(options_array, cJSON_CreateString(desc->value.e.options[k]));
-                    }
-                    cJSON_AddItemToObject(setting_obj, "options", options_array);
-                    break;
+        if (!user_config_found) {
+            wchar_t candidate[MAX_PATH];
+            swprintf(candidate, MAX_PATH, L"%s\\..\\Config\\default_config.jsonc", dll_path);
+            if (GetFileAttributesW(candidate) != INVALID_FILE_ATTRIBUTES) {
+                wcsncpy_s(g_core.config_path, MAX_PATH, candidate, _TRUNCATE);
+                swprintf(g_core.config_dir, MAX_PATH, L"%s\\..\\Config", dll_path);
+            } else {
+                swprintf(candidate, MAX_PATH, L"%s\\Config\\default_config.jsonc", dll_path);
+                if (GetFileAttributesW(candidate) != INVALID_FILE_ATTRIBUTES) {
+                    wcsncpy_s(g_core.config_path, MAX_PATH, candidate, _TRUNCATE);
+                    swprintf(g_core.config_dir, MAX_PATH, L"%s\\Config", dll_path);
+                } else {
+                    swprintf(candidate, MAX_PATH, L"%s\\..\\..\\Config\\default_config.jsonc", dll_path);
+                    wcsncpy_s(g_core.config_path, MAX_PATH, candidate, _TRUNCATE);
+                    swprintf(g_core.config_dir, MAX_PATH, L"%s\\..\\..\\Config", dll_path);
                 }
-                case TE_SETTING_COLOR:
-                    cJSON_AddStringToObject(setting_obj, "type", "color");
-                    cJSON_AddNumberToObject(setting_obj, "default", desc->value.color.default_val);
-                    break;
             }
-            cJSON_AddItemToArray(settings_array, setting_obj);
         }
-        cJSON_AddItemToArray(plugins_array, plugin_obj);
-    }
 
-    char* json_str = cJSON_PrintUnformatted(root);
-    cJSON_Delete(root);
-
-    uint32_t len = 0;
-    if (json_str) {
-        size_t str_len = strlen(json_str);
-        if (str_len < buffer_len) {
-            strcpy(buffer, json_str);
-            len = (uint32_t)(str_len + 1);
+        swprintf(g_core.log_dir, MAX_PATH, L"%s\\..\\Logs", dll_path);
+        
+        wchar_t candidate_mod[MAX_PATH];
+        swprintf(candidate_mod, MAX_PATH, L"%s\\..\\Modules", dll_path);
+        if (GetFileAttributesW(candidate_mod) != INVALID_FILE_ATTRIBUTES) {
+            wcsncpy_s(g_core.modules_dir, MAX_PATH, candidate_mod, _TRUNCATE);
+        } else {
+            swprintf(candidate_mod, MAX_PATH, L"%s\\Modules", dll_path);
+            if (GetFileAttributesW(candidate_mod) != INVALID_FILE_ATTRIBUTES) {
+                wcsncpy_s(g_core.modules_dir, MAX_PATH, candidate_mod, _TRUNCATE);
+            } else {
+                swprintf(g_core.modules_dir, MAX_PATH, L"%s\\..\\..\\Modules", dll_path);
+            }
         }
-        cJSON_free(json_str);
+        wchar_t canon[MAX_PATH];
+        if (GetFullPathNameW(g_core.config_path, MAX_PATH, canon, NULL)) {
+            wcsncpy_s(g_core.config_path, MAX_PATH, canon, _TRUNCATE);
+        }
+        if (GetFullPathNameW(g_core.config_dir, MAX_PATH, canon, NULL)) {
+            wcsncpy_s(g_core.config_dir, MAX_PATH, canon, _TRUNCATE);
+        }
+        if (GetFullPathNameW(g_core.log_dir, MAX_PATH, canon, NULL)) {
+            wcsncpy_s(g_core.log_dir, MAX_PATH, canon, _TRUNCATE);
+        }
+        if (GetFullPathNameW(g_core.modules_dir, MAX_PATH, canon, NULL)) {
+            wcsncpy_s(g_core.modules_dir, MAX_PATH, canon, _TRUNCATE);
+        }
     }
-    return len;
+    
+    CreateDirectoryW(g_core.log_dir, NULL);
+    TE_LogInit(g_core.log_dir, TE_LOG_INFO);
+    TE_LogWrite(TE_LOG_INFO, "CoreManager", "Core Manager initializing");
+    
+    char log_buf[512];
+    snprintf(log_buf, sizeof(log_buf), "Config path: %.256ls", g_core.config_path);
+    TE_LogWrite(TE_LOG_INFO, "CoreManager", log_buf);
+    snprintf(log_buf, sizeof(log_buf), "Config dir:  %.256ls", g_core.config_dir);
+    TE_LogWrite(TE_LOG_INFO, "CoreManager", log_buf);
+    snprintf(log_buf, sizeof(log_buf), "Modules dir: %.256ls", g_core.modules_dir);
+    TE_LogWrite(TE_LOG_INFO, "CoreManager", log_buf);
+    
+    TE_EventDispatchInit();
+    
+    cJSON* root = NULL;
+    TE_ConfigLoad(g_core.config_path, &root);
+    g_core.config_root = root;
+    
+    TE_PluginLoaderInit();
+    TE_PluginLoaderScanAndLoad(g_core.modules_dir);
+    TE_PluginLoaderInitializeAll(g_core.taskbar_hwnd, g_core.dpi, g_core.config_root);
+    TE_PluginLoaderEnableAll();
+    
+    TE_ConfigWatcherStart(g_core.config_dir, g_core.taskbar_hwnd);
+    if (FAILED(TE_IpcServerStart(g_core.taskbar_hwnd))) {
+        TE_LogWrite(TE_LOG_ERROR, "CoreManager", "CRITICAL ERROR: IPC Server failed to start");
+    }
+    TE_ShellHookInit(g_core.taskbar_hwnd);
+    TE_VDesktopInit();
+    
+    g_core.initialized = TRUE;
+    TE_LogWrite(TE_LOG_INFO, "CoreManager", "Core Manager initialized successfully");
+    
+    return TE_S_OK;
 }
 
-uint32_t TE_CoreManagerBuildPerfStats(char* buffer, size_t buffer_len)
-{
-    if (!buffer || buffer_len == 0) return 0;
-    buffer[0] = '\0';
+void TE_CoreManagerShutdown(void) {
+    if (!g_core.initialized) return;
     
-    StateValue fps, avg_ms, min_ms, max_ms;
+    TE_IpcServerStop();
+    TE_ConfigWatcherStop();
+    TE_ShellHookShutdown(g_core.taskbar_hwnd);
+    TE_VDesktopShutdown();
+    TE_PluginLoaderDisableAll();
+    TE_PluginLoaderShutdownAll();
+    TE_PluginLoaderShutdown();
+    TE_EventDispatchShutdown();
+
+    if (g_core.taskbar_hwnd) {
+        TE_TaskbarSubclassRemove(g_core.taskbar_hwnd);
+    }
     
-    float f_fps = 0.0f;
-    float f_avg_ms = 0.0f;
-    float f_min_ms = 0.0f;
-    float f_max_ms = 0.0f;
+    if (g_core.config_root) {
+        TE_JsoncFree(g_core.config_root);
+        g_core.config_root = NULL;
+    }
+    TE_LogWrite(TE_LOG_INFO, "CoreManager", "Core Manager shut down");
+    TE_LogFlush();
+    TE_LogShutdown();
+    memset(&g_core, 0, sizeof(g_core));
+}
+
+HRESULT TE_CoreManagerReloadConfig(void) {
+    if (!g_core.initialized) return TE_E_FAIL;
+    cJSON* new_root = NULL;
+    if (FAILED(TE_ConfigLoad(g_core.config_path, &new_root)) || !new_root) {
+        TE_LogWrite(TE_LOG_WARNING, "CoreManager", "Failed to parse new config");
+        return TE_E_FAIL;
+    }
     
-    if (SUCCEEDED(TE_StateQuery("perf.fps", &fps)) && fps.type == TE_STATE_TYPE_FLOAT) {
-        f_fps = fps.value.f;
+    const char* changed_names[TE_MAX_PLUGINS];
+    int changed_count = 0;
+    TE_ConfigDiffPlugins(g_core.config_root, new_root,
+                         changed_names, &changed_count, TE_MAX_PLUGINS);
+    
+    char* saved_names[TE_MAX_PLUGINS];
+    for (int i = 0; i < changed_count; i++) {
+        saved_names[i] = _strdup(changed_names[i]);
     }
-    if (SUCCEEDED(TE_StateQuery("perf.avg_ms", &avg_ms)) && avg_ms.type == TE_STATE_TYPE_FLOAT) {
-        f_avg_ms = avg_ms.value.f;
+    
+    cJSON* old_root = g_core.config_root;
+    g_core.config_root = new_root;
+    if (old_root) {
+        TE_JsoncFree(old_root);
     }
-    if (SUCCEEDED(TE_StateQuery("perf.min_ms", &min_ms)) && min_ms.type == TE_STATE_TYPE_FLOAT) {
-        f_min_ms = min_ms.value.f;
+    
+    for (int i = 0; i < changed_count; i++) {
+        TE_ConfigChangedData data;
+        data.plugin_name = saved_names[i];
+        data.new_config = TE_ConfigGetPluginSection(g_core.config_root, saved_names[i]);
+        TE_EventDispatchFire(TE_EVENT_CONFIG_CHANGED, &data);
+        free(saved_names[i]);
     }
-    if (SUCCEEDED(TE_StateQuery("perf.max_ms", &max_ms)) && max_ms.type == TE_STATE_TYPE_FLOAT) {
-        f_max_ms = max_ms.value.f;
-    }
+    
+    return TE_S_OK;
+}
 
-    cJSON* root = cJSON_CreateObject();
-    cJSON_AddNumberToObject(root, "fps", f_fps);
-    cJSON_AddNumberToObject(root, "avg_ms", f_avg_ms);
-    cJSON_AddNumberToObject(root, "min_ms", f_min_ms);
-    cJSON_AddNumberToObject(root, "max_ms", f_max_ms);
-
-    char* json_str = cJSON_PrintUnformatted(root);
-    cJSON_Delete(root);
-
-    uint32_t len = 0;
-    if (json_str) {
-        size_t str_len = strlen(json_str);
-        if (str_len < buffer_len) {
-            strcpy(buffer, json_str);
-            len = (uint32_t)(str_len + 1);
-        }
-        cJSON_free(json_str);
+void TE_CoreManagerHandleCommand(int cmd_type, void* payload) {
+    switch (cmd_type) {
+        case TE_CMD_RELOAD_CONFIG:
+            TE_CoreManagerReloadConfig();
+            break;
+        case TE_CMD_SHUTDOWN:
+            TE_CoreManagerShutdown();
+            break;
+        case TE_CMD_ENABLE_PLUGIN:
+            if (payload) {
+                TE_PluginLoaderEnablePluginByName((const char*)payload);
+                free(payload);
+            }
+            break;
+        case TE_CMD_DISABLE_PLUGIN:
+            if (payload) {
+                TE_PluginLoaderDisablePluginByName((const char*)payload);
+                free(payload);
+            }
+            break;
     }
-    return len;
+}
+
+HWND TE_CoreManagerGetTaskbarHwnd(void) {
+    return g_core.taskbar_hwnd;
+}
+
+BOOL TE_CoreManagerIsInitialized(void) {
+    return g_core.initialized;
+}
+
+uint32_t TE_CoreManagerGetDpi(void) {
+    return g_core.dpi ? g_core.dpi : 96;
+}
+
+void TE_CoreManagerSetDpi(uint32_t dpi) {
+    if (dpi > 0) {
+        g_core.dpi = dpi;
+    }
 }
