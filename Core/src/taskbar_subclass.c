@@ -48,6 +48,12 @@ LRESULT CALLBACK TE_TaskbarSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             return 0;
             
         case WM_TE_IPC_COMMAND:
+            if ((int)wParam == TE_CMD_SHUTDOWN) {
+                KillTimer(hwnd, 1001);
+                TE_CoreManagerHandleCommand((int)wParam, (void*)lParam);
+                TE_TaskbarSubclassRemove(hwnd);
+                return 0;
+            }
             TE_CoreManagerHandleCommand((int)wParam, (void*)lParam);
             return 0;
             
@@ -96,17 +102,21 @@ LRESULT CALLBACK TE_TaskbarSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                 }
                 
                 static BOOL s_was_in_taskbar = FALSE;
+                static BOOL s_was_dragging = FALSE;
                 static POINT s_last_pt = {0, 0};
+                BOOL is_dragging = ((GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0);
                 
                 if (in_taskbar || s_was_in_taskbar) {
-                    if (pt.x != s_last_pt.x || pt.y != s_last_pt.y || in_taskbar != s_was_in_taskbar) {
+                    if (pt.x != s_last_pt.x || pt.y != s_last_pt.y || in_taskbar != s_was_in_taskbar || is_dragging != s_was_dragging) {
                         TE_TaskbarMouseData mouse_data;
                         mouse_data.cursor_pos = pt;
                         mouse_data.is_in_taskbar = in_taskbar;
+                        mouse_data.is_dragging = is_dragging;
                         TE_EventDispatchFire(TE_EVENT_TASKBAR_MOUSE, &mouse_data);
                         
                         s_last_pt = pt;
                         s_was_in_taskbar = in_taskbar;
+                        s_was_dragging = is_dragging;
                     }
                 }
             }

@@ -39,16 +39,42 @@ int TE_FrameLoopIsActive(void);
  * Notify the frame loop that the mouse has moved.
  * Updates cursor coordinates and wakes the animation if idle.
  *
- * @param cursor_x Screen X coordinate of the cursor.
- * @param cursor_y Screen Y coordinate of the cursor.
+ * @param cursor_x    Screen X coordinate of the cursor.
+ * @param cursor_y    Screen Y coordinate of the cursor.
+ * @param is_dragging Non-zero if drag-and-drop operation is active.
  */
-void TE_FrameLoopOnMouseMove(float cursor_x, float cursor_y);
+void TE_FrameLoopOnMouseMove(float cursor_x, float cursor_y, int is_dragging);
 
 /**
  * Notify the frame loop that the mouse has left the taskbar.
  * Initiates the settle animation (scales → 1.0 over speed_ms).
  */
 void TE_FrameLoopOnMouseLeave(void);
+
+/**
+ * Trigger an instantaneous vertical bounce impulse on a specific icon.
+ * Applies negative instantaneous velocity (upward impulse) to velocityOffsetY.
+ *
+ * @param icon_index       0-based index of the icon to bounce.
+ * @param impulse_strength Upward impulse magnitude (positive value, applied as negative velocity).
+ * @return TE_S_OK on success, TE_E_INVALIDARG on out-of-range index.
+ */
+HRESULT TE_FrameLoopTriggerIconBounce(int icon_index, float impulse_strength);
+
+/**
+ * Check if the given screen coordinate hits the custom Start button visual.
+ * If hit, forwards the click to the OS to open the Start menu.
+ *
+ * @param cursor_x Screen X coordinate.
+ * @param cursor_y Screen Y coordinate.
+ * @return 1 if Start button was hit and triggered, 0 otherwise.
+ */
+int TE_FrameLoopCheckStartButtonClick(float cursor_x, float cursor_y);
+
+/**
+ * Forward a click or invoke event to the OS to open the Windows Start Menu.
+ */
+void TE_TriggerStartMenu(void);
 
 #ifdef __cplusplus
 }

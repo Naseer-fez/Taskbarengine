@@ -55,6 +55,41 @@ target_include_directories(te_magnify_testlib PUBLIC
 
 target_compile_definitions(te_magnify_testlib PRIVATE _USE_MATH_DEFINES)
 
+# Static test library for icon_hover module internals
+add_library(te_icon_hover_testlib STATIC
+    ${CMAKE_SOURCE_DIR}/Modules/icon_hover/icon_hover.c
+    ${CMAKE_SOURCE_DIR}/Modules/icon_hover/magnification.c
+    ${CMAKE_SOURCE_DIR}/Modules/icon_hover/uia_discovery.cpp
+    ${CMAKE_SOURCE_DIR}/Modules/icon_hover/icon_capture.cpp
+    ${CMAKE_SOURCE_DIR}/Modules/icon_hover/dcomp_overlay.cpp
+    ${CMAKE_SOURCE_DIR}/Modules/icon_hover/frame_loop.cpp
+)
+
+target_include_directories(te_icon_hover_testlib PUBLIC
+    ${CMAKE_SOURCE_DIR}/Modules/icon_hover
+    ${CMAKE_SOURCE_DIR}/SDK/include
+    ${CMAKE_SOURCE_DIR}/ThirdParty/cJSON
+)
+
+target_link_libraries(te_icon_hover_testlib PUBLIC
+    te_sdk
+    dcomp
+    d2d1
+    d3d11
+    dxguid
+    ole32
+    oleaut32
+    shell32
+    user32
+    comctl32
+    dwmapi
+    uuid
+    windowscodecs
+    shlwapi
+)
+
+target_compile_definitions(te_icon_hover_testlib PRIVATE _USE_MATH_DEFINES TE_HOVER_TESTLIB)
+
 add_executable(te_tests
     test_jsonc.cpp
     test_plugin_loader.cpp
@@ -68,6 +103,8 @@ add_executable(te_tests
     test_magnification.cpp
     test_state_store.cpp
     test_icon_hover.cpp
+    test_config_io.cpp
+    ${CMAKE_SOURCE_DIR}/App/src/config_io.cpp
 )
 
 target_compile_definitions(te_tests PRIVATE _CRT_SECURE_NO_WARNINGS)
@@ -76,8 +113,16 @@ target_link_libraries(te_tests PRIVATE
     te_core_testlib
     te_resize_testlib
     te_magnify_testlib
+    te_icon_hover_testlib
     te_sdk
     cjson
+    shell32
+    dcomp
+    d2d1
+    d3d11
+    dxguid
+    windowscodecs
+    shlwapi
     Catch2::Catch2WithMain
 )
 

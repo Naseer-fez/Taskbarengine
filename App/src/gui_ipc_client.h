@@ -34,3 +34,9 @@ std::optional<std::string> GuiIpcGetPerfStats();
  * @return The JSON plugin list string, or nullopt on failure.
  */
 std::optional<std::string> GuiIpcGetPluginList();
+
+/**
+ * @brief Request the engine to cleanly shut down and unload plugins.
+ * @return S_OK on success, or an error HRESULT.
+ */
+HRESULT GuiIpcShutdown();

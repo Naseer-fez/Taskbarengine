@@ -15,6 +15,7 @@
 #include <cJSON.h>
 #include <windows.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <stdarg.h>
 #include <string.h>
 
@@ -65,13 +66,13 @@ static void ParseConfig(const cJSON* config) {
     if (!node) node = cJSON_GetObjectItemCaseSensitive(config, "scale");
     if (cJSON_IsNumber(node)) {
         float v = (float)node->valuedouble;
-        if (v >= 1.0f && v <= 2.0f) g_hover_state.config.max_scale = v;
+        if (v >= 1.0f && v <= 10.0f) g_hover_state.config.max_scale = v;
     }
 
     node = cJSON_GetObjectItemCaseSensitive(config, "radius");
     if (cJSON_IsNumber(node)) {
         int v = node->valueint;
-        if (v >= 40 && v <= 300) g_hover_state.config.radius = v;
+        if (v >= 40 && v <= 500) g_hover_state.config.radius = v;
     }
 
     node = cJSON_GetObjectItemCaseSensitive(config, "curve");
@@ -84,6 +85,57 @@ static void ParseConfig(const cJSON* config) {
         int v = node->valueint;
         if (v >= 50 && v <= 500) g_hover_state.config.speed_ms = v;
     }
+
+    node = cJSON_GetObjectItemCaseSensitive(config, "bounce_enabled");
+    if (cJSON_IsBool(node)) {
+        g_hover_state.config.bounce_enabled = cJSON_IsTrue(node) ? 1 : 0;
+    }
+
+    node = cJSON_GetObjectItemCaseSensitive(config, "bounce_strength");
+    if (cJSON_IsNumber(node)) {
+        float v = (float)node->valuedouble;
+        if (v >= 100.0f && v <= 2000.0f) g_hover_state.config.bounce_strength = v;
+    }
+
+    node = cJSON_GetObjectItemCaseSensitive(config, "tilt_enabled");
+    if (cJSON_IsBool(node)) {
+        g_hover_state.config.tilt_enabled = cJSON_IsTrue(node) ? 1 : 0;
+    }
+
+    node = cJSON_GetObjectItemCaseSensitive(config, "max_tilt_angle");
+    if (cJSON_IsNumber(node)) {
+        float v = (float)node->valuedouble;
+        if (v >= 0.0f && v <= 45.0f) g_hover_state.config.max_tilt_angle = v;
+    }
+
+    node = cJSON_GetObjectItemCaseSensitive(config, "drag_drop_enabled");
+    if (cJSON_IsBool(node)) {
+        g_hover_state.config.drag_drop_enabled = cJSON_IsTrue(node) ? 1 : 0;
+    }
+
+    node = cJSON_GetObjectItemCaseSensitive(config, "drag_recession_scale");
+    if (cJSON_IsNumber(node)) {
+        float v = (float)node->valuedouble;
+        if (v >= 0.3f && v <= 1.0f) g_hover_state.config.drag_recession_scale = v;
+    }
+
+    node = cJSON_GetObjectItemCaseSensitive(config, "drop_zone_push");
+    if (cJSON_IsNumber(node)) {
+        float v = (float)node->valuedouble;
+        if (v >= 5.0f && v <= 200.0f) g_hover_state.config.drop_zone_push = v;
+    }
+
+    node = cJSON_GetObjectItemCaseSensitive(config, "keep_on_top");
+    if (cJSON_IsBool(node)) {
+        g_hover_state.config.keep_on_top = cJSON_IsTrue(node) ? 1 : 0;
+    }
+
+    node = cJSON_GetObjectItemCaseSensitive(config, "start_image_path");
+    if (!node) node = cJSON_GetObjectItemCaseSensitive(config, "start_button_image");
+    if (cJSON_IsString(node) && node->valuestring && node->valuestring[0]) {
+        size_t converted = 0;
+        mbstowcs_s(&converted, g_hover_state.config.start_image_path, MAX_PATH, node->valuestring, _TRUNCATE);
+    }
 }
 
 /* ── Settings Schema ──────────────────────────────────────────────── */
@@ -95,13 +147,13 @@ static const SettingDescriptor g_settings[] = {
         "max_scale", "Max Hover Scale",
         "Peak magnification multiplier when cursor is directly over an icon",
         TE_SETTING_FLOAT,
-        { .float_val = { 1.3f, 1.0f, 2.0f, 0.05f } }
+        { .float_val = { 1.3f, 1.0f, 10.0f, 0.05f } }
     },
     {
         "radius", "Effect Radius",
         "Distance in pixels over which neighboring icons are influenced",
         TE_SETTING_INT,
-        { .int_val = { 120, 40, 300, 10 } }
+        { .int_val = { 120, 40, 500, 10 } }
     },
     {
         "curve", "Easing Curve",
@@ -114,12 +166,60 @@ static const SettingDescriptor g_settings[] = {
         "Duration in milliseconds for the settle animation when mouse leaves",
         TE_SETTING_INT,
         { .int_val = { 150, 50, 500, 10 } }
+    },
+    {
+        "bounce_enabled", "Enable Notification Bounce",
+        "Whether icons perform an elastic spring bounce when receiving notifications",
+        TE_SETTING_BOOL,
+        { .bool_val = { TRUE } }
+    },
+    {
+        "bounce_strength", "Bounce Impulse Strength",
+        "Initial upward launch velocity applied when an app receives a notification",
+        TE_SETTING_FLOAT,
+        { .float_val = { 600.0f, 200.0f, 1500.0f, 25.0f } }
+    },
+    {
+        "tilt_enabled", "Enable 3D Tilt Perspective",
+        "DirectComposition 3D matrix transformation tilting icons toward cursor",
+        TE_SETTING_BOOL,
+        { .bool_val = { TRUE } }
+    },
+    {
+        "max_tilt_angle", "Max Tilt Angle",
+        "Maximum pitch and yaw rotation angle in degrees (0 to 45)",
+        TE_SETTING_FLOAT,
+        { .float_val = { 20.0f, 0.0f, 45.0f, 1.0f } }
+    },
+    {
+        "drag_drop_enabled", "Enable Drag-and-Drop Physics",
+        "Scale down held icon and widen drop target zone during drag",
+        TE_SETTING_BOOL,
+        { .bool_val = { TRUE } }
+    },
+    {
+        "drag_recession_scale", "Drag Recession Scale",
+        "Scale multiplier when icon is held or dragged (0.50 to 1.00)",
+        TE_SETTING_FLOAT,
+        { .float_val = { 0.80f, 0.50f, 1.0f, 0.05f } }
+    },
+    {
+        "drop_zone_push", "Drop Zone Push Factor",
+        "Horizontal parting distance in pixels for neighbor icons during drag (10 to 120)",
+        TE_SETTING_FLOAT,
+        { .float_val = { 50.0f, 10.0f, 120.0f, 5.0f } }
+    },
+    {
+        "keep_on_top", "Keep Overlay On Top",
+        "Continuously enforce HWND_TOPMOST so taskbar clicks do not obscure magnification",
+        TE_SETTING_BOOL,
+        { .bool_val = { TRUE } }
     }
 };
 
 static const PluginSettings g_plugin_settings = {
     g_settings,
-    4
+    12
 };
 
 /* ── Plugin Metadata ──────────────────────────────────────────────── */
@@ -238,17 +338,29 @@ static void RebuildIconData(void) {
         g_hover_state.anim[i].current_scale = initial_scale;
         g_hover_state.anim[i].target_scale = initial_target;
         g_hover_state.anim[i].geometry_generation = g_hover_state.geometry.generation;
+        g_hover_state.anim[i].current_tilt_x = 0.0f;
+        g_hover_state.anim[i].target_tilt_x = 0.0f;
+        g_hover_state.anim[i].velocity_tilt_x = 0.0f;
+        g_hover_state.anim[i].current_tilt_y = 0.0f;
+        g_hover_state.anim[i].target_tilt_y = 0.0f;
+        g_hover_state.anim[i].velocity_tilt_y = 0.0f;
+        g_hover_state.anim[i].current_pos_x = 0.0f;
     }
 
     /* Capture icon bitmaps */
     HBITMAP bitmaps[TE_HOVER_MAX_ICONS] = { 0 };
     for (uint32_t i = 0; i < count; i++) {
-        TE_IconCaptureGetBitmapWithBounds(
-            g_hover_state.icon_cache.items[i].app_id,
-            g_hover_state.icon_cache.items[i].icon_index,
-            &g_hover_state.icon_cache.items[i].glyphRect,
-            &bitmaps[i]
-        );
+        if (g_hover_state.icon_cache.items[i].element_type == TE_ELEM_START_BUTTON) {
+            /* Custom start button uses loaded Direct2D bitmap, skip GDI icon_capture */
+            bitmaps[i] = NULL;
+        } else {
+            TE_IconCaptureGetBitmapWithBounds(
+                g_hover_state.icon_cache.items[i].app_id,
+                g_hover_state.icon_cache.items[i].icon_index,
+                &g_hover_state.icon_cache.items[i].glyphRect,
+                &bitmaps[i]
+            );
+        }
     }
 
     /* Build/rebuild DComp visual tree */
@@ -272,9 +384,107 @@ static void RebuildIconData(void) {
     HoverLog(TE_LOG_INFO, "Icon data rebuilt: %u icons", count);
 }
 
+#ifndef HSHELL_REDRAW
+#define HSHELL_REDRAW 6
+#endif
+#ifndef HSHELL_FLASH
+#define HSHELL_FLASH (HSHELL_REDRAW | 0x8000)
+#endif
+
+static int StrCaseContains(const wchar_t* haystack, const wchar_t* needle) {
+    if (!haystack || !needle || !*haystack || !*needle) return 0;
+    size_t h_len = wcslen(haystack);
+    size_t n_len = wcslen(needle);
+    if (n_len > h_len) return 0;
+    for (size_t i = 0; i <= h_len - n_len; i++) {
+        if (_wcsnicmp(haystack + i, needle, n_len) == 0) return 1;
+    }
+    return 0;
+}
+
 /**
- * Shell hook event handler — app opened/closed/activated.
- * Triggers icon re-discovery.
+ * Resolve an application HWND to its corresponding taskbar icon index.
+ */
+static int ResolveHwndToIconIndex(HWND hwnd) {
+    if (!hwnd || !IsWindow(hwnd)) return -1;
+    if (g_hover_state.icon_cache.count == 0) return -1;
+
+    DWORD pid = 0;
+    GetWindowThreadProcessId(hwnd, &pid);
+
+    wchar_t exe_path[MAX_PATH] = { 0 };
+    wchar_t exe_name[MAX_PATH] = { 0 };
+    wchar_t exe_base[MAX_PATH] = { 0 };
+    wchar_t aumid[256] = { 0 };
+    wchar_t window_title[256] = { 0 };
+
+    if (pid != 0) {
+        HANDLE h_proc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+        if (h_proc) {
+            DWORD size = MAX_PATH;
+            if (QueryFullProcessImageNameW(h_proc, 0, exe_path, &size)) {
+                const wchar_t* p = wcsrchr(exe_path, L'\\');
+                if (p) {
+                    wcscpy_s(exe_name, MAX_PATH, p + 1);
+                } else {
+                    wcscpy_s(exe_name, MAX_PATH, exe_path);
+                }
+                wcscpy_s(exe_base, MAX_PATH, exe_name);
+                wchar_t* dot = wcsrchr(exe_base, L'.');
+                if (dot) *dot = L'\0';
+            }
+
+            /* Query AUMID for packaged/UWP apps if possible */
+            typedef LONG (WINAPI *pfnGetApplicationUserModelId)(HANDLE, UINT32*, PWSTR);
+            HMODULE h_kernel = GetModuleHandleW(L"kernel32.dll");
+            if (h_kernel) {
+                pfnGetApplicationUserModelId pfnGetAUMID = 
+                    (pfnGetApplicationUserModelId)(void*)GetProcAddress(h_kernel, "GetApplicationUserModelId");
+                if (pfnGetAUMID) {
+                    UINT32 aumid_len = 256;
+                    pfnGetAUMID(h_proc, &aumid_len, aumid);
+                }
+            }
+
+            CloseHandle(h_proc);
+        }
+    }
+
+    GetWindowTextW(hwnd, window_title, 256);
+
+    /* Search through discovered icon cache */
+    for (uint32_t i = 0; i < g_hover_state.icon_cache.count; i++) {
+        const wchar_t* app_id = g_hover_state.icon_cache.items[i].app_id;
+        if (!app_id || !*app_id) continue;
+
+        if (aumid[0] && StrCaseContains(app_id, aumid)) {
+            return (int)i;
+        }
+        if (exe_path[0] && StrCaseContains(app_id, exe_path)) {
+            return (int)i;
+        }
+        if (exe_name[0] && StrCaseContains(app_id, exe_name)) {
+            return (int)i;
+        }
+        if (exe_base[0] && StrCaseContains(app_id, exe_base)) {
+            return (int)i;
+        }
+        if (window_title[0] && (StrCaseContains(app_id, window_title) || StrCaseContains(window_title, app_id))) {
+            return (int)i;
+        }
+    }
+
+    /* Fallback: if only one icon is managed, map to it */
+    if (g_hover_state.icon_cache.count == 1) {
+        return 0;
+    }
+
+    return -1;
+}
+
+/**
+ * Shell hook event handler — app opened/closed/activated or notifications.
+ * Triggers icon re-discovery or inertial bouncing.
  */
 static void OnShellHook(uint32_t type, const void* data, void* user_data) {
     (void)type; (void)user_data;
@@ -282,18 +492,37 @@ static void OnShellHook(uint32_t type, const void* data, void* user_data) {
     if (!g_hover_state.enabled) return;
 
     const TE_ShellHookData* hook_data = (const TE_ShellHookData*)data;
-    if (hook_data) {
-        int msg = hook_data->shell_msg & 0x7FFF;
-        /* Only rebuild icon cache when windows are actually created, destroyed, or replaced */
-        if (msg != HSHELL_WINDOWCREATED &&
-            msg != HSHELL_WINDOWDESTROYED &&
-            msg != HSHELL_WINDOWREPLACED) {
-            return;
+    if (!hook_data) return;
+
+    int msg = hook_data->shell_msg;
+
+    /* Check for flashing notification event (HSHELL_FLASH) */
+    if (msg == HSHELL_FLASH || ((msg & 0x8000) && ((msg & 0x7FFF) == HSHELL_REDRAW))) {
+        if (!g_hover_state.config.bounce_enabled) return;
+        HWND flash_hwnd = hook_data->target_hwnd;
+        int icon_index = ResolveHwndToIconIndex(flash_hwnd);
+        if (icon_index >= 0) {
+            float strength = g_hover_state.config.bounce_strength > 0.0f ? g_hover_state.config.bounce_strength : 600.0f;
+            HoverLog(TE_LOG_INFO, "Notification flash for HWND %p -> icon %d, triggering inertial bounce (strength=%.1f)",
+                     (void*)flash_hwnd, icon_index, strength);
+            TE_FrameLoopTriggerIconBounce(icon_index, strength);
+        } else {
+            HoverLog(TE_LOG_DEBUG, "Notification flash for HWND %p could not be resolved to icon",
+                     (void*)flash_hwnd);
         }
+        return;
+    }
+
+    int base_msg = msg & 0x7FFF;
+    /* Only rebuild icon cache when windows are actually created, destroyed, or replaced */
+    if (base_msg != HSHELL_WINDOWCREATED &&
+        base_msg != HSHELL_WINDOWDESTROYED &&
+        base_msg != HSHELL_WINDOWREPLACED) {
+        return;
     }
 
     HoverLog(TE_LOG_INFO, "Shell hook window change received (%d), rebuilding icon cache",
-             hook_data ? hook_data->shell_msg : 0);
+             hook_data->shell_msg);
     TE_IconCaptureInvalidate();
     RebuildIconData();
 }
@@ -305,7 +534,14 @@ static void OnConfigChanged(uint32_t type, const void* data, void* user_data) {
     (void)type; (void)user_data;
     const TE_ConfigChangedData* changed = (const TE_ConfigChangedData*)data;
     ParseConfig((const cJSON*)changed->new_config);
+    if (g_hover_state.config.start_image_path[0] != L'\0') {
+        TE_DCompLoadStartImage(g_hover_state.config.start_image_path);
+        if (TE_DCompIsCustomStartButtonEnabled() && g_hover_state.ctx) {
+            TE_UiaHideStartButton(g_hover_state.ctx->taskbar_hwnd, TRUE);
+        }
+    }
     QueryTaskbarHeight();
+    RebuildIconData();
     HoverLog(TE_LOG_INFO, "Config updated: max_scale=%.2f, radius=%d, curve=%d, speed_ms=%d",
              g_hover_state.config.max_scale, g_hover_state.config.radius,
              (int)g_hover_state.config.curve, g_hover_state.config.speed_ms);
@@ -322,7 +558,7 @@ static void OnTaskbarMouse(uint32_t type, const void* data, void* user_data) {
     if (!mouse_data) return;
 
     if (mouse_data->is_in_taskbar) {
-        TE_FrameLoopOnMouseMove((float)mouse_data->cursor_pos.x, (float)mouse_data->cursor_pos.y);
+        TE_FrameLoopOnMouseMove((float)mouse_data->cursor_pos.x, (float)mouse_data->cursor_pos.y, mouse_data->is_dragging);
     } else {
         TE_FrameLoopOnMouseLeave();
     }
@@ -397,6 +633,14 @@ static HRESULT Initialize(const PluginContext* ctx) {
     g_hover_state.config.radius = 120;
     g_hover_state.config.curve = TE_CURVE_GAUSSIAN;
     g_hover_state.config.speed_ms = 150;
+    g_hover_state.config.bounce_enabled = 1;
+    g_hover_state.config.bounce_strength = 600.0f;
+    g_hover_state.config.tilt_enabled = 1;
+    g_hover_state.config.max_tilt_angle = 20.0f;
+    g_hover_state.config.drag_drop_enabled = 1;
+    g_hover_state.config.drag_recession_scale = 0.80f;
+    g_hover_state.config.drop_zone_push = 50.0f;
+    g_hover_state.config.keep_on_top = 1;
     g_hover_state.geometry.taskbarHeight = 48; /* Default until state store provides real value */
 
     g_hover_state.current_dpi = (ctx && ctx->dpi) ? ctx->dpi : 96;
@@ -456,6 +700,23 @@ static HRESULT Enable(void) {
         return TE_E_FAIL;
     }
 
+    /* Load custom start button image if specified or default present */
+    if (g_hover_state.config.start_image_path[0] != L'\0') {
+        TE_DCompLoadStartImage(g_hover_state.config.start_image_path);
+    } else {
+        if (GetFileAttributesW(L"Config\\start_button.png") != INVALID_FILE_ATTRIBUTES) {
+            TE_DCompLoadStartImage(L"Config\\start_button.png");
+        } else if (GetFileAttributesW(L"Config\\start_button.svg") != INVALID_FILE_ATTRIBUTES) {
+            TE_DCompLoadStartImage(L"Config\\start_button.svg");
+        } else {
+            TE_DCompLoadStartImage(L"start_button.png");
+        }
+    }
+
+    if (TE_DCompIsCustomStartButtonEnabled()) {
+        TE_UiaHideStartButton(taskbar_hwnd, TRUE);
+    }
+
     /* Discover icons and build visual tree */
     RebuildIconData();
 
@@ -485,6 +746,11 @@ static HRESULT Disable(void) {
 
     /* Stop animation */
     TE_FrameLoopStop();
+
+    /* Restore native start button */
+    if (g_hover_state.ctx && g_hover_state.ctx->taskbar_hwnd) {
+        TE_UiaHideStartButton(g_hover_state.ctx->taskbar_hwnd, FALSE);
+    }
 
     /* Unsubscribe message filters */
     if (TE_CTX_HAS_FIELD(g_hover_state.ctx, unsubscribe_message) &&
@@ -544,6 +810,8 @@ static const PluginInterface g_interface = {
     GetSettings
 };
 
+#ifndef TE_HOVER_TESTLIB
 TE_EXPORT const PluginInterface* GetPluginInterface(void) {
     return &g_interface;
 }
+#endif

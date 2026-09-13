@@ -29,6 +29,8 @@ target_link_libraries(IconHoverPlugin PRIVATE
     comctl32
     dwmapi
     uuid
+    windowscodecs
+    shlwapi
 )
 
 # _USE_MATH_DEFINES for M_PI in magnification.c

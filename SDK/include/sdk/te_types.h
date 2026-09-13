@@ -30,6 +30,9 @@ extern "C" {
 /** HRESULT code indicating successful operation. */
 #define TE_S_OK ((HRESULT)0L)
 
+/** HRESULT code indicating successful operation that returned false/empty. */
+#define TE_S_FALSE ((HRESULT)1L)
+
 /** HRESULT code indicating unspecified failure. */
 #define TE_E_FAIL ((HRESULT)0x80004005L)
 

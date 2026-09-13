@@ -18,6 +18,7 @@
 #include "core/engine.h"
 #include "core/shell_hook.h"
 #include "core/vdesktop_notify.h"
+#include "core/taskbar_subclass.h"
 
 static struct {
     BOOL initialized;
@@ -157,6 +158,10 @@ void TE_CoreManagerShutdown(void) {
     TE_PluginLoaderShutdownAll();
     TE_PluginLoaderShutdown();
     TE_EventDispatchShutdown();
+
+    if (g_core.taskbar_hwnd) {
+        TE_TaskbarSubclassRemove(g_core.taskbar_hwnd);
+    }
     
     if (g_core.config_root) {
         TE_JsoncFree(g_core.config_root);

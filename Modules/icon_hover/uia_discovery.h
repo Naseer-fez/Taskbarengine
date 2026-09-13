@@ -18,7 +18,8 @@ typedef enum TE_TaskbarElementType {
     TE_ELEM_UNKNOWN = 0,
     TE_ELEM_APP_ICON,
     TE_ELEM_SHELL_CONTROL,
-    TE_ELEM_SYSTEM_TRAY
+    TE_ELEM_SYSTEM_TRAY,
+    TE_ELEM_START_BUTTON
 } TE_TaskbarElementType;
 
 /**
@@ -68,6 +69,15 @@ HRESULT TE_UiaDiscoverIcons(HWND taskbar_hwnd, TE_IconElementCache* out_cache);
  * @param cache Pointer to the cache to invalidate.
  */
 void TE_UiaCacheInvalidate(TE_IconElementCache* cache);
+
+/**
+ * Hide or restore the native Windows Start Button.
+ *
+ * @param taskbar_hwnd Handle to Shell_TrayWnd.
+ * @param hide         TRUE to hide native Start Button, FALSE to restore.
+ * @return TE_S_OK on success, TE_S_FALSE if not found, TE_E_INVALIDARG on NULL hwnd.
+ */
+HRESULT TE_UiaHideStartButton(HWND taskbar_hwnd, BOOL hide);
 
 #ifdef __cplusplus
 }

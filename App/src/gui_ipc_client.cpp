@@ -146,3 +146,11 @@ std::optional<std::string> GuiIpcGetPluginList()
     }
     return std::nullopt;
 }
+
+HRESULT GuiIpcShutdown()
+{
+    TE_IpcMsgType response = (TE_IpcMsgType)0;
+    HRESULT hr = SendIpcCommand(TE_IPC_MSG_SHUTDOWN, nullptr, 0, &response, nullptr);
+    if (FAILED(hr)) return hr;
+    return (response == TE_IPC_MSG_STATUS) ? S_OK : E_FAIL;
+}

@@ -7,6 +7,11 @@ add_executable(TaskbarEngine WIN32
     res/app.manifest
 )
 
+add_executable(TaskbarEngineHost WIN32
+    TaskbarEngineHost.cpp
+)
+
+
 target_include_directories(TaskbarEngine PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
@@ -20,6 +25,21 @@ target_link_libraries(TaskbarEngine PRIVATE
 # MinGW needs -municode for wWinMain entry point
 if(NOT MSVC)
     target_link_options(TaskbarEngine PRIVATE -municode)
+endif()
+
+target_include_directories(TaskbarEngineHost PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/ThirdParty/cJSON
+)
+
+target_link_libraries(TaskbarEngineHost PRIVATE
+    te_sdk
+    shell32
+    cjson
+)
+
+if(NOT MSVC)
+    target_link_options(TaskbarEngineHost PRIVATE -municode)
 endif()
 
 

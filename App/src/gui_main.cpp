@@ -2,8 +2,13 @@
 #include <winrt/Windows.Foundation.Collections.h>
 #include <winrt/Microsoft.UI.Xaml.h>
 #include <winrt/Microsoft.UI.Xaml.Controls.h>
+#include <winrt/Microsoft.UI.Xaml.Controls.Primitives.h>
 #include <winrt/Microsoft.UI.Xaml.Hosting.h>
 #include <windows.h>
+#undef FindText
+#undef FindTextW
+#undef FindTextA
+#include <winrt/Windows.UI.Text.h>
 #include <microsoft.ui.xaml.window.h>
 #undef GetCurrentTime
 #include <string>
@@ -21,6 +26,164 @@ using namespace winrt::Microsoft::UI::Xaml;
 using namespace winrt::Microsoft::UI::Xaml::Controls;
 
 #include <fstream>
+#include <tlhelp32.h>
+
+static void LogGui(const std::string& msg);
+
+static bool IsEngineRunning()
+{
+    if (GuiIpcIsConnected()) return true;
+    HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (hSnap != INVALID_HANDLE_VALUE) {
+        PROCESSENTRY32W pe = { sizeof(pe) };
+        if (Process32FirstW(hSnap, &pe)) {
+            do {
+                if (_wcsicmp(pe.szExeFile, L"TaskbarEngine.exe") == 0) {
+                    CloseHandle(hSnap);
+                    return true;
+                }
+            } while (Process32NextW(hSnap, &pe));
+        }
+        CloseHandle(hSnap);
+    }
+    return false;
+}
+
+static bool StartEngineProcess()
+{
+    wchar_t exe_path[MAX_PATH] = { 0 };
+    if (!GetModuleFileNameW(NULL, exe_path, MAX_PATH)) return false;
+    wchar_t* last_slash = wcsrchr(exe_path, L'\\');
+    if (last_slash) *last_slash = L'\0';
+
+    const wchar_t* candidates[] = {
+        L"\\TaskbarEngine.exe",
+        L"\\..\\TaskbarEngine.exe",
+        L"\\..\\bin\\TaskbarEngine.exe",
+        L"\\..\\..\\bin\\TaskbarEngine.exe"
+    };
+
+    std::wstring found_exe;
+    for (const wchar_t* cand : candidates) {
+        std::wstring full = std::wstring(exe_path) + cand;
+        wchar_t canon[MAX_PATH] = { 0 };
+        if (GetFullPathNameW(full.c_str(), MAX_PATH, canon, NULL)) {
+            if (GetFileAttributesW(canon) != INVALID_FILE_ATTRIBUTES) {
+                found_exe = canon;
+                break;
+            }
+        }
+    }
+
+    if (found_exe.empty()) {
+        found_exe = L"TaskbarEngine.exe";
+    }
+
+    STARTUPINFOW si = { sizeof(si) };
+    PROCESS_INFORMATION pi = { 0 };
+    wchar_t work_dir[MAX_PATH] = { 0 };
+    wcscpy_s(work_dir, MAX_PATH, found_exe.c_str());
+    wchar_t* p = wcsrchr(work_dir, L'\\');
+    if (p) *p = L'\0';
+
+    BOOL ok = CreateProcessW(
+        found_exe.c_str(),
+        NULL,
+        NULL,
+        NULL,
+        FALSE,
+        0,
+        NULL,
+        work_dir[0] ? work_dir : NULL,
+        &si,
+        &pi
+    );
+
+    if (ok) {
+        CloseHandle(pi.hProcess);
+        CloseHandle(pi.hThread);
+        return true;
+    }
+    return false;
+}
+
+static bool StopEngineProcess()
+{
+    // Try clean IPC shutdown first so plugins unload cleanly from explorer.exe
+    if (GuiIpcIsConnected()) {
+        GuiIpcShutdown();
+        Sleep(150); // allow short grace period for plugins to unload
+    }
+
+    bool killed = false;
+    HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (hSnap != INVALID_HANDLE_VALUE) {
+        PROCESSENTRY32W pe = { sizeof(pe) };
+        if (Process32FirstW(hSnap, &pe)) {
+            do {
+                if (_wcsicmp(pe.szExeFile, L"TaskbarEngine.exe") == 0) {
+                    HANDLE hProc = OpenProcess(PROCESS_TERMINATE, FALSE, pe.th32ProcessID);
+                    if (hProc) {
+                        TerminateProcess(hProc, 0);
+                        CloseHandle(hProc);
+                        killed = true;
+                    }
+                }
+            } while (Process32NextW(hSnap, &pe));
+        }
+        CloseHandle(hSnap);
+    }
+    return killed;
+}
+
+static bool RestartExplorerProcess()
+{
+    LogGui("RestartExplorerProcess invoked");
+    // Terminate existing explorer.exe processes
+    HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (hSnap != INVALID_HANDLE_VALUE) {
+        PROCESSENTRY32W pe = { sizeof(pe) };
+        if (Process32FirstW(hSnap, &pe)) {
+            do {
+                if (_wcsicmp(pe.szExeFile, L"explorer.exe") == 0) {
+                    HANDLE hProc = OpenProcess(PROCESS_TERMINATE, FALSE, pe.th32ProcessID);
+                    if (hProc) {
+                        TerminateProcess(hProc, 0);
+                        CloseHandle(hProc);
+                    }
+                }
+            } while (Process32NextW(hSnap, &pe));
+        }
+        CloseHandle(hSnap);
+    }
+
+    Sleep(600);
+
+    // Launch explorer.exe cleanly in the interactive shell
+    wchar_t winDir[MAX_PATH];
+    if (GetWindowsDirectoryW(winDir, MAX_PATH)) {
+        std::wstring expPath = std::wstring(winDir) + L"\\explorer.exe";
+
+        SHELLEXECUTEINFOW sei = { sizeof(sei) };
+        sei.fMask = SEE_MASK_DOENVSUBST | SEE_MASK_FLAG_NO_UI;
+        sei.lpFile = expPath.c_str();
+        sei.nShow = SW_SHOWNORMAL;
+        if (ShellExecuteExW(&sei)) {
+            LogGui("explorer.exe restarted via ShellExecuteExW");
+            return true;
+        }
+
+        STARTUPINFOW si = { sizeof(si) };
+        PROCESS_INFORMATION pi = { 0 };
+        if (CreateProcessW(expPath.c_str(), NULL, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
+            CloseHandle(pi.hProcess);
+            CloseHandle(pi.hThread);
+            LogGui("explorer.exe restarted via CreateProcessW");
+            return true;
+        }
+    }
+    return false;
+}
 
 static void LogGui(const std::string& msg)
 {
@@ -86,14 +249,21 @@ struct App : ApplicationT<App, winrt::Microsoft::UI::Xaml::Markup::IXamlMetadata
 
         NavigationView nav;
         nav.PaneDisplayMode(NavigationViewPaneDisplayMode::Left);
+        nav.IsSettingsVisible(false);
         
         Frame contentFrame;
         
-        NavigationViewItem aboutItem;
-        aboutItem.Content(box_value(L"About"));
-        aboutItem.Icon(SymbolIcon(Symbol::Help));
-        aboutItem.Tag(box_value(L"About"));
-        nav.MenuItems().Append(aboutItem);
+        NavigationViewItem hoverItem;
+        hoverItem.Content(box_value(L"Icon Hover & Physics"));
+        hoverItem.Icon(SymbolIcon(Symbol::Zoom));
+        hoverItem.Tag(box_value(L"icon_hover"));
+        nav.MenuItems().Append(hoverItem);
+
+        NavigationViewItem resizeItem;
+        resizeItem.Content(box_value(L"Taskbar Resize"));
+        resizeItem.Icon(SymbolIcon(Symbol::DockBottom));
+        resizeItem.Tag(box_value(L"taskbar_resize"));
+        nav.MenuItems().Append(resizeItem);
 
         auto schemaOpt = GuiIpcGetSettings();
         if (schemaOpt.has_value()) {
@@ -106,17 +276,25 @@ struct App : ApplicationT<App, winrt::Microsoft::UI::Xaml::Markup::IXamlMetadata
                         cJSON* nameNode = cJSON_GetObjectItem(plugin, "name");
                         if (nameNode && cJSON_IsString(nameNode) && nameNode->valuestring) {
                             std::string nameStr = nameNode->valuestring;
-                            NavigationViewItem item;
-                            item.Content(box_value(to_hstring(nameStr)));
-                            item.Icon(SymbolIcon(Symbol::Setting));
-                            item.Tag(box_value(to_hstring(nameStr)));
-                            nav.MenuItems().Append(item);
+                            if (nameStr != "icon_hover" && nameStr != "taskbar_resize") {
+                                NavigationViewItem item;
+                                item.Content(box_value(to_hstring(nameStr)));
+                                item.Icon(SymbolIcon(Symbol::Setting));
+                                item.Tag(box_value(to_hstring(nameStr)));
+                                nav.MenuItems().Append(item);
+                            }
                         }
                     }
                 }
                 cJSON_Delete(root);
             }
         }
+
+        NavigationViewItem aboutItem;
+        aboutItem.Content(box_value(L"About"));
+        aboutItem.Icon(SymbolIcon(Symbol::Help));
+        aboutItem.Tag(box_value(L"About"));
+        nav.FooterMenuItems().Append(aboutItem);
         
         nav.SelectionChanged([contentFrame](NavigationView const&, NavigationViewSelectionChangedEventArgs const& args) {
             auto item = args.SelectedItem().as<NavigationViewItem>();
@@ -153,8 +331,87 @@ struct App : ApplicationT<App, winrt::Microsoft::UI::Xaml::Markup::IXamlMetadata
             }
         });
         
+        // Engine Status and Control Header
+        StackPanel headerPanel;
+        headerPanel.Orientation(Orientation::Horizontal);
+        headerPanel.Spacing(16);
+        headerPanel.Padding(Thickness{ 0, 8, 24, 8 });
+
+        TextBlock statusIndicator;
+        statusIndicator.VerticalAlignment(VerticalAlignment::Center);
+        statusIndicator.FontSize(14.0);
+        statusIndicator.FontWeight(winrt::Windows::UI::Text::FontWeights::SemiBold());
+
+        Button startStopBtn;
+        startStopBtn.Padding(Thickness{ 16, 6, 16, 6 });
+
+        Button restartBtn;
+        restartBtn.Content(box_value(L"Restart Engine"));
+        restartBtn.Padding(Thickness{ 16, 6, 16, 6 });
+
+        Button restartExplorerBtn;
+        restartExplorerBtn.Content(box_value(L"Restart Explorer"));
+        restartExplorerBtn.Padding(Thickness{ 16, 6, 16, 6 });
+
+        auto updateEngineStatusUI = [statusIndicator, startStopBtn, restartBtn, restartExplorerBtn]() {
+            bool running = IsEngineRunning();
+            if (running) {
+                statusIndicator.Text(L"● Engine: Running");
+                startStopBtn.Content(box_value(L"Stop Engine"));
+                restartBtn.Visibility(Visibility::Visible);
+                restartExplorerBtn.Visibility(Visibility::Collapsed);
+            } else {
+                statusIndicator.Text(L"○ Engine: Stopped");
+                startStopBtn.Content(box_value(L"Start Engine"));
+                restartBtn.Visibility(Visibility::Collapsed);
+                restartExplorerBtn.Visibility(Visibility::Visible);
+            }
+        };
+
+        updateEngineStatusUI();
+
+        startStopBtn.Click([updateEngineStatusUI](IInspectable const&, RoutedEventArgs const&) {
+            if (IsEngineRunning()) {
+                StopEngineProcess();
+            } else {
+                StartEngineProcess();
+            }
+            Sleep(250);
+            updateEngineStatusUI();
+        });
+
+        restartBtn.Click([updateEngineStatusUI](IInspectable const&, RoutedEventArgs const&) {
+            StopEngineProcess();
+            Sleep(400);
+            StartEngineProcess();
+            Sleep(250);
+            updateEngineStatusUI();
+        });
+
+        restartExplorerBtn.Click([statusIndicator](IInspectable const&, RoutedEventArgs const&) {
+            statusIndicator.Text(L"Restarting Explorer...");
+            RestartExplorerProcess();
+            Sleep(500);
+            statusIndicator.Text(L"○ Engine: Stopped (Explorer Restarted)");
+        });
+
+        auto engineTimer = std::make_shared<DispatcherTimer>();
+        engineTimer->Interval(std::chrono::seconds(1));
+        engineTimer->Tick([updateEngineStatusUI, engineTimer](IInspectable const&, IInspectable const&) {
+            updateEngineStatusUI();
+        });
+        engineTimer->Start();
+
+        headerPanel.Children().Append(statusIndicator);
+        headerPanel.Children().Append(startStopBtn);
+        headerPanel.Children().Append(restartBtn);
+        headerPanel.Children().Append(restartExplorerBtn);
+
+        nav.Header(headerPanel);
+        
         nav.Content(contentFrame);
-        nav.SelectedItem(aboutItem);
+        nav.SelectedItem(hoverItem);
+        contentFrame.Content(CreateSettingsPage("icon_hover", "{}"));
         
         m_window.Content(nav);
         LogGui("Activating window...");

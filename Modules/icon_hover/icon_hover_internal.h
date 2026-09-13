@@ -30,6 +30,15 @@ typedef struct TE_HoverConfig {
     int radius;                     /**< Effect radius in pixels (40 - 300). */
     TE_MagnifyCurveType curve;      /**< Falloff curve type. */
     int speed_ms;                   /**< Settle animation duration in milliseconds (50 - 500). */
+    int bounce_enabled;             /**< Non-zero if notification bounce is enabled. */
+    float bounce_strength;          /**< Upward velocity magnitude for bounce impulse (200 - 1500). */
+    int keep_on_top;                /**< Non-zero to ensure DComp overlay stays topmost above taskbar window. */
+    int tilt_enabled;               /**< Non-zero if 3D tilt perspective is enabled. */
+    float max_tilt_angle;           /**< Peak tilt angle in degrees (0 - 45). */
+    int drag_drop_enabled;          /**< Non-zero if drag-and-drop drop zone physics is enabled. */
+    float drag_recession_scale;     /**< Scale multiplier when icon is held/dragged (0.50 - 1.00). */
+    float drop_zone_push;           /**< Horizontal push distance in pixels during drag (10 - 120). */
+    wchar_t start_image_path[MAX_PATH]; /**< Custom start button image file path (PNG or SVG). */
 } TE_HoverConfig;
 
 /**
@@ -39,6 +48,7 @@ typedef struct TE_HoverMouseState {
     float cursor_x;                 /**< Current cursor X position (screen coords). */
     float cursor_y;                 /**< Current cursor Y position (screen coords). */
     int is_in_taskbar;              /**< Non-zero if mouse is currently inside taskbar bounds. */
+    int is_dragging;                /**< Non-zero if mouse drag operation is active. */
     int is_settling;                /**< Non-zero if settle animation is in progress. */
     float settle_progress;          /**< Settle interpolation factor [0, 1]. */
     uint64_t last_mousemove_qpc;    /**< QPC timestamp of last WM_MOUSEMOVE received. */
@@ -50,7 +60,7 @@ typedef struct TE_HoverMouseState {
  * at max_scale 2.0x, with antialiasing clearance.
  * Scaled at runtime via: (TE_HOVER_HEADROOM_BASE_PX * dpi) / 96
  */
-#define TE_HOVER_HEADROOM_BASE_PX 64
+#define TE_HOVER_HEADROOM_BASE_PX 1024
 
 /**
  * Taskbar geometry information.
@@ -76,6 +86,16 @@ typedef struct TE_IconAnimState {
     float base_width;               /**< Base icon width (unscaled). */
     float base_height;              /**< Base icon height (unscaled). */
     uint64_t geometry_generation;   /**< Generation of geometry used for this animation. */
+    float targetOffsetY;            /**< Target vertical offset (natural rest at 0.0f). */
+    float currentOffsetY;           /**< Current vertical offset (negative = upward bounce). */
+    float velocityOffsetY;          /**< Vertical velocity for spring physics oscillator. */
+    float current_tilt_x;           /**< Current pitch tilt angle in radians. */
+    float target_tilt_x;            /**< Target pitch tilt angle in radians. */
+    float velocity_tilt_x;          /**< Pitch angular velocity for spring oscillator. */
+    float current_tilt_y;           /**< Current yaw tilt angle in radians. */
+    float target_tilt_y;            /**< Target yaw tilt angle in radians. */
+    float velocity_tilt_y;          /**< Yaw angular velocity for spring oscillator. */
+    float current_pos_x;            /**< Current smoothed horizontal offset for displacement. */
 } TE_IconAnimState;
 
 /**

@@ -79,22 +79,26 @@ void TE_DCompDestroyDevice(void);
 HRESULT TE_DCompBuildVisualTree(int count, const TE_IconElementInfo* elements, const HBITMAP* bitmaps, int baseline_y, int overlay_x, int overlay_y);
 
 /**
- * Update the scale and position transforms for all icon visuals.
+ * Update the scale, position, and 3D tilt transforms for all icon visuals.
  *
  * This is the hot-path called every frame during animation.
- * Sets IDCompositionScaleTransform and IDCompositionTranslateTransform
- * for each icon visual based on computed magnification scales.
+ * Sets IDCompositionScaleTransform, IDCompositionTranslateTransform,
+ * and 3D perspective matrix transform for each icon visual based on
+ * computed magnification scales and cursor tilt angles.
  *
  * @param count   Number of icons.
  * @param scales  Array of scale factors (1.0 = no magnification).
- * @param pos_x   Array of X position offsets.
- * @param pos_y   Array of Y position offsets.
+ * @param pos_x   Array of X position offsets (optional, may be NULL).
+ * @param pos_y   Array of Y position offsets (optional, may be NULL).
+ * @param tilt_x  Array of pitch tilt angles in radians (optional, may be NULL).
+ * @param tilt_y  Array of yaw tilt angles in radians (optional, may be NULL).
  * @return TE_S_OK on success.
  *
  * @note Performance: Must complete in < 500 µs for 20 icons.
  */
 HRESULT TE_DCompUpdateTransforms(int count, const float* scales,
-                                  const float* pos_x, const float* pos_y);
+                                  const float* pos_x, const float* pos_y,
+                                  const float* tilt_x, const float* tilt_y);
 
 /**
  * Set the overall overlay opacity.
@@ -114,6 +118,45 @@ HRESULT TE_DCompSetOverlayAlpha(float alpha);
  * @return TE_S_OK on success.
  */
 HRESULT TE_DCompCommit(void);
+
+/**
+ * Ensure the overlay window remains above the taskbar in the Z-order.
+ * Re-asserts HWND_TOPMOST if the taskbar window was elevated above the overlay.
+ *
+ * @param taskbar_hwnd Handle to Shell_TrayWnd.
+ */
+void TE_DCompEnsureTopmost(HWND taskbar_hwnd);
+
+/**
+ * Load a custom Start Button image file (PNG, JPG, BMP, ICO or SVG) from disk.
+ * Decodes the image and converts it into a Direct2D bitmap (ID2D1Bitmap).
+ *
+ * @param image_path Null-terminated absolute or relative file path to the image.
+ * @return TE_S_OK on success, TE_E_FAIL on failure, TE_E_INVALIDARG on NULL path.
+ */
+HRESULT TE_DCompLoadStartImage(const wchar_t* image_path);
+
+/**
+ * Enable or disable custom Start Button replacement in the DComp overlay.
+ *
+ * @param enabled Non-zero to enable, 0 to disable.
+ */
+void TE_DCompSetCustomStartButtonEnabled(int enabled);
+
+/**
+ * Query whether custom Start Button replacement is currently enabled.
+ *
+ * @return Non-zero if enabled, 0 if disabled.
+ */
+int TE_DCompIsCustomStartButtonEnabled(void);
+
+/**
+ * Get the current screen-space bounding rectangle of the custom Start Button visual.
+ *
+ * @param out_rect Pointer to RECT receiving screen coordinates.
+ * @return Non-zero if valid, 0 if no custom Start button is active.
+ */
+int TE_DCompGetStartButtonBounds(RECT* out_rect);
 
 #ifdef __cplusplus
 }

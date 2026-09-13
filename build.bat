@@ -2,8 +2,10 @@
 setlocal
 
 rem Clean conflicting GCC paths from PATH if present
-set PATH=%PATH:C:\Users\FEZ NASEER\Codes\C\bin;=%
-set PATH=%PATH:C:\Users\FEZ NASEER\Codes\C\bin=%
+set "PATH=%PATH:C:\Users\FEZ NASEER\Codes\C\bin;=%"
+set "PATH=%PATH:C:\Users\FEZ NASEER\Codes\C\bin=%"
+set "PATH=%PATH:C:\Users\FEZNAS~1\Codes\C\bin;=%"
+set "PATH=%PATH:C:\Users\FEZNAS~1\Codes\C\bin=%"
 
 rem Setup MSVC environment
 if exist "D:\Extras\ES\msvc\setup_x64.bat" (

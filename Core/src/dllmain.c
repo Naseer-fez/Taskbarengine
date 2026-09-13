@@ -102,6 +102,7 @@ LRESULT CALLBACK TE_GetMsgHookProc(int nCode, WPARAM wParam, LPARAM lParam)
                 TE_TaskbarMouseData mouse_data;
                 mouse_data.cursor_pos = msg->pt;
                 mouse_data.is_in_taskbar = TRUE;
+                mouse_data.is_dragging = ((msg->wParam & MK_LBUTTON) != 0) || ((GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0);
                 TE_EventDispatchFire(TE_EVENT_TASKBAR_MOUSE, &mouse_data);
             }
         }

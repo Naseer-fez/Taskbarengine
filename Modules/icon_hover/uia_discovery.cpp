@@ -157,7 +157,12 @@ static TE_TaskbarElementType ClassifyElement(IUIAutomation* uia, IUIAutomationEl
     const wchar_t* system_patterns[] = {L"TaskView", L"TaskViewButton", L"Widgets", L"Weather", L"People", L"InputIndicator"};
     const wchar_t* notify_patterns[] = {L"Notification", L"Notify", L"Clock", L"Tray"};
     
-    if (MatchesAny(start_patterns, 2) || MatchesAny(search_patterns, 4) || 
+    if (MatchesAny(start_patterns, 2)) {
+        if (name) SysFreeString(name);
+        return TE_ELEM_START_BUTTON;
+    }
+    
+    if (MatchesAny(search_patterns, 4) || 
         MatchesAny(system_patterns, 6) || MatchesAny(notify_patterns, 4)) {
         if (name) SysFreeString(name);
         return TE_ELEM_SHELL_CONTROL;
@@ -322,7 +327,7 @@ HRESULT TE_UiaDiscoverIcons(HWND taskbar_hwnd, TE_IconElementCache* out_cache)
         btn->get_CurrentClassName(&class_name);
 
         TE_TaskbarElementType type = ClassifyElement(uia, btn, bounds, auto_id, class_name);
-        if (type == TE_ELEM_APP_ICON) {
+        if (type == TE_ELEM_APP_ICON || type == TE_ELEM_START_BUTTON) {
             TE_IconElementInfo* info = &out_cache->items[icon_count];
             info->buttonRect = bounds;
             DiscoverGlyphRect(uia, btn, bounds, &info->glyphRect);
@@ -365,4 +370,44 @@ void TE_UiaCacheInvalidate(TE_IconElementCache* cache)
     if (cache) {
         cache->last_update_qpc = 0;
     }
+}
+
+HRESULT TE_UiaHideStartButton(HWND taskbar_hwnd, BOOL hide)
+{
+    if (!taskbar_hwnd) return TE_E_INVALIDARG;
+
+    HRESULT result = TE_S_FALSE;
+
+    /* 1. Check direct child Start button HWND on primary taskbar */
+    HWND start_hwnd = FindWindowExW(taskbar_hwnd, NULL, L"Start", NULL);
+    if (start_hwnd) {
+        ShowWindow(start_hwnd, hide ? SW_HIDE : SW_SHOW);
+        result = TE_S_OK;
+    }
+
+    /* 2. Check child Start button in secondary taskbars if present */
+    HWND sec_tray = FindWindowW(L"Shell_SecondaryTrayWnd", NULL);
+    while (sec_tray) {
+        HWND sec_start = FindWindowExW(sec_tray, NULL, L"Start", NULL);
+        if (sec_start) {
+            ShowWindow(sec_start, hide ? SW_HIDE : SW_SHOW);
+            result = TE_S_OK;
+        }
+        sec_tray = FindWindowExW(NULL, sec_tray, L"Shell_SecondaryTrayWnd", NULL);
+    }
+
+    /* 3. Search children of taskbar for windows with Start class or window text */
+    EnumChildWindows(taskbar_hwnd, [](HWND child, LPARAM lParam) -> BOOL {
+        wchar_t cls[64] = {};
+        wchar_t text[64] = {};
+        GetClassNameW(child, cls, 64);
+        GetWindowTextW(child, text, 64);
+        if (_wcsicmp(cls, L"Start") == 0 || _wcsicmp(text, L"Start") == 0) {
+            BOOL should_hide = (BOOL)lParam;
+            ShowWindow(child, should_hide ? SW_HIDE : SW_SHOW);
+        }
+        return TRUE;
+    }, (LPARAM)hide);
+
+    return result;
 }
