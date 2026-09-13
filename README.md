@@ -1,85 +1,112 @@
 # TaskbarEngine
 
-> [!WARNING]
-> **V2 Reconstruction in Progress**
-> This repository is currently undergoing a complete V2 reconstruction on the `V2` branch. The V1 codebase has been archived, and we are currently implementing a new highly-optimized architecture (Two-process model, zero-latency DirectComposition rendering, and strict C17 Plugin ABI). Please see the `V2` branch and `implementations/` directory for the latest technical specifications and roadmap.
+[![Platform](https://img.shields.io/badge/Platform-Windows%2011%20(22H2--24H2)-0078D4?logo=windows)](https://www.microsoft.com/windows)
+[![C Standard](https://img.shields.io/badge/Standard-C17%20%2F%20C%2B%2B17-blue.svg)](CMakeLists.txt)
+[![Compiler](https://img.shields.io/badge/Compiler-MSVC%20%2F%20Clang--cl-green.svg)](build.md)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-[![Build Status](https://dev.azure.com/TaskbarEngine/TaskbarEngine/_apis/build/status/TaskbarEngine-CI?branchName=main)](https://dev.azure.com/TaskbarEngine/TaskbarEngine)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Platform](https://img.shields.io/badge/Platform-Windows%2011%20(22H2--24H2)-lightgrey.svg)](Docs/00_Project_Overview.md)
-
-**TaskbarEngine** is a lightweight, high-performance C17/C++17 engine engineered to customize and extend the Windows 11 Taskbar. It utilizes DirectComposition hardware overlays for zero-latency rendering and executes directly within the `explorer.exe` process space via targeted `WH_CBT` hook injection.
+**TaskbarEngine** is a lightweight, hardware-accelerated systems utility designed to customize and enhance the Windows 11 taskbar. By executing directly within the `explorer.exe` process space via targeted `WH_CBT` hook injection and utilizing DirectComposition hardware overlays, TaskbarEngine delivers fluid visual modifications and geometry control with zero perceptible latency and negligible system impact.
 
 ---
 
-## Key Highlights
+## Technical Highlights
 
-- **Near-Zero Overhead:** 0% CPU at idle, < 0.5% average CPU during active animations, < 10 MB RAM.
-- **Hardware-Accelerated Visuals:** DirectComposition overlays with sub-millisecond commit latency and smooth 60+ FPS animations.
-- **Pure C Plugin Architecture:** Strict C17 ABI (`te_plugin.h`) with SEH crash containment and dynamic vtable lifecycle.
-- **Dynamic Configuration:** JSONC configuration (`config.jsonc`) with comments, directory change watchers, and atomic hot-reloading without restarting Explorer.
-- **WinUI 3 Settings GUI:** Auto-generated settings interface mapped dynamically from plugin metadata.
-- **Seamless Recovery:** Automatic re-hook and state restoration across Explorer restarts and shell crashes.
+- **Hardware-Accelerated Visuals:** DirectComposition overlays synchronized with DWM commit cycles, enabling fluid $60\text{--}144\text{ FPS}$ animations without reparenting native XAML UI elements.
+- **Near-Zero System Footprint:** Uses $0\%$ CPU at idle, $<0.5\%$ average CPU during active physics transitions, and $<10\text{ MB}$ working set memory.
+- **Pure C17 Plugin ABI:** A strictly versioned, frozen function-pointer interface ([`te_plugin.h`](file:///d:/CODE/Utlities/Taskbar/SDK/include/sdk/te_plugin.h)) eliminating C++ name mangling, runtime mismatch hazards, and fragile base class issues.
+- **Fault-Isolated Runtime:** Plugin boundary crossings are guarded by Win32 Structured Exception Handling (`__try` / `__except`). Rogue plugins are automatically quarantined, preventing Explorer crashes.
+- **Zero-Restart Live Reloading:** Non-blocking directory watchers (`ReadDirectoryChangesW`) and Named Pipe IPC allow real-time parameter tuning without restarting Windows Explorer.
+- **Resilient Crash Recovery:** Automatic hook re-establishment and state synchronization across shell restarts, display topology changes, and DPI adjustments.
 
 ---
 
-## Included Plugins
+## Deep-Dive Documentation
 
-| Plugin | Version | Description | Key Settings |
+For comprehensive engineering specifications, architecture diagrams, and compilation workflows, refer to the dedicated documentation:
+
+- 🏛️ **[System Architecture & Internals (`architect.md`)](architect.md)**  
+  Detailed coverage of the two-process runtime model, targeted injection pipeline, phase-split loader lock avoidance, DirectComposition rendering pipeline, IPC binary protocol, and exception containment.
+
+- 🛠️ **[Build & Customization Guide (`build.md`)](build.md)**  
+  Complete toolchain prerequisites, MSVC and Clang-cl CMake presets, automated packaging, step-by-step configuration tuning, and a complete tutorial on writing custom C17 plugins.
+
+---
+
+## How It Works
+
+TaskbarEngine operates via a multi-process cooperative architecture designed for performance and stability:
+
+```mermaid
+flowchart LR
+    TrayHost["TaskbarEngine.exe<br/>(Tray & Watchdog)"]
+    Explorer["explorer.exe<br/>(Shell Process)"]
+    Engine["EngineDLL.dll<br/>(Injected Core)"]
+    Plugins["Modules/*.dll<br/>(C17 Plugins)"]
+    SettingsUI["TaskbarEngineSettings.exe<br/>(WinUI 3 GUI)"]
+
+    TrayHost -- "1. WH_CBT Hook" --> Explorer
+    Explorer --> Engine
+    Engine --> Plugins
+    TrayHost -- "ShellExecute" --> SettingsUI
+    SettingsUI <-->|"Named Pipe (\\.\pipe\TaskbarEngine)"| Engine
+```
+
+1. **Targeted Injection:** `TaskbarEngine.exe` resolves the thread ID of `Shell_TrayWnd` and installs a localized `WH_CBT` hook. The hook is uninstalled immediately once `EngineDLL.dll` attaches, eliminating system-wide hooking overhead.
+2. **Subclassing & Lifecycle Management:** The core subclasses `Shell_TrayWnd` via `SetWindowSubclass` to intercept shell notifications and frame events directly on the Explorer GUI message pump.
+3. **Hardware Rendering:** Visual effects are applied via DirectComposition visual transform trees composed over taskbar elements, guaranteeing jitter-free hardware compositing.
+4. **Out-of-Process Management:** The tray host monitors Explorer process health via `RegisterWaitForSingleObject`, automatically reinjecting and restoring state if Explorer restarts.
+
+---
+
+## Shipped Plugins
+
+| Plugin | Dynamic Library | Description | Key Capabilities |
 |---|---|---|---|
-| **`taskbar_resize`** | `0.3.0` | Dynamically adjusts taskbar height, padding, and work area margins (`SPI_SETWORKAREA`). | `height` (24–72px), `padding`, `margins`, `icon_spacing` |
-| **`icon_hover`** | `0.4.0` | Fluid macOS-style magnification wave over taskbar icons using DirectComposition visual transforms. | `scale` (1.0–2.0x), `radius` (40–300px), `curve` (gaussian/cubic/linear/cosine), `speed_ms` |
+| **Taskbar Resize** | `taskbar_resize.dll` | Adjusts taskbar height, padding, work area offsets, and icon density. | Height customization ($24\text{--}72\text{px}$), `SPI_SETWORKAREA` broadcast, custom icon margins. |
+| **Icon Hover** | `icon_hover.dll` | macOS Dock-style magnification wave and physics over taskbar icons. | Dynamic magnification ($1.0\text{--}2.5\times$), gaussian/cubic falloff curves, spring rebound, perspective tilt, custom start button graphic. |
+| **Dock Physics** | `DockPhysics.dll` | Spring-damper physical interaction engine for icon translation. | Spring stiffness tuning, damping ratio, velocity-based overshoot. |
 
 ---
 
-## System Requirements
+## Quick Start
 
-- **Operating System:** Windows 11 64-bit (Version 22H2, 23H2, or 24H2; Builds 22621 through 26100).
-- **Architecture:** `x86_64` (AMD64 / Intel 64).
-- **Permissions:** Standard user rights (No administrative elevation required for normal operation).
+### 1. Installation
 
----
+1. Download the latest release package (`TaskbarEngine-v1.0.0.zip`) from the [Releases](https://github.com/Naseer-fez/Taskbarengine/releases) section.
+2. Extract the archive to your preferred directory (e.g. `C:\Tools\TaskbarEngine`).
+3. Run `TaskbarEngine.exe`.
+   - The application starts in your system notification tray.
+   - Administrative elevation is **not** required.
 
-## Quick Start & Installation
+### 2. Adjusting Settings
 
-1. **Download:** Download the latest `TaskbarEngine-v1.0.0.zip` from the releases page.
-2. **Extract:** Extract the ZIP package to any directory on your system (e.g., `D:\Programs\TaskbarEngine`).
-3. **Run:** Launch `TaskbarEngine.exe`.
-   - The engine will seamlessly inject into Explorer and place an icon in your system notification area (System Tray).
-   - An auto-start scheduled task (`TaskbarEngine_Logon`) will be registered to start the utility at user logon.
+You can customize TaskbarEngine via the graphical interface or directly through configuration files:
 
----
-
-## Configuration & Usage
-
-### 1. WinUI 3 Settings GUI
-- **Open Settings:** Double-click the TaskbarEngine tray icon or right-click and choose **Settings**.
-- Modify plugin toggles, sliders, and drop-downs. Changes take effect immediately in real-time.
-
-### 2. Manual JSONC Configuration
-Configuration is stored in `%LOCALAPPDATA%\TaskbarEngine\config.jsonc`:
+- **Graphical Interface:** Double-click the system tray icon or right-click and select **Settings** to launch the dynamic WinUI 3 interface.
+- **Direct Configuration:** Edit `%LOCALAPPDATA%\TaskbarEngine\config.jsonc`. Any saved changes take effect immediately without restarting Explorer:
 
 ```jsonc
 {
-  "version": 1,
   "core": {
     "log_level": "info",
-    "log_to_file": true
+    "log_max_files": 5
   },
-  "plugin": {
+  "plugins": {
     "taskbar_resize": {
       "enabled": true,
       "height": 48,
-      "padding": 4,
-      "margins": 0,
-      "icon_spacing": 8
+      "padding_top": 4,
+      "padding_bottom": 4,
+      "icon_spacing": 16
     },
     "icon_hover": {
       "enabled": true,
-      "scale": 1.35,
-      "radius": 130,
+      "max_scale": 1.75,
+      "radius": 160,
       "curve": "gaussian",
-      "speed_ms": 150
+      "speed_ms": 180,
+      "bounce_enabled": true,
+      "tilt_enabled": true
     }
   }
 }
@@ -90,59 +117,67 @@ Configuration is stored in `%LOCALAPPDATA%\TaskbarEngine\config.jsonc`:
 ## Building from Source
 
 ### Prerequisites
-- **Supported Compilers**: MSVC (`cl.exe`) or Clang-cl (`clang-cl.exe`) ONLY. MinGW, GCC, and GNU-compatible Clang are explicitly NOT supported due to ABI and Win32 COM requirements.
-- **Visual Studio 2022** (v17.4+ with *Desktop development with C++*)
-- **CMake** 3.25+
-- **Ninja** build system
-- **Windows 11 SDK** (10.0.22621.0 or newer)
-- **Windows App SDK** (1.5+ for WinUI 3 GUI)
+
+- **OS:** Windows 11 (Version 22H2 or higher, Build 22621+)
+- **Compiler:** MSVC 2022 (v17.4+) or Clang-cl (LLVM 16.0+)
+- **Build Tools:** CMake 3.25+ and Ninja
+- **Windows SDK:** 10.0.22621.0 or newer
 
 ### Build Commands
 
 ```powershell
-# Configure with MSVC Release Preset
-cmake -B build_msvc -G Ninja -DCMAKE_BUILD_TYPE=Release
+# 1. Clone repository
+git clone https://github.com/Naseer-fez/Taskbarengine.git
+cd Taskbarengine
 
-# Build all binaries (Engine, App, Plugins, Tests, Benchmarks)
-cmake --build build_msvc --config Release
+# 2. Configure release build with CMake preset
+cmake --preset msvc-release
 
-# Run Catch2 Unit Test Suite
-cd build_msvc
-ctest -C Release --output-on-failure
+# 3. Compile all binaries
+cmake --build --preset msvc-release
 
-# Run Google Micro-Benchmark Suite
-.\bin\te_benchmarks.exe
-
-# Package release ZIP
-powershell -File ..\Scripts\package.ps1 -BuildDir build_msvc -DestinationZip "..\TaskbarEngine-v1.0.0.zip"
+# 4. Execute unit test suite
+ctest --test-dir build/msvc-release --output-on-failure
 ```
+
+For full build configurations, ASan debugging, and packaging steps, see **[build.md](build.md)**.
 
 ---
 
-## Uninstallation
+## Clean Uninstallation
 
-To cleanly remove TaskbarEngine:
-1. Run `Scripts\uninstall.ps1` from the extracted directory or execute:
+To completely remove TaskbarEngine:
+
+1. Right-click the system tray icon and select **Exit**, or execute:
    ```powershell
    TaskbarEngine.exe --uninstall
    ```
-2. Delete the application directory.
+2. Delete the application directory and the configuration folder at `%LOCALAPPDATA%\TaskbarEngine`.
+
+All taskbar visual adjustments and work areas automatically revert to native Windows defaults.
 
 ---
 
-## Documentation
+## Repository Structure
 
-Full architectural specifications, design decisions, and component references are located in the `Docs/` directory:
-
-- [00_Project_Overview.md](Docs/00_Project_Overview.md) — High-level architecture and principles
-- [01_System_Architecture.md](Docs/01_System_Architecture.md) — Two-process model and hook injection
-- [04_Plugin_System.md](Docs/04_Plugin_System.md) — Pure C ABI and lifecycle contracts
-- [06_GUI.md](Docs/06_GUI.md) — WinUI 3 dynamic settings generation
-- [09_Rendering.md](Docs/09_Rendering.md) — DirectComposition overlay engine
-- [12_Performance.md](Docs/12_Performance.md) — Performance guarantees and measurement methodology
+```
+Taskbarengine/
+├── App/                 # Tray host application, watchdog, and logon scheduler
+├── Core/                # In-process engine core (subclass proc, plugin manager, IPC)
+├── Modules/             # Shipped plugin implementations (resize, hover, dock)
+├── SDK/                 # C17 plugin headers, JSONC parser, logging ring buffer
+├── Tests/               # Catch2 automated test suite
+├── Benchmarks/          # Google Benchmark performance validation suite
+├── Config/              # Default configuration templates and assets
+├── Docs/                # Comprehensive technical specification documents
+├── architect.md         # Architecture, internals, and IPC specifications
+├── build.md             # Compilation, customization, and plugin creation guide
+└── CMakeLists.txt       # Root build configuration
+```
 
 ---
 
 ## License
 
-TaskbarEngine is licensed under the [MIT License](LICENSE).
+TaskbarEngine is distributed under the terms of the [MIT License](LICENSE).
+
