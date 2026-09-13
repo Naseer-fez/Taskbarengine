@@ -1,0 +1,7 @@
+{
+    "max_scale": 5.0,
+    "spread_width": 2.0,
+    "spring_stiffness": 1024.0,
+    "spring_damping": 64.0,
+    "enable_secondary_monitors": true
+}

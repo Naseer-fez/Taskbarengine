@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <defs>
+    <linearGradient id="grad1" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#00D2FF" />
+      <stop offset="100%" stop-color="#0078D4" />
+    </linearGradient>
+    <linearGradient id="grad2" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0078D4" />
+      <stop offset="100%" stop-color="#004E8C" />
+    </linearGradient>
+    <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="8" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+  </defs>
+  <!-- Rounded tile background -->
+  <rect x="16" y="16" width="224" height="224" rx="48" fill="url(#grad2)" />
+  <rect x="20" y="20" width="216" height="216" rx="44" fill="#0E1626" opacity="0.85" />
+  
+  <!-- Four-tile start grid -->
+  <rect x="52" y="52" width="70" height="70" rx="14" fill="url(#grad1)" filter="url(#glow)" />
+  <rect x="134" y="52" width="70" height="70" rx="14" fill="url(#grad1)" />
+  <rect x="52" y="134" width="70" height="70" rx="14" fill="url(#grad1)" />
+  <rect x="134" y="134" width="70" height="70" rx="14" fill="url(#grad1)" filter="url(#glow)" />
+</svg>

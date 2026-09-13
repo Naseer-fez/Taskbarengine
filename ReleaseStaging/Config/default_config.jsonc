@@ -1,0 +1,32 @@
+{
+	"core":	{
+		"log_level":	"info",
+		"log_max_files":	5,
+		"log_max_size_mb":	5
+	},
+	"plugins":	{
+		"taskbar_resize":	{
+			"enabled":	true,
+			"height":	54,
+			"padding_top":	7,
+			"padding_bottom":	1,
+			"icon_spacing":	27
+		},
+		"icon_hover":	{
+			"enabled":	true,
+			"max_scale":	2.65,
+			"radius":	190,
+			"curve":	"linear",
+			"speed_ms":	500,
+			"bounce_enabled":	true,
+			"bounce_strength":	800,
+			"tilt_enabled":	true,
+			"max_tilt_angle":	20,
+			"drag_drop_enabled":	true,
+			"drag_recession_scale":	0.8,
+			"drop_zone_push":	50,
+			"keep_on_top":	true,
+			"start_image_path":	"Config/start_button.png"
+		}
+	}
+}
