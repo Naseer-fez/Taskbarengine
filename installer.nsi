@@ -41,9 +41,13 @@ Section "Install"
   SetOutPath "$INSTDIR\Modules\taskbar_transparency"
   File /nonfatal "ReleaseStaging\Modules\taskbar_transparency\*.*"
   
-  ; Create shortcut
+  ; Create shortcuts
   CreateShortcut "$SMPROGRAMS\${APPNAME}.lnk" "$INSTDIR\TaskbarEngineHost.exe"
   CreateShortcut "$DESKTOP\${APPNAME}.lnk" "$INSTDIR\TaskbarEngineHost.exe"
+  
+  ; Register startup entry (HKCU so no admin is needed at runtime to remove it)
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Run" \
+    "TaskbarEngine" '"$INSTDIR\TaskbarEngine.exe"'
   
   ; Write uninstaller
   WriteUninstaller "$INSTDIR\uninstall.exe"
@@ -53,5 +57,9 @@ Section "Uninstall"
   Delete "$INSTDIR\uninstall.exe"
   Delete "$SMPROGRAMS\${APPNAME}.lnk"
   Delete "$DESKTOP\${APPNAME}.lnk"
+  
+  ; Remove startup entry
+  DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "TaskbarEngine"
+  
   RMDir /r "$INSTDIR"
 SectionEnd

@@ -136,6 +136,62 @@ static bool StopEngineProcess()
     return killed;
 }
 
+// Returns the full path to TaskbarEngine.exe located next to the settings exe.
+static std::wstring GetEngineExePath()
+{
+    wchar_t exe_path[MAX_PATH] = { 0 };
+    if (!GetModuleFileNameW(NULL, exe_path, MAX_PATH)) return L"";
+    wchar_t* last_slash = wcsrchr(exe_path, L'\\');
+    if (!last_slash) return L"";
+    *(last_slash + 1) = L'\0';
+    return std::wstring(exe_path) + L"TaskbarEngine.exe";
+}
+
+static bool IsStartupEnabled()
+{
+    HKEY hKey = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER,
+                      L"Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+                      0, KEY_READ, &hKey) != ERROR_SUCCESS)
+        return false;
+
+    wchar_t buf[MAX_PATH] = { 0 };
+    DWORD size = sizeof(buf);
+    DWORD type = 0;
+    bool found = (RegQueryValueExW(hKey, L"TaskbarEngine", nullptr, &type,
+                                   reinterpret_cast<LPBYTE>(buf), &size) == ERROR_SUCCESS
+                  && type == REG_SZ);
+    RegCloseKey(hKey);
+    return found;
+}
+
+static bool SetStartupEnabled(bool enable)
+{
+    HKEY hKey = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER,
+                      L"Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+                      0, KEY_SET_VALUE, &hKey) != ERROR_SUCCESS)
+        return false;
+
+    bool ok = false;
+    if (enable) {
+        std::wstring path = GetEngineExePath();
+        if (!path.empty()) {
+            // Quote the path in case it contains spaces.
+            std::wstring quoted = L"\"" + path + L"\"";
+            ok = (RegSetValueExW(hKey, L"TaskbarEngine", 0, REG_SZ,
+                                 reinterpret_cast<const BYTE*>(quoted.c_str()),
+                                 static_cast<DWORD>((quoted.size() + 1) * sizeof(wchar_t)))
+                  == ERROR_SUCCESS);
+        }
+    } else {
+        LSTATUS st = RegDeleteValueW(hKey, L"TaskbarEngine");
+        ok = (st == ERROR_SUCCESS || st == ERROR_FILE_NOT_FOUND);
+    }
+    RegCloseKey(hKey);
+    return ok;
+}
+
 static bool RestartExplorerProcess()
 {
     LogGui("RestartExplorerProcess invoked");
@@ -406,6 +462,26 @@ struct App : ApplicationT<App, winrt::Microsoft::UI::Xaml::Markup::IXamlMetadata
         headerPanel.Children().Append(startStopBtn);
         headerPanel.Children().Append(restartBtn);
         headerPanel.Children().Append(restartExplorerBtn);
+
+        // Separator
+        TextBlock sep;
+        sep.Text(L"|");
+        sep.Opacity(0.3);
+        sep.VerticalAlignment(VerticalAlignment::Center);
+        sep.Margin(Thickness{ 4, 0, 4, 0 });
+        headerPanel.Children().Append(sep);
+
+        // Run at startup toggle
+        ToggleSwitch startupToggle;
+        startupToggle.Header(box_value(L"Run at Startup"));
+        startupToggle.OffContent(box_value(L"Off"));
+        startupToggle.OnContent(box_value(L"On"));
+        startupToggle.IsOn(IsStartupEnabled());
+        startupToggle.VerticalAlignment(VerticalAlignment::Center);
+        startupToggle.Toggled([](IInspectable const& sender, RoutedEventArgs const&) {
+            SetStartupEnabled(sender.as<ToggleSwitch>().IsOn());
+        });
+        headerPanel.Children().Append(startupToggle);
 
         nav.Header(headerPanel);
         
