@@ -79,6 +79,14 @@ void TE_UiaCacheInvalidate(TE_IconElementCache* cache);
  */
 HRESULT TE_UiaHideStartButton(HWND taskbar_hwnd, BOOL hide);
 
+/**
+ * Hide or restore the native Windows Start Button on all taskbars (primary and secondary).
+ *
+ * @param hide TRUE to hide native Start Buttons, FALSE to restore.
+ * @return TE_S_OK on success.
+ */
+HRESULT TE_UiaHideStartButtonAll(BOOL hide);
+
 #ifdef __cplusplus
 }
 #endif

@@ -14,6 +14,8 @@
 #include <sdk/te_jsonc.h>
 #include <cJSON.h>
 #include <windows.h>
+#include <objbase.h>
+#include <commctrl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdarg.h>
@@ -132,9 +134,64 @@ static void ParseConfig(const cJSON* config) {
 
     node = cJSON_GetObjectItemCaseSensitive(config, "start_image_path");
     if (!node) node = cJSON_GetObjectItemCaseSensitive(config, "start_button_image");
-    if (cJSON_IsString(node) && node->valuestring && node->valuestring[0]) {
-        size_t converted = 0;
-        mbstowcs_s(&converted, g_hover_state.config.start_image_path, MAX_PATH, node->valuestring, _TRUNCATE);
+    if (node && cJSON_IsString(node)) {
+        if (node->valuestring && node->valuestring[0]) {
+            size_t converted = 0;
+            mbstowcs_s(&converted, g_hover_state.config.start_image_path, MAX_PATH, node->valuestring, _TRUNCATE);
+        } else {
+            g_hover_state.config.start_image_path[0] = L'\0';
+        }
+    } else if (!node) {
+        g_hover_state.config.start_image_path[0] = L'\0';
+    }
+
+    /* Dynamic Island Configuration */
+    const cJSON* di_node = cJSON_GetObjectItemCaseSensitive(config, "dynamic_island");
+    if (di_node && cJSON_IsObject(di_node)) {
+        node = cJSON_GetObjectItemCaseSensitive(di_node, "enabled");
+        if (cJSON_IsBool(node)) {
+            g_hover_state.config.dynamic_island.enabled = cJSON_IsTrue(node) ? TRUE : FALSE;
+        }
+
+        node = cJSON_GetObjectItemCaseSensitive(di_node, "padding_tray");
+        if (cJSON_IsNumber(node)) {
+            g_hover_state.config.dynamic_island.padding_tray = node->valueint;
+        }
+
+        node = cJSON_GetObjectItemCaseSensitive(di_node, "compact_width");
+        if (cJSON_IsNumber(node)) {
+            g_hover_state.config.dynamic_island.compact_width = node->valueint;
+        }
+
+        node = cJSON_GetObjectItemCaseSensitive(di_node, "expanded_width");
+        if (cJSON_IsNumber(node)) {
+            g_hover_state.config.dynamic_island.expanded_width = node->valueint;
+        }
+
+        node = cJSON_GetObjectItemCaseSensitive(di_node, "height");
+        if (cJSON_IsNumber(node)) {
+            g_hover_state.config.dynamic_island.height = node->valueint;
+        }
+
+        node = cJSON_GetObjectItemCaseSensitive(di_node, "corner_radius");
+        if (cJSON_IsNumber(node)) {
+            g_hover_state.config.dynamic_island.corner_radius = (float)node->valuedouble;
+        }
+
+        node = cJSON_GetObjectItemCaseSensitive(di_node, "announce_duration_ms");
+        if (cJSON_IsNumber(node)) {
+            g_hover_state.config.dynamic_island.announce_duration_ms = node->valueint;
+        }
+
+        node = cJSON_GetObjectItemCaseSensitive(di_node, "expand_duration_ms");
+        if (cJSON_IsNumber(node)) {
+            g_hover_state.config.dynamic_island.expand_duration_ms = node->valueint;
+        }
+
+        node = cJSON_GetObjectItemCaseSensitive(di_node, "collapse_duration_ms");
+        if (cJSON_IsNumber(node)) {
+            g_hover_state.config.dynamic_island.collapse_duration_ms = node->valueint;
+        }
     }
 }
 
@@ -251,79 +308,137 @@ static void QueryTaskbarHeight(void) {
     }
 }
 
-static void RebuildGeometry(void) {
-    HWND taskbar_hwnd = g_hover_state.ctx->taskbar_hwnd;
-    if (!taskbar_hwnd) return;
+static void DiscoverTaskbars(HWND out_hwnds[TE_MAX_MONITORS], int* out_count) {
+    int count = 0;
+    HWND primary = (g_hover_state.ctx && g_hover_state.ctx->taskbar_hwnd)
+                   ? g_hover_state.ctx->taskbar_hwnd
+                   : FindWindowW(L"Shell_TrayWnd", NULL);
+    if (primary && IsWindow(primary)) {
+        out_hwnds[count++] = primary;
+    }
 
-    GetWindowRect(taskbar_hwnd, &g_hover_state.geometry.taskbarRect);
+    HWND sec = NULL;
+    while ((sec = FindWindowExW(NULL, sec, L"Shell_SecondaryTrayWnd", NULL)) != NULL) {
+        if (!IsWindow(sec)) continue;
+        if (count < TE_MAX_MONITORS) {
+            BOOL dup = FALSE;
+            for (int i = 0; i < count; i++) {
+                if (out_hwnds[i] == sec) { dup = TRUE; break; }
+            }
+            if (!dup) {
+                out_hwnds[count++] = sec;
+            }
+        }
+    }
+    *out_count = count;
+}
 
-    HWND bridge = FindWindowExA(taskbar_hwnd, NULL, "Windows.UI.Composition.DesktopWindowContentBridge", NULL);
+static void RebuildGeometryForMonitor(int m) {
+    if (m < 0 || m >= TE_MAX_MONITORS) return;
+    TE_MonitorState* mon = &g_hover_state.monitors[m];
+    HWND tb = mon->taskbar_hwnd;
+    if (!tb || !IsWindow(tb)) return;
+
+    GetWindowRect(tb, &mon->geometry.taskbarRect);
+
+    HWND bridge = FindWindowExA(tb, NULL, "Windows.UI.Composition.DesktopWindowContentBridge", NULL);
     if (bridge) {
         RECT bridgeRect;
         GetWindowRect(bridge, &bridgeRect);
-        g_hover_state.geometry.bridgeOffsetY = bridgeRect.top - g_hover_state.geometry.taskbarRect.top;
+        mon->geometry.bridgeOffsetY = bridgeRect.top - mon->geometry.taskbarRect.top;
     } else {
-        g_hover_state.geometry.bridgeOffsetY = 0;
+        mon->geometry.bridgeOffsetY = 0;
     }
 
-    QueryTaskbarHeight();
-    g_hover_state.geometry.baselineY = g_hover_state.geometry.taskbarRect.bottom;
-    g_hover_state.geometry.headroom_y = (TE_HOVER_HEADROOM_BASE_PX * g_hover_state.current_dpi) / 96;
-    g_hover_state.geometry.generation++;
-    g_hover_state.geometry.valid = 1;
+    if (m == 0) {
+        QueryTaskbarHeight();
+    }
+    mon->geometry.taskbarHeight = g_hover_state.geometry.taskbarHeight;
+    mon->geometry.baselineY = mon->geometry.taskbarRect.bottom;
+    uint32_t dpi = mon->current_dpi ? mon->current_dpi : 96;
+    mon->geometry.headroom_y = (TE_HOVER_HEADROOM_BASE_PX * dpi) / 96;
+    mon->geometry.generation++;
+    mon->geometry.valid = 1;
+
+    if (m == 0) {
+        g_hover_state.geometry = mon->geometry;
+    }
 }
 
-/**
- * Rebuild icon discovery, capture, and visual tree.
- * Called on initial enable and when apps change (shell hook).
- */
-static void RebuildIconData(void) {
-    HWND taskbar_hwnd = g_hover_state.ctx->taskbar_hwnd;
-    if (!taskbar_hwnd) return;
+static void RebuildGeometry(void) {
+    if (g_hover_state.monitor_count > 0) {
+        for (int m = 0; m < g_hover_state.monitor_count; m++) {
+            if (g_hover_state.monitors[m].is_active) {
+                RebuildGeometryForMonitor(m);
+            }
+        }
+    } else {
+        HWND taskbar_hwnd = g_hover_state.ctx ? g_hover_state.ctx->taskbar_hwnd : NULL;
+        if (!taskbar_hwnd) return;
 
-    /* Stop timer to prevent concurrent DComp tree modification */
-    int was_active = TE_FrameLoopIsActive();
-    if (was_active) {
-        TE_FrameLoopStop();
+        GetWindowRect(taskbar_hwnd, &g_hover_state.geometry.taskbarRect);
+
+        HWND bridge = FindWindowExA(taskbar_hwnd, NULL, "Windows.UI.Composition.DesktopWindowContentBridge", NULL);
+        if (bridge) {
+            RECT bridgeRect;
+            GetWindowRect(bridge, &bridgeRect);
+            g_hover_state.geometry.bridgeOffsetY = bridgeRect.top - g_hover_state.geometry.taskbarRect.top;
+        } else {
+            g_hover_state.geometry.bridgeOffsetY = 0;
+        }
+
+        QueryTaskbarHeight();
+        g_hover_state.geometry.baselineY = g_hover_state.geometry.taskbarRect.bottom;
+        g_hover_state.geometry.headroom_y = (TE_HOVER_HEADROOM_BASE_PX * g_hover_state.current_dpi) / 96;
+        g_hover_state.geometry.generation++;
+        g_hover_state.geometry.valid = 1;
     }
+}
+
+#define WM_TE_ICONS_DISCOVERED (WM_APP + 142)
+#define SUBCLASS_HOVER_ID 0x5448
+
+typedef struct {
+    int monitor_index;
+    HWND taskbar_hwnd;
+    TE_IconElementCache cache;
+} DiscoveryPayload;
+
+static void FinishRebuildIconDataForMonitor(int m, const TE_IconElementCache* new_cache) {
+    if (m < 0 || m >= g_hover_state.monitor_count) return;
+    TE_MonitorState* mon = &g_hover_state.monitors[m];
+    HWND tb = mon->taskbar_hwnd;
+    if (!tb || !IsWindow(tb)) return;
 
     /* Save old animation state to preserve scales across rebuilds */
     TE_IconAnimState old_anim[TE_HOVER_MAX_ICONS];
     TE_IconElementInfo old_items[TE_HOVER_MAX_ICONS];
-    int old_count = g_hover_state.anim_count;
+    int old_count = mon->anim_count;
     if (old_count > 0) {
-        memcpy(old_anim, g_hover_state.anim, sizeof(TE_IconAnimState) * old_count);
-        memcpy(old_items, g_hover_state.icon_cache.items, sizeof(TE_IconElementInfo) * old_count);
+        memcpy(old_anim, mon->anim, sizeof(TE_IconAnimState) * old_count);
+        memcpy(old_items, mon->icon_cache.items, sizeof(TE_IconElementInfo) * old_count);
     }
 
-    /* Discover icons via UIA */
-    TE_UiaCacheInvalidate(&g_hover_state.icon_cache);
-    HRESULT hr = TE_UiaDiscoverIcons(taskbar_hwnd, &g_hover_state.icon_cache);
-    if (TE_FAILED(hr)) {
-        HoverLog(TE_LOG_WARNING, "UIA icon discovery failed");
-        if (was_active) TE_FrameLoopStart();
-        return;
-    }
+    memcpy(&mon->icon_cache, new_cache, sizeof(TE_IconElementCache));
 
-    uint32_t count = g_hover_state.icon_cache.count;
+    uint32_t count = mon->icon_cache.count;
     if (count == 0) {
-        HoverLog(TE_LOG_WARNING, "No taskbar icons discovered");
-        if (was_active) TE_FrameLoopStart();
+        HoverLog(TE_LOG_WARNING, "No taskbar icons discovered for monitor %d", m);
         return;
     }
 
     /* Initialize animation state from discovered bounds */
-    g_hover_state.anim_count = (int)count;
+    mon->anim_count = (int)count;
     for (uint32_t i = 0; i < count; i++) {
-        const RECT* b = &g_hover_state.icon_cache.items[i].buttonRect;
+        const RECT* b = &mon->icon_cache.items[i].buttonRect;
         float w = (float)(b->right - b->left);
         float h = (float)(b->bottom - b->top);
 
         float initial_scale = 1.0f;
         float initial_target = 1.0f;
-        
+
         for (int j = 0; j < old_count; j++) {
-            if (wcscmp(g_hover_state.icon_cache.items[i].app_id, old_items[j].app_id) == 0 ||
+            if (wcscmp(mon->icon_cache.items[i].app_id, old_items[j].app_id) == 0 ||
                 abs(b->left - old_items[j].buttonRect.left) < 10) {
                 initial_scale = old_anim[j].current_scale;
                 initial_target = old_anim[j].target_scale;
@@ -331,57 +446,197 @@ static void RebuildIconData(void) {
             }
         }
 
-        g_hover_state.anim[i].center_x = (float)b->left + w / 2.0f;
-        g_hover_state.anim[i].center_y = (float)b->top + h / 2.0f;
-        g_hover_state.anim[i].base_width = w;
-        g_hover_state.anim[i].base_height = h;
-        g_hover_state.anim[i].current_scale = initial_scale;
-        g_hover_state.anim[i].target_scale = initial_target;
-        g_hover_state.anim[i].geometry_generation = g_hover_state.geometry.generation;
-        g_hover_state.anim[i].current_tilt_x = 0.0f;
-        g_hover_state.anim[i].target_tilt_x = 0.0f;
-        g_hover_state.anim[i].velocity_tilt_x = 0.0f;
-        g_hover_state.anim[i].current_tilt_y = 0.0f;
-        g_hover_state.anim[i].target_tilt_y = 0.0f;
-        g_hover_state.anim[i].velocity_tilt_y = 0.0f;
-        g_hover_state.anim[i].current_pos_x = 0.0f;
+        mon->anim[i].center_x = (float)b->left + w / 2.0f;
+        mon->anim[i].center_y = (float)b->top + h / 2.0f;
+        mon->anim[i].base_width = w;
+        mon->anim[i].base_height = h;
+        mon->anim[i].current_scale = initial_scale;
+        mon->anim[i].target_scale = initial_target;
+        mon->anim[i].geometry_generation = mon->geometry.generation;
+        mon->anim[i].targetOffsetY = 0.0f;
+        mon->anim[i].currentOffsetY = 0.0f;
+        mon->anim[i].velocityOffsetY = 0.0f;
+        mon->anim[i].current_tilt_x = 0.0f;
+        mon->anim[i].target_tilt_x = 0.0f;
+        mon->anim[i].velocity_tilt_x = 0.0f;
+        mon->anim[i].current_tilt_y = 0.0f;
+        mon->anim[i].target_tilt_y = 0.0f;
+        mon->anim[i].velocity_tilt_y = 0.0f;
+        mon->anim[i].current_pos_x = 0.0f;
     }
 
     /* Capture icon bitmaps */
     HBITMAP bitmaps[TE_HOVER_MAX_ICONS] = { 0 };
     for (uint32_t i = 0; i < count; i++) {
-        if (g_hover_state.icon_cache.items[i].element_type == TE_ELEM_START_BUTTON) {
-            /* Custom start button uses loaded Direct2D bitmap, skip GDI icon_capture */
+        if (mon->icon_cache.items[i].element_type == TE_ELEM_START_BUTTON) {
             bitmaps[i] = NULL;
         } else {
             TE_IconCaptureGetBitmapWithBounds(
-                g_hover_state.icon_cache.items[i].app_id,
-                g_hover_state.icon_cache.items[i].icon_index,
-                &g_hover_state.icon_cache.items[i].glyphRect,
+                mon->icon_cache.items[i].app_id,
+                mon->icon_cache.items[i].icon_index,
+                &mon->icon_cache.items[i].glyphRect,
                 &bitmaps[i]
             );
         }
     }
 
-    /* Build/rebuild DComp visual tree */
-    int overlay_x = g_hover_state.geometry.taskbarRect.left;
-    int overlay_y = g_hover_state.geometry.taskbarRect.top - g_hover_state.geometry.headroom_y;
-    int baseline_y = g_hover_state.geometry.baselineY;
+    /* Build/rebuild DComp visual tree for this target */
+    int overlay_x = mon->geometry.taskbarRect.left + 1;
+    int overlay_y = mon->geometry.taskbarRect.top - mon->geometry.headroom_y + 1;
+    int baseline_y = mon->geometry.baselineY;
 
-    TE_DCompBuildVisualTree(
+    TE_DCompBuildVisualTreeForTarget(
+        mon->target_index,
         (int)count,
-        g_hover_state.icon_cache.items,
+        mon->icon_cache.items,
         bitmaps,
         baseline_y,
         overlay_x,
         overlay_y
     );
 
+    /* Mirror monitor 0 to global legacy state */
+    if (m == 0) {
+        g_hover_state.anim_count = mon->anim_count;
+        memcpy(g_hover_state.anim, mon->anim, sizeof(TE_IconAnimState) * count);
+        memcpy(&g_hover_state.icon_cache, &mon->icon_cache, sizeof(TE_IconElementCache));
+    }
+
+    HoverLog(TE_LOG_INFO, "Icon data rebuilt for monitor %d (target %d): %u icons",
+             m, mon->target_index, count);
+}
+
+static void RebuildIconDataForMonitor(int m) {
+    if (m < 0 || m >= g_hover_state.monitor_count) return;
+    TE_MonitorState* mon = &g_hover_state.monitors[m];
+    HWND tb = mon->taskbar_hwnd;
+    if (!tb || !IsWindow(tb)) return;
+
+    TE_IconElementCache temp_cache = {0};
+    HRESULT hr = TE_UiaDiscoverIcons(tb, &temp_cache);
+    if (TE_FAILED(hr)) {
+        HoverLog(TE_LOG_WARNING, "UIA icon discovery failed for monitor %d", m);
+        return;
+    }
+    FinishRebuildIconDataForMonitor(m, &temp_cache);
+}
+
+static DWORD WINAPI UiaDiscoveryThread(LPVOID lpParam) {
+    (void)lpParam;
+    CoInitializeEx(NULL, COINIT_MULTITHREADED);
+
+    for (int m = 0; m < g_hover_state.monitor_count; m++) {
+        if (!g_hover_state.monitors[m].is_active) continue;
+        HWND tb = g_hover_state.monitors[m].taskbar_hwnd;
+        if (!tb || !IsWindow(tb)) continue;
+
+        DiscoveryPayload* payload = (DiscoveryPayload*)calloc(1, sizeof(DiscoveryPayload));
+        if (payload) {
+            payload->monitor_index = m;
+            payload->taskbar_hwnd = tb;
+            TE_UiaDiscoverIcons(tb, &payload->cache);
+
+            HWND primary_tb = g_hover_state.monitors[0].taskbar_hwnd;
+            if (primary_tb) {
+                PostMessageW(primary_tb, WM_TE_ICONS_DISCOVERED, 0, (LPARAM)payload);
+            } else {
+                free(payload);
+            }
+        }
+    }
+
+    CoUninitialize();
+    return 0;
+}
+
+static LRESULT CALLBACK IconHoverSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData) {
+    (void)uIdSubclass; (void)dwRefData;
+    if (msg == WM_TE_ICONS_DISCOVERED) {
+        DiscoveryPayload* payload = (DiscoveryPayload*)lParam;
+        if (payload) {
+            int was_active = TE_FrameLoopIsActive();
+            if (was_active) {
+                TE_FrameLoopStop();
+            }
+            FinishRebuildIconDataForMonitor(payload->monitor_index, &payload->cache);
+            if (was_active) {
+                TE_FrameLoopStart();
+            }
+            free(payload);
+        }
+        return 0;
+    }
+    if (msg == WM_LBUTTONUP && TE_DCompIsCustomStartButtonEnabled()) {
+        POINT pt = { (short)LOWORD(lParam), (short)HIWORD(lParam) };
+        ClientToScreen(hwnd, &pt);
+        RECT sb_bounds;
+        if (TE_DCompGetStartButtonBounds(&sb_bounds) && PtInRect(&sb_bounds, pt)) {
+            PostMessageW(hwnd, WM_SYSCOMMAND, SC_TASKLIST, 0);
+        }
+    }
+    return DefSubclassProc(hwnd, msg, wParam, lParam);
+}
+
+/**
+ * Rebuild icon discovery, capture, and visual tree across all active displays.
+ * Called on initial enable and when apps change (shell hook).
+ */
+static void RebuildIconData(void) {
+    /* Stop timer to prevent concurrent DComp tree modification */
+    int was_active = TE_FrameLoopIsActive();
+    if (was_active) {
+        TE_FrameLoopStop();
+    }
+
+    if (g_hover_state.monitor_count > 0) {
+        for (int m = 0; m < g_hover_state.monitor_count; m++) {
+            if (g_hover_state.monitors[m].is_active) {
+                RebuildIconDataForMonitor(m);
+            }
+        }
+    } else {
+        /* Single monitor / legacy fallback */
+        HWND taskbar_hwnd = g_hover_state.ctx ? g_hover_state.ctx->taskbar_hwnd : NULL;
+        if (taskbar_hwnd) {
+            TE_UiaCacheInvalidate(&g_hover_state.icon_cache);
+            HRESULT hr = TE_UiaDiscoverIcons(taskbar_hwnd, &g_hover_state.icon_cache);
+            if (TE_SUCCEEDED(hr) && g_hover_state.icon_cache.count > 0) {
+                uint32_t count = g_hover_state.icon_cache.count;
+                g_hover_state.anim_count = (int)count;
+                for (uint32_t i = 0; i < count; i++) {
+                    const RECT* b = &g_hover_state.icon_cache.items[i].buttonRect;
+                    float w = (float)(b->right - b->left);
+                    float h = (float)(b->bottom - b->top);
+                    g_hover_state.anim[i].center_x = (float)b->left + w / 2.0f;
+                    g_hover_state.anim[i].center_y = (float)b->top + h / 2.0f;
+                    g_hover_state.anim[i].base_width = w;
+                    g_hover_state.anim[i].base_height = h;
+                    g_hover_state.anim[i].current_scale = 1.0f;
+                    g_hover_state.anim[i].target_scale = 1.0f;
+                    g_hover_state.anim[i].geometry_generation = g_hover_state.geometry.generation;
+                }
+                HBITMAP bitmaps[TE_HOVER_MAX_ICONS] = { 0 };
+                for (uint32_t i = 0; i < count; i++) {
+                    if (g_hover_state.icon_cache.items[i].element_type != TE_ELEM_START_BUTTON) {
+                        TE_IconCaptureGetBitmapWithBounds(
+                            g_hover_state.icon_cache.items[i].app_id,
+                            g_hover_state.icon_cache.items[i].icon_index,
+                            &g_hover_state.icon_cache.items[i].glyphRect,
+                            &bitmaps[i]
+                        );
+                    }
+                }
+                int overlay_x = g_hover_state.geometry.taskbarRect.left + 1;
+                int overlay_y = g_hover_state.geometry.taskbarRect.top - g_hover_state.geometry.headroom_y + 1;
+                int baseline_y = g_hover_state.geometry.baselineY;
+                TE_DCompBuildVisualTree((int)count, g_hover_state.icon_cache.items, bitmaps, baseline_y, overlay_x, overlay_y);
+            }
+        }
+    }
+
     if (was_active) {
         TE_FrameLoopStart();
     }
-
-    HoverLog(TE_LOG_INFO, "Icon data rebuilt: %u icons", count);
 }
 
 #ifndef HSHELL_REDRAW
@@ -403,11 +658,10 @@ static int StrCaseContains(const wchar_t* haystack, const wchar_t* needle) {
 }
 
 /**
- * Resolve an application HWND to its corresponding taskbar icon index.
+ * Resolve an application HWND to its corresponding monitor and taskbar icon index.
  */
-static int ResolveHwndToIconIndex(HWND hwnd) {
+static int ResolveHwndToMonitorAndIcon(HWND hwnd, int* out_monitor_index, int* out_icon_index) {
     if (!hwnd || !IsWindow(hwnd)) return -1;
-    if (g_hover_state.icon_cache.count == 0) return -1;
 
     DWORD pid = 0;
     GetWindowThreadProcessId(hwnd, &pid);
@@ -452,34 +706,58 @@ static int ResolveHwndToIconIndex(HWND hwnd) {
 
     GetWindowTextW(hwnd, window_title, 256);
 
-    /* Search through discovered icon cache */
-    for (uint32_t i = 0; i < g_hover_state.icon_cache.count; i++) {
-        const wchar_t* app_id = g_hover_state.icon_cache.items[i].app_id;
-        if (!app_id || !*app_id) continue;
+    /* Search through monitor caches */
+    int mon_count = (g_hover_state.monitor_count > 0) ? g_hover_state.monitor_count : 1;
+    for (int m = 0; m < mon_count; m++) {
+        const TE_IconElementCache* cache = (g_hover_state.monitor_count > 0)
+                                         ? &g_hover_state.monitors[m].icon_cache
+                                         : &g_hover_state.icon_cache;
+        for (uint32_t i = 0; i < cache->count; i++) {
+            const wchar_t* app_id = cache->items[i].app_id;
+            if (!app_id || !*app_id) continue;
 
-        if (aumid[0] && StrCaseContains(app_id, aumid)) {
-            return (int)i;
-        }
-        if (exe_path[0] && StrCaseContains(app_id, exe_path)) {
-            return (int)i;
-        }
-        if (exe_name[0] && StrCaseContains(app_id, exe_name)) {
-            return (int)i;
-        }
-        if (exe_base[0] && StrCaseContains(app_id, exe_base)) {
-            return (int)i;
-        }
-        if (window_title[0] && (StrCaseContains(app_id, window_title) || StrCaseContains(window_title, app_id))) {
-            return (int)i;
+            if ((aumid[0] && StrCaseContains(app_id, aumid)) ||
+                (exe_path[0] && StrCaseContains(app_id, exe_path)) ||
+                (exe_name[0] && StrCaseContains(app_id, exe_name)) ||
+                (exe_base[0] && StrCaseContains(app_id, exe_base)) ||
+                (window_title[0] && (StrCaseContains(app_id, window_title) || StrCaseContains(window_title, app_id)))) {
+                if (out_monitor_index) *out_monitor_index = m;
+                if (out_icon_index) *out_icon_index = (int)i;
+                return (int)i;
+            }
         }
     }
 
     /* Fallback: if only one icon is managed, map to it */
     if (g_hover_state.icon_cache.count == 1) {
+        if (out_monitor_index) *out_monitor_index = 0;
+        if (out_icon_index) *out_icon_index = 0;
         return 0;
     }
 
     return -1;
+}
+
+static int ResolveHwndToIconIndex(HWND hwnd) {
+    int m = 0, idx = -1;
+    return ResolveHwndToMonitorAndIcon(hwnd, &m, &idx);
+}
+
+static UINT_PTR s_shell_hook_rebuild_timer = 0;
+
+static VOID CALLBACK ShellHookDebounceProc(HWND hwnd, UINT uMsg, UINT_PTR idEvent, DWORD dwTime) {
+    (void)hwnd; (void)uMsg; (void)dwTime;
+    KillTimer(NULL, idEvent);
+    s_shell_hook_rebuild_timer = 0;
+    if (!g_hover_state.enabled) return;
+
+    HoverLog(TE_LOG_INFO, "Debounced shell hook timer fired, rebuilding icon cache");
+    for (int m = 0; m < g_hover_state.monitor_count; m++) {
+        TE_UiaCacheInvalidate(&g_hover_state.monitors[m].icon_cache);
+    }
+    TE_UiaCacheInvalidate(&g_hover_state.icon_cache);
+    TE_IconCaptureInvalidate();
+    RebuildIconData();
 }
 
 /**
@@ -500,12 +778,12 @@ static void OnShellHook(uint32_t type, const void* data, void* user_data) {
     if (msg == HSHELL_FLASH || ((msg & 0x8000) && ((msg & 0x7FFF) == HSHELL_REDRAW))) {
         if (!g_hover_state.config.bounce_enabled) return;
         HWND flash_hwnd = hook_data->target_hwnd;
-        int icon_index = ResolveHwndToIconIndex(flash_hwnd);
-        if (icon_index >= 0) {
+        int mon_index = 0, icon_index = -1;
+        if (ResolveHwndToMonitorAndIcon(flash_hwnd, &mon_index, &icon_index) >= 0) {
             float strength = g_hover_state.config.bounce_strength > 0.0f ? g_hover_state.config.bounce_strength : 600.0f;
-            HoverLog(TE_LOG_INFO, "Notification flash for HWND %p -> icon %d, triggering inertial bounce (strength=%.1f)",
-                     (void*)flash_hwnd, icon_index, strength);
-            TE_FrameLoopTriggerIconBounce(icon_index, strength);
+            HoverLog(TE_LOG_INFO, "Notification flash for HWND %p -> mon %d icon %d, triggering inertial bounce (strength=%.1f)",
+                     (void*)flash_hwnd, mon_index, icon_index, strength);
+            TE_FrameLoopTriggerIconBounceForMonitor(mon_index, icon_index, strength);
         } else {
             HoverLog(TE_LOG_DEBUG, "Notification flash for HWND %p could not be resolved to icon",
                      (void*)flash_hwnd);
@@ -521,10 +799,19 @@ static void OnShellHook(uint32_t type, const void* data, void* user_data) {
         return;
     }
 
-    HoverLog(TE_LOG_INFO, "Shell hook window change received (%d), rebuilding icon cache",
-             hook_data->shell_msg);
-    TE_IconCaptureInvalidate();
-    RebuildIconData();
+    /* Ignore shell hook messages originating from our own overlay windows */
+    for (int m = 0; m < g_hover_state.monitor_count; m++) {
+        if (g_hover_state.monitors[m].overlay_hwnd && hook_data->target_hwnd == g_hover_state.monitors[m].overlay_hwnd) {
+            return;
+        }
+    }
+
+    /* Debounce rapid bursts of window creations/destructions (250ms quiet period) to prevent UI thread lock */
+    if (s_shell_hook_rebuild_timer) {
+        KillTimer(NULL, s_shell_hook_rebuild_timer);
+        s_shell_hook_rebuild_timer = 0;
+    }
+    s_shell_hook_rebuild_timer = SetTimer(NULL, 0, 250, ShellHookDebounceProc);
 }
 
 /**
@@ -534,13 +821,27 @@ static void OnConfigChanged(uint32_t type, const void* data, void* user_data) {
     (void)type; (void)user_data;
     const TE_ConfigChangedData* changed = (const TE_ConfigChangedData*)data;
     ParseConfig((const cJSON*)changed->new_config);
+
     if (g_hover_state.config.start_image_path[0] != L'\0') {
         TE_DCompLoadStartImage(g_hover_state.config.start_image_path);
-        if (TE_DCompIsCustomStartButtonEnabled() && g_hover_state.ctx) {
-            TE_UiaHideStartButton(g_hover_state.ctx->taskbar_hwnd, TRUE);
+        if (TE_DCompIsCustomStartButtonEnabled()) {
+            TE_UiaHideStartButtonAll(TRUE);
+        } else {
+            TE_UiaHideStartButtonAll(FALSE);
         }
+    } else {
+        TE_DCompSetCustomStartButtonEnabled(0);
+        TE_UiaHideStartButtonAll(FALSE);
     }
+
     QueryTaskbarHeight();
+    TE_DynamicIslandUpdateConfig(&g_hover_state.config.dynamic_island);
+    if (g_hover_state.config.dynamic_island.enabled && !TE_DynamicIslandIsEnabled()) {
+        HWND primary_tb = g_hover_state.monitors[0].taskbar_hwnd;
+        TE_DynamicIslandEnable(primary_tb, g_hover_state.current_dpi);
+    } else if (!g_hover_state.config.dynamic_island.enabled && TE_DynamicIslandIsEnabled()) {
+        TE_DynamicIslandDisable();
+    }
     RebuildIconData();
     HoverLog(TE_LOG_INFO, "Config updated: max_scale=%.2f, radius=%d, curve=%d, speed_ms=%d",
              g_hover_state.config.max_scale, g_hover_state.config.radius,
@@ -558,10 +859,98 @@ static void OnTaskbarMouse(uint32_t type, const void* data, void* user_data) {
     if (!mouse_data) return;
 
     if (mouse_data->is_in_taskbar) {
-        TE_FrameLoopOnMouseMove((float)mouse_data->cursor_pos.x, (float)mouse_data->cursor_pos.y, mouse_data->is_dragging);
+        TE_FrameLoopOnMouseMoveEx((float)mouse_data->cursor_pos.x, (float)mouse_data->cursor_pos.y,
+                                  mouse_data->is_dragging, mouse_data->taskbar_hwnd);
     } else {
         TE_FrameLoopOnMouseLeave();
     }
+}
+
+/**
+ * Update monitor overlay windows and geometry when display or taskbar geometry changes.
+ */
+static void UpdateMonitors(void) {
+    TE_FrameLoopStop();
+
+    HWND discovered[TE_MAX_MONITORS] = { 0 };
+    int count = 0;
+    DiscoverTaskbars(discovered, &count);
+
+    /* 1. Remove monitors whose taskbars are no longer present */
+    for (int i = 1; i < g_hover_state.monitor_count; i++) {
+        HWND tb = g_hover_state.monitors[i].taskbar_hwnd;
+        BOOL found = FALSE;
+        for (int j = 0; j < count; j++) {
+            if (discovered[j] == tb) {
+                found = TRUE;
+                break;
+            }
+        }
+        if (!found && g_hover_state.monitors[i].is_active) {
+            if (g_hover_state.monitors[i].overlay_hwnd) {
+                TE_DCompRemoveTarget(g_hover_state.monitors[i].target_index);
+                TE_DCompDestroyOverlayWindow(g_hover_state.monitors[i].overlay_hwnd);
+                g_hover_state.monitors[i].overlay_hwnd = NULL;
+            }
+            g_hover_state.monitors[i].is_active = 0;
+        }
+    }
+
+    /* 2. Update existing monitors and add newly attached displays */
+    for (int j = 0; j < count; j++) {
+        HWND tb = discovered[j];
+        int existing_idx = -1;
+        for (int i = 0; i < g_hover_state.monitor_count; i++) {
+            if (g_hover_state.monitors[i].taskbar_hwnd == tb) {
+                existing_idx = i;
+                break;
+            }
+        }
+
+        if (existing_idx >= 0) {
+            RebuildGeometryForMonitor(existing_idx);
+            TE_MonitorState* mon = &g_hover_state.monitors[existing_idx];
+            int ox = mon->geometry.taskbarRect.left + 1;
+            int oy = mon->geometry.taskbarRect.top - mon->geometry.headroom_y + 1;
+            int ow = mon->geometry.taskbarRect.right - mon->geometry.taskbarRect.left - 1;
+            int oh = (mon->geometry.taskbarRect.bottom - mon->geometry.taskbarRect.top) + mon->geometry.headroom_y - 1;
+            TE_DCompMoveOverlayWindow(mon->overlay_hwnd, ox, oy, ow, oh);
+            mon->is_active = 1;
+        } else if (g_hover_state.monitor_count < TE_MAX_MONITORS) {
+            int new_idx = g_hover_state.monitor_count;
+            TE_MonitorState* mon = &g_hover_state.monitors[new_idx];
+            memset(mon, 0, sizeof(TE_MonitorState));
+            mon->taskbar_hwnd = tb;
+            mon->monitor = MonitorFromWindow(tb, MONITOR_DEFAULTTONEAREST);
+
+            typedef UINT (WINAPI *pfnGetDpiForWindow)(HWND);
+            HMODULE hUser = GetModuleHandleW(L"user32.dll");
+            pfnGetDpiForWindow pfnDpi = hUser ? (pfnGetDpiForWindow)(void*)GetProcAddress(hUser, "GetDpiForWindow") : NULL;
+            mon->current_dpi = pfnDpi ? pfnDpi(tb) : g_hover_state.current_dpi;
+            if (!mon->current_dpi) mon->current_dpi = 96;
+
+            RebuildGeometryForMonitor(new_idx);
+            int ox = mon->geometry.taskbarRect.left + 1;
+            int oy = mon->geometry.taskbarRect.top - mon->geometry.headroom_y + 1;
+            int ow = mon->geometry.taskbarRect.right - mon->geometry.taskbarRect.left - 1;
+            int oh = (mon->geometry.taskbarRect.bottom - mon->geometry.taskbarRect.top) + mon->geometry.headroom_y - 1;
+
+            mon->overlay_hwnd = TE_DCompCreateOverlayWindow(tb, ox, oy, ow, oh);
+            int target_idx = -1;
+            HRESULT hr = TE_DCompAddTarget(tb, mon->overlay_hwnd, &target_idx);
+            mon->target_index = target_idx;
+            mon->is_active = (TE_SUCCEEDED(hr) && mon->overlay_hwnd != NULL);
+            g_hover_state.monitor_count++;
+        }
+    }
+
+    if (g_hover_state.monitor_count > 0 && g_hover_state.monitors[0].is_active) {
+        g_hover_state.overlay_hwnd = g_hover_state.monitors[0].overlay_hwnd;
+        g_hover_state.geometry = g_hover_state.monitors[0].geometry;
+    }
+
+    TE_IconCaptureInvalidate();
+    RebuildIconData();
 }
 
 /**
@@ -577,23 +966,9 @@ static void OnDpiChanged(uint32_t type, const void* data, void* user_data) {
     HoverLog(TE_LOG_INFO, "DPI changed from %u to %u", dpi_data->old_dpi, dpi_data->new_dpi);
     g_hover_state.current_dpi = dpi_data->new_dpi;
 
-    TE_FrameLoopStop();
-    RebuildGeometry();
-
-    HWND taskbar_hwnd = g_hover_state.ctx->taskbar_hwnd;
-    if (taskbar_hwnd && IsWindow(taskbar_hwnd)) {
-        int tb_width = g_hover_state.geometry.taskbarRect.right - g_hover_state.geometry.taskbarRect.left;
-        int tb_height = g_hover_state.geometry.taskbarRect.bottom - g_hover_state.geometry.taskbarRect.top;
-        int overlay_x = g_hover_state.geometry.taskbarRect.left;
-        int overlay_y = g_hover_state.geometry.taskbarRect.top - g_hover_state.geometry.headroom_y;
-        int overlay_w = tb_width;
-        int overlay_h = tb_height + g_hover_state.geometry.headroom_y;
-
-        TE_DCompMoveOverlayWindow(g_hover_state.overlay_hwnd, overlay_x, overlay_y, overlay_w, overlay_h);
-    }
-
-    TE_IconCaptureInvalidate();
-    RebuildIconData();
+    UpdateMonitors();
+    TE_DynamicIslandSetHeadroom((float)g_hover_state.geometry.headroom_y);
+    TE_DynamicIslandOnDpiChanged(dpi_data->new_dpi);
 }
 
 /**
@@ -603,18 +978,20 @@ static void OnTaskbarGeometry(uint32_t type, const void* data, void* user_data) 
     (void)type; (void)data; (void)user_data;
     if (!g_hover_state.enabled) return;
 
-    TE_FrameLoopStop();
-    RebuildGeometry();
+    UpdateMonitors();
+    HWND tray = FindWindowExW(g_hover_state.monitors[0].taskbar_hwnd, NULL, L"TrayNotifyWnd", NULL);
+    TE_DynamicIslandOnGeometryChanged(&g_hover_state.geometry.taskbarRect, tray);
+}
 
-    int tb_width = g_hover_state.geometry.taskbarRect.right - g_hover_state.geometry.taskbarRect.left;
-    int tb_height = g_hover_state.geometry.taskbarRect.bottom - g_hover_state.geometry.taskbarRect.top;
-    int overlay_x = g_hover_state.geometry.taskbarRect.left;
-    int overlay_y = g_hover_state.geometry.taskbarRect.top - g_hover_state.geometry.headroom_y;
-    int overlay_w = tb_width;
-    int overlay_h = tb_height + g_hover_state.geometry.headroom_y;
+/**
+ * Display resolution / connected monitor change event handler.
+ */
+static void OnDisplayChanged(uint32_t type, const void* data, void* user_data) {
+    (void)type; (void)data; (void)user_data;
+    if (!g_hover_state.enabled) return;
 
-    TE_DCompMoveOverlayWindow(g_hover_state.overlay_hwnd, overlay_x, overlay_y, overlay_w, overlay_h);
-    RebuildIconData();
+    HoverLog(TE_LOG_INFO, "Display layout changed, updating monitor overlays");
+    UpdateMonitors();
 }
 
 /* ── Plugin Lifecycle ─────────────────────────────────────────────── */
@@ -643,6 +1020,16 @@ static HRESULT Initialize(const PluginContext* ctx) {
     g_hover_state.config.keep_on_top = 1;
     g_hover_state.geometry.taskbarHeight = 48; /* Default until state store provides real value */
 
+    g_hover_state.config.dynamic_island.enabled = FALSE;
+    g_hover_state.config.dynamic_island.padding_tray = 12;
+    g_hover_state.config.dynamic_island.compact_width = 80;
+    g_hover_state.config.dynamic_island.expanded_width = 240;
+    g_hover_state.config.dynamic_island.height = 30;
+    g_hover_state.config.dynamic_island.corner_radius = 15.0f;
+    g_hover_state.config.dynamic_island.announce_duration_ms = 3000;
+    g_hover_state.config.dynamic_island.expand_duration_ms = 250;
+    g_hover_state.config.dynamic_island.collapse_duration_ms = 250;
+
     g_hover_state.current_dpi = (ctx && ctx->dpi) ? ctx->dpi : 96;
     g_hover_state.geometry.headroom_y = (TE_HOVER_HEADROOM_BASE_PX * g_hover_state.current_dpi) / 96;
     if (ctx && ctx->taskbar_hwnd) {
@@ -650,6 +1037,8 @@ static HRESULT Initialize(const PluginContext* ctx) {
     }
 
     ParseConfig(ctx ? ctx->config : NULL);
+    TE_DynamicIslandInit(&g_hover_state.config.dynamic_island);
+    TE_DynamicIslandSetWakeCallback(TE_FrameLoopWakeDynamicIsland);
     HoverLog(TE_LOG_INFO, "Initialize: max_scale=%.2f, radius=%d, curve=%d, speed_ms=%d",
              g_hover_state.config.max_scale, g_hover_state.config.radius,
              (int)g_hover_state.config.curve, g_hover_state.config.speed_ms);
@@ -663,27 +1052,39 @@ static HRESULT Enable(void) {
     /* Query current taskbar height from state store */
     QueryTaskbarHeight();
 
+#ifndef TE_HOVER_TESTLIB
     /* Initialize icon capture subsystem */
     HRESULT hr = TE_IconCaptureInit();
     if (TE_FAILED(hr)) {
         HoverLog(TE_LOG_WARNING, "Icon capture init failed (non-fatal)");
     }
+#endif
 
-    /* Get taskbar dimensions and position for overlay */
-    HWND taskbar_hwnd = g_hover_state.ctx->taskbar_hwnd;
-    g_hover_state.current_dpi = g_hover_state.ctx->dpi ? g_hover_state.ctx->dpi : 96;
-    RebuildGeometry();
+    /* Discover all connected taskbars (primary + secondary) */
+    HWND discovered[TE_MAX_MONITORS] = { 0 };
+    int tb_count = 0;
+#ifndef TE_HOVER_TESTLIB
+    DiscoverTaskbars(discovered, &tb_count);
+#endif
 
+    HWND primary = (tb_count > 0) ? discovered[0] : (g_hover_state.ctx ? g_hover_state.ctx->taskbar_hwnd : NULL);
+    g_hover_state.current_dpi = g_hover_state.ctx ? (g_hover_state.ctx->dpi ? g_hover_state.ctx->dpi : 96) : 96;
+
+    /* Setup monitor 0 (primary taskbar) */
+    g_hover_state.monitors[0].taskbar_hwnd = primary;
+    g_hover_state.monitors[0].monitor = primary ? MonitorFromWindow(primary, MONITOR_DEFAULTTOPRIMARY) : NULL;
+    g_hover_state.monitors[0].current_dpi = g_hover_state.current_dpi;
+    RebuildGeometryForMonitor(0);
+#ifndef TE_HOVER_TESTLIB
     int tb_width = g_hover_state.geometry.taskbarRect.right - g_hover_state.geometry.taskbarRect.left;
     int tb_height = g_hover_state.geometry.taskbarRect.bottom - g_hover_state.geometry.taskbarRect.top;
+    int overlay_x = g_hover_state.geometry.taskbarRect.left + 1;
+    int overlay_y = g_hover_state.geometry.taskbarRect.top - g_hover_state.geometry.headroom_y + 1;
+    int overlay_w = tb_width - 1;
+    int overlay_h = tb_height + g_hover_state.geometry.headroom_y - 1;
 
-    int overlay_x = g_hover_state.geometry.taskbarRect.left;
-    int overlay_y = g_hover_state.geometry.taskbarRect.top - g_hover_state.geometry.headroom_y;
-    int overlay_w = tb_width;
-    int overlay_h = tb_height + g_hover_state.geometry.headroom_y;
-
-    /* Create overlay window (WS_POPUP layered window with headroom) */
-    g_hover_state.overlay_hwnd = TE_DCompCreateOverlayWindow(taskbar_hwnd, overlay_x, overlay_y, overlay_w, overlay_h);
+    /* Create primary overlay window (WS_POPUP layered window with headroom) */
+    g_hover_state.overlay_hwnd = TE_DCompCreateOverlayWindow(primary, overlay_x, overlay_y, overlay_w, overlay_h);
     if (!g_hover_state.overlay_hwnd) {
         HoverLog(TE_LOG_ERROR, "Failed to create overlay window — disabling IconHover");
         TE_IconCaptureShutdown();
@@ -691,34 +1092,81 @@ static HRESULT Enable(void) {
     }
 
     /* Initialize DirectComposition */
-    hr = TE_DCompInitDevice(g_hover_state.overlay_hwnd);
-    if (TE_FAILED(hr)) {
+    HRESULT hr_dcomp = TE_DCompInitDevice(g_hover_state.overlay_hwnd);
+    if (TE_FAILED(hr_dcomp)) {
         HoverLog(TE_LOG_ERROR, "DComp init failed — disabling IconHover gracefully");
         TE_DCompDestroyOverlayWindow(g_hover_state.overlay_hwnd);
         g_hover_state.overlay_hwnd = NULL;
         TE_IconCaptureShutdown();
         return TE_E_FAIL;
     }
+#endif
 
-    /* Load custom start button image if specified or default present */
+    g_hover_state.monitors[0].overlay_hwnd = g_hover_state.overlay_hwnd;
+    g_hover_state.monitors[0].target_index = 0;
+    g_hover_state.monitors[0].is_active = 1;
+    g_hover_state.monitor_count = 1;
+
+    /* Setup secondary taskbars */
+    for (int i = 1; i < tb_count; i++) {
+        HWND sec_tb = discovered[i];
+        TE_MonitorState* sec_mon = &g_hover_state.monitors[i];
+        memset(sec_mon, 0, sizeof(TE_MonitorState));
+        sec_mon->taskbar_hwnd = sec_tb;
+        sec_mon->monitor = MonitorFromWindow(sec_tb, MONITOR_DEFAULTTONEAREST);
+
+        typedef UINT (WINAPI *pfnGetDpiForWindow)(HWND);
+        HMODULE hUser = GetModuleHandleW(L"user32.dll");
+        pfnGetDpiForWindow pfnDpi = hUser ? (pfnGetDpiForWindow)(void*)GetProcAddress(hUser, "GetDpiForWindow") : NULL;
+        sec_mon->current_dpi = pfnDpi ? pfnDpi(sec_tb) : g_hover_state.current_dpi;
+        if (!sec_mon->current_dpi) sec_mon->current_dpi = 96;
+
+        RebuildGeometryForMonitor(i);
+
+#ifndef TE_HOVER_TESTLIB
+        int sec_w = sec_mon->geometry.taskbarRect.right - sec_mon->geometry.taskbarRect.left;
+        int sec_h = sec_mon->geometry.taskbarRect.bottom - sec_mon->geometry.taskbarRect.top;
+        int sec_ox = sec_mon->geometry.taskbarRect.left + 1;
+        int sec_oy = sec_mon->geometry.taskbarRect.top - sec_mon->geometry.headroom_y + 1;
+        int sec_ow = sec_w - 1;
+        int sec_oh = sec_h + sec_mon->geometry.headroom_y - 1;
+
+        sec_mon->overlay_hwnd = TE_DCompCreateOverlayWindow(sec_tb, sec_ox, sec_oy, sec_ow, sec_oh);
+        int target_idx = -1;
+        HRESULT hr_sec = TE_DCompAddTarget(sec_tb, sec_mon->overlay_hwnd, &target_idx);
+        sec_mon->target_index = target_idx;
+        sec_mon->is_active = (TE_SUCCEEDED(hr_sec) && sec_mon->overlay_hwnd != NULL);
+#else
+        sec_mon->is_active = 1;
+#endif
+        g_hover_state.monitor_count++;
+        HoverLog(TE_LOG_INFO, "Registered secondary taskbar %p", (void*)sec_tb);
+    }
+
+#ifndef TE_HOVER_TESTLIB
+    /* Load custom start button image if specified and hide native Start buttons across all displays */
     if (g_hover_state.config.start_image_path[0] != L'\0') {
         TE_DCompLoadStartImage(g_hover_state.config.start_image_path);
-    } else {
-        if (GetFileAttributesW(L"Config\\start_button.png") != INVALID_FILE_ATTRIBUTES) {
-            TE_DCompLoadStartImage(L"Config\\start_button.png");
-        } else if (GetFileAttributesW(L"Config\\start_button.svg") != INVALID_FILE_ATTRIBUTES) {
-            TE_DCompLoadStartImage(L"Config\\start_button.svg");
+        if (TE_DCompIsCustomStartButtonEnabled()) {
+            TE_UiaHideStartButtonAll(TRUE);
         } else {
-            TE_DCompLoadStartImage(L"start_button.png");
+            TE_UiaHideStartButtonAll(FALSE);
         }
+    } else {
+        TE_DCompSetCustomStartButtonEnabled(0);
+        TE_UiaHideStartButtonAll(FALSE);
     }
 
-    if (TE_DCompIsCustomStartButtonEnabled()) {
-        TE_UiaHideStartButton(taskbar_hwnd, TRUE);
+    /* Subclass primary taskbar to receive UIA discovery messages */
+    if (primary) {
+        SetWindowSubclass(primary, IconHoverSubclassProc, SUBCLASS_HOVER_ID, 0);
     }
 
-    /* Discover icons and build visual tree */
-    RebuildIconData();
+    /* Discover icons asynchronously via MTA background thread */
+    HANDLE hThread = CreateThread(NULL, 0, UiaDiscoveryThread, NULL, 0, NULL);
+    if (hThread) {
+        CloseHandle(hThread);
+    }
 
     /* Subscribe to engine events */
     g_hover_state.ctx->subscribe(TE_EVENT_SHELL_HOOK, OnShellHook, NULL);
@@ -726,6 +1174,7 @@ static HRESULT Enable(void) {
     g_hover_state.ctx->subscribe(TE_EVENT_TASKBAR_MOUSE, OnTaskbarMouse, NULL);
     g_hover_state.ctx->subscribe(TE_EVENT_DPI_CHANGED, OnDpiChanged, NULL);
     g_hover_state.ctx->subscribe(TE_EVENT_TASKBAR_GEOMETRY, OnTaskbarGeometry, NULL);
+    g_hover_state.ctx->subscribe(TE_EVENT_DISPLAY_CHANGED, OnDisplayChanged, NULL);
 
     /* Register for mouse tracking via message filter (v2 API) */
     if (TE_CTX_HAS_FIELD(g_hover_state.ctx, subscribe_message) &&
@@ -733,24 +1182,37 @@ static HRESULT Enable(void) {
         g_hover_state.ctx->subscribe_message(WM_MOUSEMOVE);
         g_hover_state.ctx->subscribe_message(WM_MOUSELEAVE);
     }
+#endif
+
+    TE_DynamicIslandSetHeadroom((float)g_hover_state.geometry.headroom_y);
+    TE_DynamicIslandSetWakeCallback(TE_FrameLoopWakeDynamicIsland);
+    if (g_hover_state.config.dynamic_island.enabled) {
+        TE_DynamicIslandEnable(primary, g_hover_state.current_dpi);
+    }
 
     g_hover_state.enabled = 1;
-    HoverLog(TE_LOG_INFO, "Enable complete: %d icons, overlay ready", g_hover_state.anim_count);
+    HoverLog(TE_LOG_INFO, "Enable complete: %d monitors, primary icons %d, overlay ready",
+             g_hover_state.monitor_count, g_hover_state.anim_count);
 
     return TE_S_OK;
 }
 
 static HRESULT Disable(void) {
     HoverLog(TE_LOG_INFO, "Disable: stopping IconHover");
+    if (s_shell_hook_rebuild_timer) {
+        KillTimer(NULL, s_shell_hook_rebuild_timer);
+        s_shell_hook_rebuild_timer = 0;
+    }
+    TE_DynamicIslandDisable();
     g_hover_state.enabled = 0;
 
     /* Stop animation */
     TE_FrameLoopStop();
 
-    /* Restore native start button */
-    if (g_hover_state.ctx && g_hover_state.ctx->taskbar_hwnd) {
-        TE_UiaHideStartButton(g_hover_state.ctx->taskbar_hwnd, FALSE);
-    }
+#ifndef TE_HOVER_TESTLIB
+    /* Restore native start button across all displays */
+    TE_UiaHideStartButtonAll(FALSE);
+#endif
 
     /* Unsubscribe message filters */
     if (TE_CTX_HAS_FIELD(g_hover_state.ctx, unsubscribe_message) &&
@@ -765,11 +1227,31 @@ static HRESULT Disable(void) {
     g_hover_state.ctx->unsubscribe(TE_EVENT_TASKBAR_MOUSE, OnTaskbarMouse);
     g_hover_state.ctx->unsubscribe(TE_EVENT_DPI_CHANGED, OnDpiChanged);
     g_hover_state.ctx->unsubscribe(TE_EVENT_TASKBAR_GEOMETRY, OnTaskbarGeometry);
+    g_hover_state.ctx->unsubscribe(TE_EVENT_DISPLAY_CHANGED, OnDisplayChanged);
 
-    /* Tear down DComp */
+    if (g_hover_state.monitors[0].taskbar_hwnd) {
+        RemoveWindowSubclass(g_hover_state.monitors[0].taskbar_hwnd, IconHoverSubclassProc, SUBCLASS_HOVER_ID);
+    }
+
+    /* Destroy secondary overlay windows and targets */
+    for (int i = 1; i < g_hover_state.monitor_count; i++) {
+        if (g_hover_state.monitors[i].overlay_hwnd) {
+            TE_DCompRemoveTarget(g_hover_state.monitors[i].target_index);
+            TE_DCompDestroyOverlayWindow(g_hover_state.monitors[i].overlay_hwnd);
+            g_hover_state.monitors[i].overlay_hwnd = NULL;
+        }
+        g_hover_state.monitors[i].is_active = 0;
+    }
+
+    /* Tear down primary DComp and overlay */
     TE_DCompDestroyDevice();
-    TE_DCompDestroyOverlayWindow(g_hover_state.overlay_hwnd);
-    g_hover_state.overlay_hwnd = NULL;
+    if (g_hover_state.overlay_hwnd) {
+        TE_DCompDestroyOverlayWindow(g_hover_state.overlay_hwnd);
+        g_hover_state.overlay_hwnd = NULL;
+    }
+    g_hover_state.monitors[0].overlay_hwnd = NULL;
+    g_hover_state.monitors[0].is_active = 0;
+    g_hover_state.monitor_count = 0;
 
     /* Release icon cache */
     TE_IconCaptureShutdown();
@@ -786,6 +1268,7 @@ static HRESULT Update(float delta_time) {
 
 static HRESULT Shutdown(void) {
     HoverLog(TE_LOG_INFO, "Shutdown called");
+    TE_DynamicIslandShutdown();
     g_hover_state.ctx = NULL;
     return TE_S_OK;
 }
@@ -810,8 +1293,12 @@ static const PluginInterface g_interface = {
     GetSettings
 };
 
+TE_EXPORT const PluginInterface* TE_IconHoverGetPluginInterface(void) {
+    return &g_interface;
+}
+
 #ifndef TE_HOVER_TESTLIB
 TE_EXPORT const PluginInterface* GetPluginInterface(void) {
-    return &g_interface;
+    return TE_IconHoverGetPluginInterface();
 }
 #endif

@@ -132,7 +132,20 @@ HRESULT TE_CoreManagerInit(HWND taskbar_hwnd) {
     TE_PluginLoaderInit();
     TE_PluginLoaderScanAndLoad(g_core.modules_dir);
     TE_PluginLoaderInitializeAll(g_core.taskbar_hwnd, g_core.dpi, g_core.config_root);
-    TE_PluginLoaderEnableAll();
+    for (int i = 0; i < TE_PluginLoaderGetCount(); i++) {
+        TE_PluginEntry* entry = TE_PluginLoaderGetEntry(i);
+        if (entry && entry->metadata && entry->metadata->name) {
+            const struct cJSON* sec = TE_ConfigGetPluginSection(g_core.config_root, entry->metadata->name);
+            BOOL default_enabled = TRUE;
+            if (strcmp(entry->metadata->name, "taskbar_resize") == 0) {
+                default_enabled = FALSE;
+            }
+            BOOL enabled = TE_ConfigGetBool(sec, "enabled", default_enabled);
+            if (enabled) {
+                TE_PluginLoaderEnablePluginByName(entry->metadata->name);
+            }
+        }
+    }
     
     TE_ConfigWatcherStart(g_core.config_dir, g_core.taskbar_hwnd);
     if (FAILED(TE_IpcServerStart(g_core.taskbar_hwnd))) {
@@ -198,9 +211,16 @@ HRESULT TE_CoreManagerReloadConfig(void) {
     }
     
     for (int i = 0; i < changed_count; i++) {
+        const struct cJSON* sec = TE_ConfigGetPluginSection(g_core.config_root, saved_names[i]);
+        BOOL enabled = TE_ConfigGetBool(sec, "enabled", TRUE);
+        if (enabled) {
+            TE_PluginLoaderEnablePluginByName(saved_names[i]);
+        } else {
+            TE_PluginLoaderDisablePluginByName(saved_names[i]);
+        }
         TE_ConfigChangedData data;
         data.plugin_name = saved_names[i];
-        data.new_config = TE_ConfigGetPluginSection(g_core.config_root, saved_names[i]);
+        data.new_config = sec;
         TE_EventDispatchFire(TE_EVENT_CONFIG_CHANGED, &data);
         free(saved_names[i]);
     }

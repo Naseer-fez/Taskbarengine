@@ -411,3 +411,16 @@ HRESULT TE_UiaHideStartButton(HWND taskbar_hwnd, BOOL hide)
 
     return result;
 }
+
+HRESULT TE_UiaHideStartButtonAll(BOOL hide)
+{
+    HWND primary = FindWindowW(L"Shell_TrayWnd", NULL);
+    if (primary) {
+        TE_UiaHideStartButton(primary, hide);
+    }
+    HWND sec = NULL;
+    while ((sec = FindWindowExW(NULL, sec, L"Shell_SecondaryTrayWnd", NULL)) != NULL) {
+        TE_UiaHideStartButton(sec, hide);
+    }
+    return TE_S_OK;
+}

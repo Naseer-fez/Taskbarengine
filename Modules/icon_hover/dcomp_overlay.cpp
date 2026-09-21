@@ -18,6 +18,9 @@
 #include "dcomp_overlay.h"
 #include "icon_hover_internal.h"
 #include <sdk/te_log.h>
+#include "dynamic_island.h"
+
+static IDCompositionVisual* s_island_visual_target0 = nullptr;
 
 #include <windows.h>
 #include <dcomp.h>
@@ -40,26 +43,36 @@
 #endif
 
 static const char* LOG_TAG = "DCompOverlay";
-static const wchar_t* OVERLAY_CLASS_NAME = L"TE_IconHoverOverlay";
+// Use "TaskbarEngineHoverOverlay" class name so LiveWallpaper ignores this window for occlusion and pause logic.
+static const wchar_t* OVERLAY_CLASS_NAME = L"TaskbarEngineHoverOverlay";
 
 /** DComp device and visual tree state. */
 static ID2D1Factory* s_d2d_factory = nullptr;
 static ID3D11Device* s_d3d_device = nullptr;
 static IDCompositionDevice* s_dcomp_device = nullptr;
-static IDCompositionTarget* s_dcomp_target = nullptr;
-static IDCompositionVisual* s_root_visual = nullptr;
-static IDCompositionEffectGroup* s_root_effect = nullptr;
 
-/** Per-icon visual array. */
-static IDCompositionVisual* s_icon_visuals[TE_HOVER_MAX_ICONS] = {};
-static IDCompositionScaleTransform* s_scale_transforms[TE_HOVER_MAX_ICONS] = {};
-static IDCompositionTranslateTransform* s_translate_transforms[TE_HOVER_MAX_ICONS] = {};
-static IDCompositionMatrixTransform3D* s_matrix_transforms[TE_HOVER_MAX_ICONS] = {};
-static IDCompositionEffectGroup* s_icon_effect_groups[TE_HOVER_MAX_ICONS] = {};
-static bool s_icon_is_start[TE_HOVER_MAX_ICONS] = {};
-static D2D1_POINT_2F s_icon_centers[TE_HOVER_MAX_ICONS] = {};
-static IDCompositionSurface* s_icon_surfaces[TE_HOVER_MAX_ICONS] = {};
-static int s_visual_count = 0;
+struct TE_TargetVisualTree {
+    HWND taskbar_hwnd;
+    HWND overlay_hwnd;
+    IDCompositionTarget* dcomp_target;
+    IDCompositionVisual* root_visual;
+    IDCompositionEffectGroup* root_effect;
+
+    IDCompositionVisual* icon_visuals[TE_HOVER_MAX_ICONS];
+    IDCompositionScaleTransform* scale_transforms[TE_HOVER_MAX_ICONS];
+    IDCompositionTranslateTransform* translate_transforms[TE_HOVER_MAX_ICONS];
+    IDCompositionMatrixTransform3D* matrix_transforms[TE_HOVER_MAX_ICONS];
+    IDCompositionEffectGroup* icon_effect_groups[TE_HOVER_MAX_ICONS];
+    bool icon_is_start[TE_HOVER_MAX_ICONS];
+    D2D1_POINT_2F icon_centers[TE_HOVER_MAX_ICONS];
+    IDCompositionSurface* icon_surfaces[TE_HOVER_MAX_ICONS];
+    int visual_count;
+    RECT start_button_bounds;
+    bool is_active;
+};
+
+static TE_TargetVisualTree s_targets[TE_MAX_DCOMP_TARGETS] = {};
+static int s_target_count = 0;
 
 /** Custom Start Button state */
 static ID2D1Bitmap* s_start_button_bitmap = nullptr;
@@ -159,6 +172,12 @@ void TE_DCompMoveOverlayWindow(HWND overlay_hwnd, int x, int y, int width, int h
 void TE_DCompDestroyOverlayWindow(HWND overlay_hwnd)
 {
     if (overlay_hwnd && IsWindow(overlay_hwnd)) {
+        for (int i = 0; i < s_target_count; i++) {
+            if (s_targets[i].overlay_hwnd == overlay_hwnd) {
+                TE_DCompRemoveTarget(i);
+                break;
+            }
+        }
         if (s_overlay_hwnd_ref == overlay_hwnd) {
             s_overlay_hwnd_ref = NULL;
         }
@@ -208,82 +227,181 @@ HRESULT TE_DCompInitDevice(HWND overlay_hwnd)
         return TE_E_FAIL;
     }
 
-    /* Create target bound to overlay window */
-    hr = s_dcomp_device->CreateTargetForHwnd(overlay_hwnd, TRUE, &s_dcomp_target);
-    if (FAILED(hr) || !s_dcomp_target) {
+    /* Create primary target (index 0) bound to overlay window */
+    hr = s_dcomp_device->CreateTargetForHwnd(overlay_hwnd, TRUE, &s_targets[0].dcomp_target);
+    if (FAILED(hr) || !s_targets[0].dcomp_target) {
         TE_LogWrite(TE_LOG_ERROR, LOG_TAG, "CreateTargetForHwnd failed");
         s_dcomp_device->Release();
         s_dcomp_device = nullptr;
         return TE_E_FAIL;
     }
 
-    /* Create root visual */
-    hr = s_dcomp_device->CreateVisual(&s_root_visual);
-    if (FAILED(hr) || !s_root_visual) {
+    /* Create root visual for target 0 */
+    hr = s_dcomp_device->CreateVisual(&s_targets[0].root_visual);
+    if (FAILED(hr) || !s_targets[0].root_visual) {
         TE_LogWrite(TE_LOG_ERROR, LOG_TAG, "Failed to create root visual");
-        s_dcomp_target->Release();
-        s_dcomp_target = nullptr;
+        s_targets[0].dcomp_target->Release();
+        s_targets[0].dcomp_target = nullptr;
         s_dcomp_device->Release();
         s_dcomp_device = nullptr;
         return TE_E_FAIL;
     }
 
     /* Bind root visual to target */
-    hr = s_dcomp_target->SetRoot(s_root_visual);
+    hr = s_targets[0].dcomp_target->SetRoot(s_targets[0].root_visual);
     if (FAILED(hr)) {
         TE_LogWrite(TE_LOG_ERROR, LOG_TAG, "Failed to set root visual");
-        s_root_visual->Release();
-        s_root_visual = nullptr;
-        s_dcomp_target->Release();
-        s_dcomp_target = nullptr;
+        s_targets[0].root_visual->Release();
+        s_targets[0].root_visual = nullptr;
+        s_targets[0].dcomp_target->Release();
+        s_targets[0].dcomp_target = nullptr;
         s_dcomp_device->Release();
         s_dcomp_device = nullptr;
         return TE_E_FAIL;
     }
 
     /* Create root effect group for opacity */
-    hr = s_dcomp_device->CreateEffectGroup(&s_root_effect);
-    if (SUCCEEDED(hr) && s_root_effect) {
-        s_root_effect->SetOpacity(0.0f);
-        s_root_visual->SetEffect(s_root_effect);
+    hr = s_dcomp_device->CreateEffectGroup(&s_targets[0].root_effect);
+    if (SUCCEEDED(hr) && s_targets[0].root_effect) {
+        s_targets[0].root_effect->SetOpacity(0.0f);
+        s_targets[0].root_visual->SetEffect(s_targets[0].root_effect);
     }
+    s_targets[0].overlay_hwnd = overlay_hwnd;
+    s_targets[0].is_active = true;
+    s_target_count = 1;
+
     s_dcomp_device->Commit();
 
     TE_LogWrite(TE_LOG_INFO, LOG_TAG, "DComp device initialized successfully");
     return TE_S_OK;
 }
 
-/**
- * Release all per-icon visuals, transforms, and surfaces.
- */
-static void ReleaseVisualTree(void)
+int TE_DCompGetTargetCount(void)
 {
-    if (s_root_visual) {
-        s_root_visual->RemoveAllVisuals();
+    return s_target_count;
+}
+
+HRESULT TE_DCompAddTarget(HWND taskbar_hwnd, HWND overlay_hwnd, int* out_target_index)
+{
+    if (!overlay_hwnd) return TE_E_INVALIDARG;
+    if (!s_dcomp_device) return TE_E_FAIL;
+
+    for (int i = 0; i < s_target_count; i++) {
+        if (s_targets[i].is_active && s_targets[i].overlay_hwnd == overlay_hwnd) {
+            s_targets[i].taskbar_hwnd = taskbar_hwnd;
+            if (out_target_index) *out_target_index = i;
+            return TE_S_OK;
+        }
     }
 
-    for (int i = 0; i < s_visual_count; i++) {
-        if (s_icon_effect_groups[i]) { s_icon_effect_groups[i]->Release(); s_icon_effect_groups[i] = nullptr; }
-        if (s_matrix_transforms[i]) { s_matrix_transforms[i]->Release(); s_matrix_transforms[i] = nullptr; }
-        if (s_icon_surfaces[i]) { s_icon_surfaces[i]->Release(); s_icon_surfaces[i] = nullptr; }
-        if (s_translate_transforms[i]) { s_translate_transforms[i]->Release(); s_translate_transforms[i] = nullptr; }
-        if (s_scale_transforms[i]) { s_scale_transforms[i]->Release(); s_scale_transforms[i] = nullptr; }
-        if (s_icon_visuals[i]) { s_icon_visuals[i]->Release(); s_icon_visuals[i] = nullptr; }
-        s_icon_is_start[i] = false;
+    int idx = -1;
+    for (int i = 0; i < s_target_count; i++) {
+        if (!s_targets[i].is_active) {
+            idx = i;
+            break;
+        }
     }
-    s_visual_count = 0;
+    if (idx < 0) {
+        if (s_target_count >= TE_MAX_DCOMP_TARGETS) return TE_E_FAIL;
+        idx = s_target_count++;
+    }
+
+    TE_TargetVisualTree* t = &s_targets[idx];
+    memset(t, 0, sizeof(*t));
+    t->taskbar_hwnd = taskbar_hwnd;
+    t->overlay_hwnd = overlay_hwnd;
+
+    HRESULT hr = s_dcomp_device->CreateTargetForHwnd(overlay_hwnd, TRUE, &t->dcomp_target);
+    if (FAILED(hr) || !t->dcomp_target) {
+        TE_LogWrite(TE_LOG_ERROR, LOG_TAG, "CreateTargetForHwnd failed for secondary target");
+        return TE_E_FAIL;
+    }
+
+    hr = s_dcomp_device->CreateVisual(&t->root_visual);
+    if (FAILED(hr) || !t->root_visual) {
+        t->dcomp_target->Release();
+        t->dcomp_target = nullptr;
+        return TE_E_FAIL;
+    }
+
+    t->dcomp_target->SetRoot(t->root_visual);
+
+    hr = s_dcomp_device->CreateEffectGroup(&t->root_effect);
+    if (SUCCEEDED(hr) && t->root_effect) {
+        t->root_effect->SetOpacity(0.0f);
+        t->root_visual->SetEffect(t->root_effect);
+    }
+
+    t->is_active = true;
+    if (out_target_index) *out_target_index = idx;
+    s_dcomp_device->Commit();
+    return TE_S_OK;
+}
+
+static void ReleaseVisualTreeForTarget(int target_idx)
+{
+    if (target_idx < 0 || target_idx >= TE_MAX_DCOMP_TARGETS) return;
+    TE_TargetVisualTree* t = &s_targets[target_idx];
+    if (t->root_visual) {
+        t->root_visual->RemoveAllVisuals();
+    }
+    for (int i = 0; i < t->visual_count; i++) {
+        if (t->icon_effect_groups[i]) { t->icon_effect_groups[i]->Release(); t->icon_effect_groups[i] = nullptr; }
+        if (t->matrix_transforms[i]) { t->matrix_transforms[i]->Release(); t->matrix_transforms[i] = nullptr; }
+        if (t->icon_surfaces[i]) { t->icon_surfaces[i]->Release(); t->icon_surfaces[i] = nullptr; }
+        if (t->translate_transforms[i]) { t->translate_transforms[i]->Release(); t->translate_transforms[i] = nullptr; }
+        if (t->scale_transforms[i]) { t->scale_transforms[i]->Release(); t->scale_transforms[i] = nullptr; }
+        if (t->icon_visuals[i]) { t->icon_visuals[i]->Release(); t->icon_visuals[i] = nullptr; }
+        t->icon_is_start[i] = false;
+    }
+    t->visual_count = 0;
+}
+
+static void ReleaseVisualTree(void)
+{
+    for (int i = 0; i < s_target_count; i++) {
+        ReleaseVisualTreeForTarget(i);
+    }
+}
+
+void TE_DCompRemoveTarget(int target_index)
+{
+    if (target_index < 0 || target_index >= TE_MAX_DCOMP_TARGETS) return;
+    TE_TargetVisualTree* t = &s_targets[target_index];
+    if (!t->is_active) return;
+
+    if (target_index == 0) {
+        TE_DynamicIslandDetachVisualTree();
+        s_island_visual_target0 = nullptr;
+    }
+
+    ReleaseVisualTreeForTarget(target_index);
+    if (t->root_effect) { t->root_effect->Release(); t->root_effect = nullptr; }
+    if (t->root_visual) { t->root_visual->Release(); t->root_visual = nullptr; }
+    if (t->dcomp_target) { t->dcomp_target->Release(); t->dcomp_target = nullptr; }
+    t->is_active = false;
+    t->overlay_hwnd = NULL;
+    t->taskbar_hwnd = NULL;
 }
 
 void TE_DCompDestroyDevice(void)
 {
+    TE_DynamicIslandDetachVisualTree();
+    s_island_visual_target0 = nullptr;
+
     ReleaseVisualTree();
+
+    for (int i = 0; i < s_target_count; i++) {
+        if (s_targets[i].root_effect) { s_targets[i].root_effect->Release(); s_targets[i].root_effect = nullptr; }
+        if (s_targets[i].root_visual) { s_targets[i].root_visual->Release(); s_targets[i].root_visual = nullptr; }
+        if (s_targets[i].dcomp_target) { s_targets[i].dcomp_target->Release(); s_targets[i].dcomp_target = nullptr; }
+        s_targets[i].is_active = false;
+    }
+    s_target_count = 0;
 
     if (s_start_button_bitmap) { s_start_button_bitmap->Release(); s_start_button_bitmap = nullptr; }
     if (s_start_pixel_data) { free(s_start_pixel_data); s_start_pixel_data = nullptr; s_start_pixel_w = 0; s_start_pixel_h = 0; s_start_pixel_stride = 0; }
 
-    if (s_root_effect) { s_root_effect->Release(); s_root_effect = nullptr; }
-    if (s_root_visual) { s_root_visual->Release(); s_root_visual = nullptr; }
-    if (s_dcomp_target) { s_dcomp_target->Release(); s_dcomp_target = nullptr; }
     if (s_dcomp_device) { s_dcomp_device->Release(); s_dcomp_device = nullptr; }
     if (s_d3d_device) { s_d3d_device->Release(); s_d3d_device = nullptr; }
     if (s_d2d_factory) { s_d2d_factory->Release(); s_d2d_factory = nullptr; }
@@ -291,47 +409,49 @@ void TE_DCompDestroyDevice(void)
     TE_LogWrite(TE_LOG_INFO, LOG_TAG, "DComp device destroyed");
 }
 
-HRESULT TE_DCompBuildVisualTree(int count, const TE_IconElementInfo* elements, const HBITMAP* bitmaps, int baseline_y, int overlay_x, int overlay_y)
+HRESULT TE_DCompBuildVisualTreeForTarget(int target_index, int count, const TE_IconElementInfo* elements, const HBITMAP* bitmaps, int baseline_y, int overlay_x, int overlay_y)
 {
-    if (!s_dcomp_device || !s_root_visual) return TE_E_FAIL;
+    if (!s_dcomp_device) return TE_E_FAIL;
+    if (target_index < 0 || target_index >= TE_MAX_DCOMP_TARGETS) return TE_E_INVALIDARG;
+    TE_TargetVisualTree* t = &s_targets[target_index];
+    if (!t->is_active || !t->root_visual) return TE_E_FAIL;
     if (count <= 0 || !elements) return TE_E_INVALIDARG;
     if (count > TE_HOVER_MAX_ICONS) count = TE_HOVER_MAX_ICONS;
 
-    /* Release any existing visual tree */
-    ReleaseVisualTree();
+    /* Release any existing visual tree for this target */
+    ReleaseVisualTreeForTarget(target_index);
 
     HRESULT hr;
-
     int baseline_OVERLAY = baseline_y - overlay_y;
 
     for (int i = 0; i < count; i++) {
         /* Create child visual */
-        hr = s_dcomp_device->CreateVisual(&s_icon_visuals[i]);
+        hr = s_dcomp_device->CreateVisual(&t->icon_visuals[i]);
         if (FAILED(hr)) continue;
 
         /* Create scale transform */
-        hr = s_dcomp_device->CreateScaleTransform(&s_scale_transforms[i]);
+        hr = s_dcomp_device->CreateScaleTransform(&t->scale_transforms[i]);
         if (FAILED(hr)) {
-            s_icon_visuals[i]->Release();
-            s_icon_visuals[i] = nullptr;
+            t->icon_visuals[i]->Release();
+            t->icon_visuals[i] = nullptr;
             continue;
         }
 
         /* Create translate transform */
-        hr = s_dcomp_device->CreateTranslateTransform(&s_translate_transforms[i]);
+        hr = s_dcomp_device->CreateTranslateTransform(&t->translate_transforms[i]);
         if (FAILED(hr)) {
-            s_scale_transforms[i]->Release();
-            s_scale_transforms[i] = nullptr;
-            s_icon_visuals[i]->Release();
-            s_icon_visuals[i] = nullptr;
+            t->scale_transforms[i]->Release();
+            t->scale_transforms[i] = nullptr;
+            t->icon_visuals[i]->Release();
+            t->icon_visuals[i] = nullptr;
             continue;
         }
 
         /* Set initial transform values (identity) */
-        s_scale_transforms[i]->SetScaleX(1.0f);
-        s_scale_transforms[i]->SetScaleY(1.0f);
-        s_translate_transforms[i]->SetOffsetX(0.0f);
-        s_translate_transforms[i]->SetOffsetY(0.0f);
+        t->scale_transforms[i]->SetScaleX(1.0f);
+        t->scale_transforms[i]->SetScaleY(1.0f);
+        t->translate_transforms[i]->SetOffsetX(0.0f);
+        t->translate_transforms[i]->SetOffsetY(0.0f);
 
         /* Calculate positions using glyphCenter and taskbar baseline */
         const RECT* btn = &elements[i].buttonRect;
@@ -350,17 +470,17 @@ HRESULT TE_DCompBuildVisualTree(int count, const TE_IconElementInfo* elements, c
         float c_y = (float)baseline_OVERLAY - Y_visual_base;
 
         /* Set scale center to invariant baseline anchor */
-        s_scale_transforms[i]->SetCenterX(c_x);
-        s_scale_transforms[i]->SetCenterY(c_y);
+        t->scale_transforms[i]->SetCenterX(c_x);
+        t->scale_transforms[i]->SetCenterY(c_y);
 
         /* Set offset to the base visual position */
-        s_icon_visuals[i]->SetOffsetX(X_visual_base);
-        s_icon_visuals[i]->SetOffsetY(Y_visual_base);
+        t->icon_visuals[i]->SetOffsetX(X_visual_base);
+        t->icon_visuals[i]->SetOffsetY(Y_visual_base);
 
         bool is_start_button = (elements[i].element_type == TE_ELEM_START_BUTTON);
-        s_icon_is_start[i] = is_start_button;
+        t->icon_is_start[i] = is_start_button;
         if (is_start_button) {
-            s_start_button_bounds = *btn;
+            t->start_button_bounds = *btn;
         }
 
         /* Create a DComp surface for the icon bitmap or custom start image */
@@ -374,13 +494,13 @@ HRESULT TE_DCompBuildVisualTree(int count, const TE_IconElementInfo* elements, c
                 (UINT)bmp_w, (UINT)bmp_h,
                 DXGI_FORMAT_B8G8R8A8_UNORM,
                 DXGI_ALPHA_MODE_PREMULTIPLIED,
-                &s_icon_surfaces[i]
+                &t->icon_surfaces[i]
             );
 
-            if (SUCCEEDED(hr) && s_icon_surfaces[i]) {
+            if (SUCCEEDED(hr) && t->icon_surfaces[i]) {
                 IDXGISurface* dxgi_surface = nullptr;
                 POINT offset_point = {};
-                hr = s_icon_surfaces[i]->BeginDraw(NULL, __uuidof(IDXGISurface), (void**)&dxgi_surface, &offset_point);
+                hr = t->icon_surfaces[i]->BeginDraw(NULL, __uuidof(IDXGISurface), (void**)&dxgi_surface, &offset_point);
                 if (SUCCEEDED(hr) && dxgi_surface) {
                     D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
                         D2D1_RENDER_TARGET_TYPE_DEFAULT,
@@ -459,71 +579,84 @@ HRESULT TE_DCompBuildVisualTree(int count, const TE_IconElementInfo* elements, c
                         rt->Release();
                     }
                     dxgi_surface->Release();
-                    s_icon_surfaces[i]->EndDraw();
+                    t->icon_surfaces[i]->EndDraw();
                 }
 
-                s_icon_visuals[i]->SetContent(s_icon_surfaces[i]);
+                t->icon_visuals[i]->SetContent(t->icon_surfaces[i]);
             }
         }
 
         /* Apply transform group: scale then translate */
         IDCompositionTransform* transforms[2] = {
-            s_scale_transforms[i],
-            s_translate_transforms[i]
+            t->scale_transforms[i],
+            t->translate_transforms[i]
         };
         IDCompositionTransform* group = nullptr;
         hr = s_dcomp_device->CreateTransformGroup(transforms, 2, &group);
         if (SUCCEEDED(hr) && group) {
-            s_icon_visuals[i]->SetTransform(group);
+            t->icon_visuals[i]->SetTransform(group);
             group->Release();
         }
 
         /* Create 3D matrix transform for tilt perspective */
-        s_icon_centers[i].x = w_surf / 2.0f;
-        s_icon_centers[i].y = h_surf / 2.0f;
-        hr = s_dcomp_device->CreateMatrixTransform3D(&s_matrix_transforms[i]);
-        if (SUCCEEDED(hr) && s_matrix_transforms[i]) {
+        t->icon_centers[i].x = w_surf / 2.0f;
+        t->icon_centers[i].y = h_surf / 2.0f;
+        hr = s_dcomp_device->CreateMatrixTransform3D(&t->matrix_transforms[i]);
+        if (SUCCEEDED(hr) && t->matrix_transforms[i]) {
             D3DMATRIX identity = {
                 1.0f, 0.0f, 0.0f, 0.0f,
                 0.0f, 1.0f, 0.0f, 0.0f,
                 0.0f, 0.0f, 1.0f, 0.0f,
                 0.0f, 0.0f, 0.0f, 1.0f
             };
-            s_matrix_transforms[i]->SetMatrix(identity);
+            t->matrix_transforms[i]->SetMatrix(identity);
         }
 
         /* Create per-icon effect group for independent opacity and 3D tilt */
-        hr = s_dcomp_device->CreateEffectGroup(&s_icon_effect_groups[i]);
-        if (SUCCEEDED(hr) && s_icon_effect_groups[i]) {
-            if (s_matrix_transforms[i]) {
-                s_icon_effect_groups[i]->SetTransform3D(s_matrix_transforms[i]);
+        hr = s_dcomp_device->CreateEffectGroup(&t->icon_effect_groups[i]);
+        if (SUCCEEDED(hr) && t->icon_effect_groups[i]) {
+            if (t->matrix_transforms[i]) {
+                t->icon_effect_groups[i]->SetTransform3D(t->matrix_transforms[i]);
             }
             float init_opacity = is_start_button ? 1.0f : 0.0f;
-            s_icon_effect_groups[i]->SetOpacity(init_opacity);
-            s_icon_visuals[i]->SetEffect(s_icon_effect_groups[i]);
-        } else if (s_matrix_transforms[i]) {
-            s_icon_visuals[i]->SetEffect(s_matrix_transforms[i]);
+            t->icon_effect_groups[i]->SetOpacity(init_opacity);
+            t->icon_visuals[i]->SetEffect(t->icon_effect_groups[i]);
+        } else if (t->matrix_transforms[i]) {
+            t->icon_visuals[i]->SetEffect(t->matrix_transforms[i]);
         }
 
         /* Add as child of root */
         if (i == 0) {
-            s_root_visual->AddVisual(s_icon_visuals[i], TRUE, nullptr);
+            t->root_visual->AddVisual(t->icon_visuals[i], TRUE, nullptr);
         } else {
-            s_root_visual->AddVisual(s_icon_visuals[i], TRUE, s_icon_visuals[i - 1]);
+            t->root_visual->AddVisual(t->icon_visuals[i], TRUE, t->icon_visuals[i - 1]);
         }
 
-        s_visual_count = i + 1;
+        t->visual_count = i + 1;
     }
 
     char msg[64];
-    snprintf(msg, sizeof(msg), "Built visual tree with %d icon visuals", s_visual_count);
+    snprintf(msg, sizeof(msg), "Built visual tree for target %d with %d icon visuals", target_index, t->visual_count);
     TE_LogWrite(TE_LOG_INFO, LOG_TAG, msg);
+
+    if (target_index == 0) {
+        TE_DynamicIslandAttachVisualTree(t->root_visual, s_dcomp_device, s_d2d_factory);
+        if (s_island_visual_target0) {
+            t->root_visual->RemoveVisual(s_island_visual_target0);
+            t->root_visual->AddVisual(s_island_visual_target0, TRUE, nullptr);
+        }
+    }
 
     if (s_dcomp_device) {
         s_dcomp_device->Commit();
     }
 
     return TE_S_OK;
+}
+
+HRESULT TE_DCompBuildVisualTree(int count, const TE_IconElementInfo* elements, const HBITMAP* bitmaps, int baseline_y, int overlay_x, int overlay_y)
+{
+    return TE_DCompBuildVisualTreeForTarget(0, count, elements, bitmaps, baseline_y, overlay_x, overlay_y);
 }
 
 static D3DMATRIX MatrixMultiply(const D3DMATRIX& a, const D3DMATRIX& b) {
@@ -602,66 +735,92 @@ static D3DMATRIX ComputeTiltPerspectiveMatrix(float tilt_x, float tilt_y, float 
     return m;
 }
 
-HRESULT TE_DCompUpdateTransforms(int count, const float* scales,
-                                  const float* pos_x, const float* pos_y,
-                                  const float* tilt_x, const float* tilt_y)
+HRESULT TE_DCompUpdateTransformsForTarget(int target_index, int count, const float* scales,
+                                          const float* pos_x, const float* pos_y,
+                                          const float* tilt_x, const float* tilt_y)
 {
     if (!scales || count <= 0) return TE_E_INVALIDARG;
-    if (count > s_visual_count) count = s_visual_count;
+    if (target_index < 0 || target_index >= TE_MAX_DCOMP_TARGETS) return TE_E_INVALIDARG;
+    TE_TargetVisualTree* t = &s_targets[target_index];
+    if (!t->is_active) return TE_E_FAIL;
+    if (count > t->visual_count) count = t->visual_count;
 
     for (int i = 0; i < count; i++) {
-        if (!s_scale_transforms[i] || !s_translate_transforms[i]) continue;
+        if (!t->scale_transforms[i] || !t->translate_transforms[i]) continue;
 
-        s_scale_transforms[i]->SetScaleX(scales[i]);
-        s_scale_transforms[i]->SetScaleY(scales[i]);
+        t->scale_transforms[i]->SetScaleX(scales[i]);
+        t->scale_transforms[i]->SetScaleY(scales[i]);
 
-        if (pos_x) s_translate_transforms[i]->SetOffsetX(pos_x[i]);
-        if (pos_y) s_translate_transforms[i]->SetOffsetY(pos_y[i]);
+        if (pos_x) t->translate_transforms[i]->SetOffsetX(pos_x[i]);
+        if (pos_y) t->translate_transforms[i]->SetOffsetY(pos_y[i]);
 
-        if (s_matrix_transforms[i]) {
+        if (t->matrix_transforms[i]) {
             float tx = tilt_x ? tilt_x[i] : 0.0f;
             float ty = tilt_y ? tilt_y[i] : 0.0f;
-            D3DMATRIX mat = ComputeTiltPerspectiveMatrix(tx, ty, s_icon_centers[i].x, s_icon_centers[i].y);
-            s_matrix_transforms[i]->SetMatrix(mat);
+            D3DMATRIX mat = ComputeTiltPerspectiveMatrix(tx, ty, t->icon_centers[i].x, t->icon_centers[i].y);
+            t->matrix_transforms[i]->SetMatrix(mat);
         }
     }
 
     return TE_S_OK;
 }
 
-
-HRESULT TE_DCompSetOverlayAlpha(float alpha)
+HRESULT TE_DCompUpdateTransforms(int count, const float* scales,
+                                  const float* pos_x, const float* pos_y,
+                                  const float* tilt_x, const float* tilt_y)
 {
-    /* Clamp alpha to [0, 1] */
+    return TE_DCompUpdateTransformsForTarget(0, count, scales, pos_x, pos_y, tilt_x, tilt_y);
+}
+
+HRESULT TE_DCompSetOverlayAlphaForTarget(int target_index, float alpha)
+{
+    if (target_index < 0 || target_index >= TE_MAX_DCOMP_TARGETS) return TE_E_INVALIDARG;
+    TE_TargetVisualTree* t = &s_targets[target_index];
+    if (!t->is_active) return TE_E_FAIL;
+
     if (alpha < 0.0f) alpha = 0.0f;
     if (alpha > 1.0f) alpha = 1.0f;
 
-    if (s_custom_start_enabled) {
-        if (s_root_effect) {
-            s_root_effect->SetOpacity(1.0f);
+    BOOL island_visible = (target_index == 0) ? TE_DynamicIslandIsVisible() : FALSE;
+
+    if (s_custom_start_enabled || island_visible) {
+        if (t->root_effect) {
+            t->root_effect->SetOpacity(1.0f);
         }
-        for (int i = 0; i < s_visual_count; i++) {
-            if (s_icon_effect_groups[i]) {
-                float op = s_icon_is_start[i] ? 1.0f : alpha;
-                s_icon_effect_groups[i]->SetOpacity(op);
+        for (int i = 0; i < t->visual_count; i++) {
+            if (t->icon_effect_groups[i]) {
+                float op = t->icon_is_start[i] ? 1.0f : alpha;
+                t->icon_effect_groups[i]->SetOpacity(op);
             }
         }
     } else {
-        if (s_root_effect) {
-            s_root_effect->SetOpacity(alpha);
+        if (t->root_effect) {
+            t->root_effect->SetOpacity(alpha);
         }
-        for (int i = 0; i < s_visual_count; i++) {
-            if (s_icon_effect_groups[i]) {
-                s_icon_effect_groups[i]->SetOpacity(alpha);
+        for (int i = 0; i < t->visual_count; i++) {
+            if (t->icon_effect_groups[i]) {
+                t->icon_effect_groups[i]->SetOpacity(alpha);
             }
         }
     }
 
-    if (s_overlay_hwnd_ref && IsWindow(s_overlay_hwnd_ref)) {
-        if (alpha <= 0.0f && !s_custom_start_enabled) {
-            ShowWindow(s_overlay_hwnd_ref, SW_HIDE);
+    if (t->overlay_hwnd && IsWindow(t->overlay_hwnd)) {
+        if (alpha <= 0.0f && !s_custom_start_enabled && !island_visible) {
+            ShowWindow(t->overlay_hwnd, SW_HIDE);
         } else {
-            SetWindowPos(s_overlay_hwnd_ref, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+            ShowWindow(t->overlay_hwnd, SW_SHOWNOACTIVATE);
+            SetWindowPos(t->overlay_hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        }
+    }
+
+    return TE_S_OK;
+}
+
+HRESULT TE_DCompSetOverlayAlpha(float alpha)
+{
+    for (int i = 0; i < s_target_count; i++) {
+        if (s_targets[i].is_active) {
+            TE_DCompSetOverlayAlphaForTarget(i, alpha);
         }
     }
 
@@ -686,37 +845,36 @@ HRESULT TE_DCompCommit(void)
 
 void TE_DCompEnsureTopmost(HWND taskbar_hwnd)
 {
-    if (!s_overlay_hwnd_ref || !IsWindow(s_overlay_hwnd_ref)) return;
+    for (int i = 0; i < s_target_count; i++) {
+        if (!s_targets[i].is_active || !s_targets[i].overlay_hwnd || !IsWindow(s_targets[i].overlay_hwnd)) continue;
+        if (taskbar_hwnd && s_targets[i].taskbar_hwnd && s_targets[i].taskbar_hwnd != taskbar_hwnd) continue;
 
-    /* Check if any window is above our overlay in the Z-order */
-    HWND prev = GetWindow(s_overlay_hwnd_ref, GW_HWNDPREV);
-    if (!prev) {
-        /* Overlay is already at the very top of the Z-order */
-        return;
-    }
+        HWND overlay = s_targets[i].overlay_hwnd;
+        HWND prev = GetWindow(overlay, GW_HWNDPREV);
+        if (!prev) continue;
 
-    /* Check if the taskbar window or any taskbar surface is above our overlay */
-    bool is_taskbar_above = false;
-    for (HWND w = prev; w != NULL; w = GetWindow(w, GW_HWNDPREV)) {
-        if (taskbar_hwnd && (w == taskbar_hwnd || GetAncestor(w, GA_ROOT) == taskbar_hwnd)) {
-            is_taskbar_above = true;
-            break;
-        }
-
-        WCHAR className[64] = { 0 };
-        if (GetClassNameW(w, className, 64) > 0) {
-            if (_wcsicmp(className, L"Shell_TrayWnd") == 0 ||
-                _wcsicmp(className, L"Shell_SecondaryTrayWnd") == 0 ||
-                _wcsicmp(className, L"TopLevelWindowForOverflowXamlIsland") == 0) {
+        bool is_taskbar_above = false;
+        for (HWND w = prev; w != NULL; w = GetWindow(w, GW_HWNDPREV)) {
+            if (taskbar_hwnd && (w == taskbar_hwnd || GetAncestor(w, GA_ROOT) == taskbar_hwnd)) {
                 is_taskbar_above = true;
                 break;
             }
-        }
-    }
 
-    if (is_taskbar_above) {
-        SetWindowPos(s_overlay_hwnd_ref, HWND_TOPMOST, 0, 0, 0, 0,
-                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            WCHAR className[64] = { 0 };
+            if (GetClassNameW(w, className, 64) > 0) {
+                if (_wcsicmp(className, L"Shell_TrayWnd") == 0 ||
+                    _wcsicmp(className, L"Shell_SecondaryTrayWnd") == 0 ||
+                    _wcsicmp(className, L"TopLevelWindowForOverflowXamlIsland") == 0) {
+                    is_taskbar_above = true;
+                    break;
+                }
+            }
+        }
+
+        if (is_taskbar_above) {
+            SetWindowPos(overlay, HWND_TOPMOST, 0, 0, 0, 0,
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        }
     }
 }
 
@@ -744,17 +902,21 @@ HRESULT TE_DCompLoadStartImage(const wchar_t* image_path)
                 wchar_t* last_slash = wcsrchr(mod_path, L'\\');
                 if (last_slash) *last_slash = L'\0';
 
-                swprintf_s(candidate, MAX_PATH, L"%ls\\%ls", mod_path, image_path);
-                if (GetFileAttributesW(candidate) != INVALID_FILE_ATTRIBUTES) {
-                    wcscpy_s(resolved_path, MAX_PATH, candidate);
-                } else {
-                    swprintf_s(candidate, MAX_PATH, L"%ls\\..\\..\\%ls", mod_path, image_path);
-                    if (GetFileAttributesW(candidate) != INVALID_FILE_ATTRIBUTES) {
-                        wcscpy_s(resolved_path, MAX_PATH, candidate);
-                    } else {
-                        swprintf_s(candidate, MAX_PATH, L"%ls\\..\\..\\Config\\%ls", mod_path, image_path);
-                        if (GetFileAttributesW(candidate) != INVALID_FILE_ATTRIBUTES) {
-                            wcscpy_s(resolved_path, MAX_PATH, candidate);
+                const wchar_t* relatives[] = {
+                    L"",
+                    L"\\..\\..",
+                    L"\\..\\..\\Config",
+                    L"\\..\\..\\..",
+                    L"\\..\\..\\..\\Config"
+                };
+
+                for (const wchar_t* rel : relatives) {
+                    swprintf_s(candidate, MAX_PATH, L"%ls%ls\\%ls", mod_path, rel, image_path);
+                    wchar_t full_path[MAX_PATH] = {};
+                    if (GetFullPathNameW(candidate, MAX_PATH, full_path, NULL)) {
+                        if (GetFileAttributesW(full_path) != INVALID_FILE_ATTRIBUTES) {
+                            wcscpy_s(resolved_path, MAX_PATH, full_path);
+                            break;
                         }
                     }
                 }
@@ -1009,13 +1171,52 @@ int TE_DCompIsCustomStartButtonEnabled(void)
     return s_custom_start_enabled;
 }
 
-int TE_DCompGetStartButtonBounds(RECT* out_rect)
+int TE_DCompGetStartButtonBoundsForTarget(int target_index, RECT* out_rect)
 {
     if (!out_rect || !s_custom_start_enabled) return 0;
-    if (s_start_button_bounds.right > s_start_button_bounds.left) {
-        *out_rect = s_start_button_bounds;
+    if (target_index < 0 || target_index >= TE_MAX_DCOMP_TARGETS) return 0;
+    TE_TargetVisualTree* t = &s_targets[target_index];
+    if (!t->is_active) return 0;
+    if (t->start_button_bounds.right > t->start_button_bounds.left) {
+        *out_rect = t->start_button_bounds;
         return 1;
     }
     return 0;
 }
 
+int TE_DCompGetStartButtonBounds(RECT* out_rect)
+{
+    if (!out_rect || !s_custom_start_enabled) return 0;
+    for (int i = 0; i < s_target_count; i++) {
+        if (s_targets[i].is_active && s_targets[i].start_button_bounds.right > s_targets[i].start_button_bounds.left) {
+            *out_rect = s_targets[i].start_button_bounds;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+HRESULT TE_DCompAttachIslandVisual(IDCompositionVisual* island_visual)
+{
+    s_island_visual_target0 = island_visual;
+    if (s_targets[0].root_visual && island_visual) {
+        s_targets[0].root_visual->RemoveVisual(island_visual);
+        return s_targets[0].root_visual->AddVisual(island_visual, TRUE, nullptr);
+    }
+    return TE_S_OK;
+}
+
+void TE_DCompDetachIslandVisual(IDCompositionVisual* island_visual)
+{
+    if (s_targets[0].root_visual && island_visual) {
+        s_targets[0].root_visual->RemoveVisual(island_visual);
+    }
+    if (s_island_visual_target0 == island_visual) {
+        s_island_visual_target0 = nullptr;
+    }
+}
+
+int TE_DCompIsIslandVisible(void)
+{
+    return TE_DynamicIslandIsVisible() ? 1 : 0;
+}

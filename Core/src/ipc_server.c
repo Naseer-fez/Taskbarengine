@@ -235,6 +235,7 @@ static DWORD WINAPI TE_IpcServerThread(LPVOID lpParam) {
                     }
                 }
             }
+            FlushFileBuffers(g_ipc.hPipe);
             DisconnectNamedPipe(g_ipc.hPipe);
         }
         ResetEvent(ol.hEvent);

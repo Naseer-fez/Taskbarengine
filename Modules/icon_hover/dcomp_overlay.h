@@ -8,6 +8,8 @@
 extern "C" {
 #endif
 
+struct IDCompositionVisual;
+
 /**
  * Create the transparent overlay window positioned over the taskbar.
  *
@@ -157,6 +159,76 @@ int TE_DCompIsCustomStartButtonEnabled(void);
  * @return Non-zero if valid, 0 if no custom Start button is active.
  */
 int TE_DCompGetStartButtonBounds(RECT* out_rect);
+
+#define TE_MAX_DCOMP_TARGETS 16
+
+/**
+ * Register an additional DirectComposition target for a secondary monitor overlay.
+ * Creates an IDCompositionTarget bound to overlay_hwnd with its own root visual and effect group.
+ *
+ * @param taskbar_hwnd Associated taskbar HWND (Shell_SecondaryTrayWnd).
+ * @param overlay_hwnd Overlay window HWND.
+ * @param out_target_index Receives the assigned 0-based target index.
+ * @return TE_S_OK on success, TE_E_FAIL or error HRESULT.
+ */
+HRESULT TE_DCompAddTarget(HWND taskbar_hwnd, HWND overlay_hwnd, int* out_target_index);
+
+/**
+ * Remove a DirectComposition target and destroy its visual tree.
+ *
+ * @param target_index 0-based target index returned by TE_DCompAddTarget.
+ */
+void TE_DCompRemoveTarget(int target_index);
+
+/**
+ * Get the total number of registered targets.
+ */
+int TE_DCompGetTargetCount(void);
+
+/**
+ * Build visual tree for a specific target.
+ */
+HRESULT TE_DCompBuildVisualTreeForTarget(int target_index, int count, const TE_IconElementInfo* elements, const HBITMAP* bitmaps, int baseline_y, int overlay_x, int overlay_y);
+
+/**
+ * Update transforms for a specific target.
+ */
+HRESULT TE_DCompUpdateTransformsForTarget(int target_index, int count, const float* scales,
+                                          const float* pos_x, const float* pos_y,
+                                          const float* tilt_x, const float* tilt_y);
+
+/**
+ * Set overlay alpha for a specific target.
+ */
+HRESULT TE_DCompSetOverlayAlphaForTarget(int target_index, float alpha);
+
+/**
+ * Get Start button bounds for a specific target.
+ */
+int TE_DCompGetStartButtonBoundsForTarget(int target_index, RECT* out_rect);
+
+/**
+ * Attach the dynamic island visual to the primary target's root visual.
+ *
+ * @param island_visual The IDCompositionVisual created by dynamic island.
+ * @return TE_S_OK on success, TE_E_FAIL if root_visual is null.
+ */
+HRESULT TE_DCompAttachIslandVisual(struct IDCompositionVisual* island_visual);
+
+/**
+ * Detach the dynamic island visual from the primary target's root visual.
+ *
+ * @param island_visual The IDCompositionVisual to detach.
+ */
+void TE_DCompDetachIslandVisual(struct IDCompositionVisual* island_visual);
+
+/**
+ * Query whether the dynamic island visual is currently visible and requires
+ * the overlay window to remain shown even if icon hover is idle.
+ *
+ * @return Non-zero if island is visible, 0 otherwise.
+ */
+int TE_DCompIsIslandVisible(void);
 
 #ifdef __cplusplus
 }

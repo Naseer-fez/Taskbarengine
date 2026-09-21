@@ -35,8 +35,18 @@ std::optional<std::string> GuiIpcGetPerfStats();
  */
 std::optional<std::string> GuiIpcGetPluginList();
 
+HRESULT GuiIpcShutdown();
+
 /**
- * @brief Request the engine to cleanly shut down and unload plugins.
+ * @brief Request the engine to enable a specific plugin by name.
+ * @param plugin_name Name of the plugin to enable (e.g., "taskbar_resize").
  * @return S_OK on success, or an error HRESULT.
  */
-HRESULT GuiIpcShutdown();
+HRESULT GuiIpcEnablePlugin(const std::string& plugin_name);
+
+/**
+ * @brief Request the engine to disable a specific plugin by name.
+ * @param plugin_name Name of the plugin to disable (e.g., "taskbar_resize").
+ * @return S_OK on success, or an error HRESULT.
+ */
+HRESULT GuiIpcDisablePlugin(const std::string& plugin_name);

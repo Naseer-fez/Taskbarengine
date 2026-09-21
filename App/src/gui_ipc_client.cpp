@@ -103,7 +103,10 @@ static HRESULT SendIpcCommand(TE_IpcMsgType type, const void* payload, uint32_t 
 
 bool GuiIpcIsConnected()
 {
-    return WaitNamedPipeW(TE_PIPE_NAME, 100) != 0;
+    if (WaitNamedPipeW(TE_PIPE_NAME, 0)) return true;
+    DWORD err = GetLastError();
+    if (err == ERROR_PIPE_BUSY) return true;
+    return false;
 }
 
 HRESULT GuiIpcReloadConfig()
@@ -151,6 +154,24 @@ HRESULT GuiIpcShutdown()
 {
     TE_IpcMsgType response = (TE_IpcMsgType)0;
     HRESULT hr = SendIpcCommand(TE_IPC_MSG_SHUTDOWN, nullptr, 0, &response, nullptr);
+    if (FAILED(hr)) return hr;
+    return (response == TE_IPC_MSG_STATUS) ? S_OK : E_FAIL;
+}
+
+HRESULT GuiIpcEnablePlugin(const std::string& plugin_name)
+{
+    if (plugin_name.empty()) return E_INVALIDARG;
+    TE_IpcMsgType response = (TE_IpcMsgType)0;
+    HRESULT hr = SendIpcCommand(TE_IPC_MSG_ENABLE_PLUGIN, plugin_name.c_str(), static_cast<uint32_t>(plugin_name.length() + 1), &response, nullptr);
+    if (FAILED(hr)) return hr;
+    return (response == TE_IPC_MSG_STATUS) ? S_OK : E_FAIL;
+}
+
+HRESULT GuiIpcDisablePlugin(const std::string& plugin_name)
+{
+    if (plugin_name.empty()) return E_INVALIDARG;
+    TE_IpcMsgType response = (TE_IpcMsgType)0;
+    HRESULT hr = SendIpcCommand(TE_IPC_MSG_DISABLE_PLUGIN, plugin_name.c_str(), static_cast<uint32_t>(plugin_name.length() + 1), &response, nullptr);
     if (FAILED(hr)) return hr;
     return (response == TE_IPC_MSG_STATUS) ? S_OK : E_FAIL;
 }

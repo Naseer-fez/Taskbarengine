@@ -13,6 +13,7 @@
 #include <sdk/te_plugin.h>
 #include "magnification.h"
 #include "uia_discovery.h"
+#include "dynamic_island.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -39,6 +40,7 @@ typedef struct TE_HoverConfig {
     float drag_recession_scale;     /**< Scale multiplier when icon is held/dragged (0.50 - 1.00). */
     float drop_zone_push;           /**< Horizontal push distance in pixels during drag (10 - 120). */
     wchar_t start_image_path[MAX_PATH]; /**< Custom start button image file path (PNG or SVG). */
+    TE_DynamicIslandConfig dynamic_island; /**< Dynamic Island configuration. */
 } TE_HoverConfig;
 
 /**
@@ -98,6 +100,25 @@ typedef struct TE_IconAnimState {
     float current_pos_x;            /**< Current smoothed horizontal offset for displacement. */
 } TE_IconAnimState;
 
+#define TE_MAX_MONITORS 16
+
+/**
+ * State for a single taskbar / monitor overlay instance.
+ */
+typedef struct TE_MonitorState {
+    HWND taskbar_hwnd;                          /**< Target taskbar HWND (Shell_TrayWnd or Shell_SecondaryTrayWnd). */
+    HMONITOR monitor;                           /**< Associated monitor handle. */
+    HWND overlay_hwnd;                          /**< DComp overlay window handle. */
+    uint32_t current_dpi;                       /**< Monitor DPI. */
+    TE_TaskbarGeometryInfo geometry;            /**< Taskbar geometry on this display. */
+    TE_IconElementCache icon_cache;             /**< Discovered icons on this taskbar. */
+    TE_IconAnimState anim[TE_HOVER_MAX_ICONS];  /**< Per-icon animation state for this taskbar. */
+    int anim_count;                             /**< Number of active icon animations. */
+    TE_HoverMouseState mouse;                   /**< Mouse tracking state on this taskbar. */
+    int target_index;                           /**< DirectComposition target index. */
+    int is_active;                              /**< Non-zero if monitor is connected and active. */
+} TE_MonitorState;
+
 /**
  * Central internal state for the IconHover plugin.
  * Single instance, lifetime managed by icon_hover.c lifecycle.
@@ -114,6 +135,10 @@ typedef struct TE_IconHoverState {
     TE_TaskbarGeometryInfo geometry;        /**< Cached taskbar geometry info. */
     uint32_t current_dpi;                   /**< Current monitor DPI. */
     int enabled;                            /**< Non-zero if plugin is actively running. */
+
+    /* Multi-monitor array */
+    TE_MonitorState monitors[TE_MAX_MONITORS];  /**< Per-monitor state array. */
+    int monitor_count;                          /**< Total number of tracked monitors. */
 } TE_IconHoverState;
 
 /**
@@ -121,6 +146,11 @@ typedef struct TE_IconHoverState {
  * Defined in icon_hover.c, used by all subsystem files.
  */
 extern TE_IconHoverState g_hover_state;
+
+/**
+ * Accessor for the icon hover plugin interface.
+ */
+TE_EXPORT const PluginInterface* TE_IconHoverGetPluginInterface(void);
 
 #ifdef __cplusplus
 }

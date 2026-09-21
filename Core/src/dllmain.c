@@ -74,10 +74,8 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
         case DLL_PROCESS_DETACH:
         {
             if (TE_IsExplorerProcess()) {
-                if (g_taskbarHwnd) {
-                    TE_TaskbarSubclassRemove(g_taskbarHwnd);
-                    g_taskbarHwnd = NULL;
-                }
+                TE_TaskbarUntrackAll();
+                g_taskbarHwnd = NULL;
                 /* If lpvReserved != NULL, the process is terminating and worker
                  * threads are already terminated by the OS; waiting on them under
                  * loader lock causes an unrecoverable deadlock. */
@@ -97,12 +95,13 @@ LRESULT CALLBACK TE_GetMsgHookProc(int nCode, WPARAM wParam, LPARAM lParam)
     if (nCode >= 0 && lParam) {
         const MSG* msg = (const MSG*)lParam;
         if (msg->message == WM_MOUSEMOVE) {
-            HWND taskbar = g_taskbarHwnd;
-            if (taskbar && (msg->hwnd == taskbar || IsChild(taskbar, msg->hwnd))) {
+            HWND taskbar = TE_TaskbarFindRoot(msg->hwnd);
+            if (taskbar) {
                 TE_TaskbarMouseData mouse_data;
                 mouse_data.cursor_pos = msg->pt;
                 mouse_data.is_in_taskbar = TRUE;
                 mouse_data.is_dragging = ((msg->wParam & MK_LBUTTON) != 0) || ((GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0);
+                mouse_data.taskbar_hwnd = taskbar;
                 TE_EventDispatchFire(TE_EVENT_TASKBAR_MOUSE, &mouse_data);
             }
         }

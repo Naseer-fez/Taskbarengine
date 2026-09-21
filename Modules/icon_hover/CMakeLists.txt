@@ -8,6 +8,8 @@ add_library(IconHoverPlugin SHARED
     icon_capture.cpp
     dcomp_overlay.cpp
     frame_loop.cpp
+    gsmtc_source.cpp
+    dynamic_island.cpp
 )
 
 target_include_directories(IconHoverPlugin PRIVATE
@@ -31,6 +33,8 @@ target_link_libraries(IconHoverPlugin PRIVATE
     uuid
     windowscodecs
     shlwapi
+    windowsapp
+    dwrite
 )
 
 # _USE_MATH_DEFINES for M_PI in magnification.c

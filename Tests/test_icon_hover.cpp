@@ -658,3 +658,209 @@ TEST_CASE("Custom Start Button - Magnification Falloff & Spring Physics Integrat
         REQUIRE(ticks < 150); // Fully settled in under 1.2 seconds
     }
 }
+
+TEST_CASE("Icon Hover - Multi-Target DirectComposition Transforms", "[icon_hover][multi_monitor][dcomp]") {
+    SECTION("Target index bounds and management") {
+        REQUIRE(TE_DCompGetTargetCount() >= 0);
+
+        int target_idx = -1;
+        // Invalid arguments
+        REQUIRE(TE_DCompAddTarget(NULL, NULL, &target_idx) == TE_E_INVALIDARG);
+
+        // Invalid target index for updates
+        float scales[1] = { 1.0f };
+        float pos_x[1] = { 0.0f };
+        float pos_y[1] = { 0.0f };
+        REQUIRE(TE_DCompUpdateTransformsForTarget(-1, 1, scales, pos_x, pos_y, nullptr, nullptr) == TE_E_INVALIDARG);
+        REQUIRE(TE_DCompUpdateTransformsForTarget(99, 1, scales, pos_x, pos_y, nullptr, nullptr) == TE_E_INVALIDARG);
+
+        // Alpha bounds
+        REQUIRE(TE_DCompSetOverlayAlphaForTarget(-1, 0.5f) == TE_E_INVALIDARG);
+        REQUIRE(TE_DCompSetOverlayAlphaForTarget(99, 0.5f) == TE_E_INVALIDARG);
+    }
+}
+
+TEST_CASE("Icon Hover - Multi-Monitor Mouse Coordinate Routing", "[icon_hover][multi_monitor][routing]") {
+    SECTION("Independent per-monitor mouse tracking and settle state") {
+        TE_IconHoverState saved_state = g_hover_state;
+
+        g_hover_state.enabled = 1;
+        g_hover_state.monitor_count = 2;
+
+        // Setup Monitor 0 (Primary)
+        HWND dummy_tb0 = (HWND)(uintptr_t)0x1001;
+        g_hover_state.monitors[0].taskbar_hwnd = dummy_tb0;
+        g_hover_state.monitors[0].is_active = 1;
+        g_hover_state.monitors[0].anim_count = 3;
+        g_hover_state.monitors[0].geometry.taskbarRect = { 0, 1040, 1920, 1080 };
+        g_hover_state.monitors[0].geometry.headroom_y = 64;
+        g_hover_state.monitors[0].mouse.is_in_taskbar = 0;
+
+        // Setup Monitor 1 (Secondary)
+        HWND dummy_tb1 = (HWND)(uintptr_t)0x1002;
+        g_hover_state.monitors[1].taskbar_hwnd = dummy_tb1;
+        g_hover_state.monitors[1].is_active = 1;
+        g_hover_state.monitors[1].anim_count = 3;
+        g_hover_state.monitors[1].geometry.taskbarRect = { 1920, 1040, 3840, 1080 };
+        g_hover_state.monitors[1].geometry.headroom_y = 64;
+        g_hover_state.monitors[1].mouse.is_in_taskbar = 0;
+
+        // Move mouse to Monitor 1
+        TE_FrameLoopOnMouseMoveEx(2500.0f, 1050.0f, 0, dummy_tb1);
+
+        REQUIRE(g_hover_state.monitors[1].mouse.is_in_taskbar == 1);
+        REQUIRE(g_hover_state.monitors[1].mouse.cursor_x == 2500.0f);
+        REQUIRE(g_hover_state.monitors[0].mouse.is_in_taskbar == 0);
+
+        // Move mouse back to Monitor 0
+        TE_FrameLoopOnMouseMoveEx(500.0f, 1050.0f, 0, dummy_tb0);
+
+        REQUIRE(g_hover_state.monitors[0].mouse.is_in_taskbar == 1);
+        REQUIRE(g_hover_state.monitors[0].mouse.cursor_x == 500.0f);
+        REQUIRE(g_hover_state.monitors[1].mouse.is_in_taskbar == 0);
+        REQUIRE(g_hover_state.monitors[1].mouse.is_settling == 1);
+
+        // Mouse leave: both settle
+        TE_FrameLoopOnMouseLeave();
+        REQUIRE(g_hover_state.monitors[0].mouse.is_in_taskbar == 0);
+        REQUIRE(g_hover_state.monitors[0].mouse.is_settling == 1);
+        REQUIRE(g_hover_state.monitors[1].mouse.is_in_taskbar == 0);
+        REQUIRE(g_hover_state.monitors[1].mouse.is_settling == 1);
+
+        g_hover_state = saved_state;
+    }
+}
+
+TEST_CASE("Icon Hover - Multi-Monitor Start Button Bounds & Click Hit-Testing", "[icon_hover][multi_monitor][start_button]") {
+    SECTION("Start button click hit-testing on primary and secondary displays") {
+        TE_IconHoverState saved_state = g_hover_state;
+
+        g_hover_state.enabled = 1;
+        g_hover_state.monitor_count = 2;
+
+        // Monitor 0
+        g_hover_state.monitors[0].is_active = 1;
+        g_hover_state.monitors[0].anim_count = 2;
+        g_hover_state.monitors[0].icon_cache.items[0].element_type = TE_ELEM_START_BUTTON;
+        g_hover_state.monitors[0].icon_cache.items[1].element_type = TE_ELEM_APP_ICON;
+        g_hover_state.monitors[0].anim[0].center_x = 24.0f;
+        g_hover_state.monitors[0].anim[0].center_y = 1056.0f;
+        g_hover_state.monitors[0].anim[0].base_width = 48.0f;
+        g_hover_state.monitors[0].anim[0].base_height = 48.0f;
+        g_hover_state.monitors[0].anim[0].current_scale = 1.0f;
+        g_hover_state.monitors[0].anim[0].current_pos_x = 0.0f;
+        g_hover_state.monitors[0].anim[0].currentOffsetY = 0.0f;
+
+        // Monitor 1 (Secondary display at X=1920)
+        g_hover_state.monitors[1].is_active = 1;
+        g_hover_state.monitors[1].anim_count = 2;
+        g_hover_state.monitors[1].icon_cache.items[0].element_type = TE_ELEM_START_BUTTON;
+        g_hover_state.monitors[1].icon_cache.items[1].element_type = TE_ELEM_APP_ICON;
+        g_hover_state.monitors[1].anim[0].center_x = 1944.0f;
+        g_hover_state.monitors[1].anim[0].center_y = 1056.0f;
+        g_hover_state.monitors[1].anim[0].base_width = 48.0f;
+        g_hover_state.monitors[1].anim[0].base_height = 48.0f;
+        g_hover_state.monitors[1].anim[0].current_scale = 1.0f;
+        g_hover_state.monitors[1].anim[0].current_pos_x = 0.0f;
+        g_hover_state.monitors[1].anim[0].currentOffsetY = 0.0f;
+
+        // Hit primary Start button
+        REQUIRE(TE_FrameLoopCheckStartButtonClick(24.0f, 1056.0f) == 1);
+
+        // Hit secondary Start button
+        REQUIRE(TE_FrameLoopCheckStartButtonClick(1944.0f, 1056.0f) == 1);
+
+        // Outside bounds on both displays
+        REQUIRE(TE_FrameLoopCheckStartButtonClick(500.0f, 1056.0f) == 0);
+        REQUIRE(TE_FrameLoopCheckStartButtonClick(2500.0f, 1056.0f) == 0);
+
+        // When disabled, returns 0 everywhere
+        g_hover_state.enabled = 0;
+        REQUIRE(TE_FrameLoopCheckStartButtonClick(24.0f, 1056.0f) == 0);
+        REQUIRE(TE_FrameLoopCheckStartButtonClick(1944.0f, 1056.0f) == 0);
+
+        g_hover_state = saved_state;
+    }
+}
+
+TEST_CASE("Icon Hover - Multi-Monitor Notification Bounce Dispatch", "[icon_hover][multi_monitor][bounce]") {
+    SECTION("Per-monitor bounce impulse isolation") {
+        TE_IconHoverState saved_state = g_hover_state;
+
+        g_hover_state.enabled = 1;
+        g_hover_state.monitor_count = 2;
+
+        g_hover_state.monitors[0].is_active = 1;
+        g_hover_state.monitors[0].anim_count = 3;
+        g_hover_state.monitors[0].anim[1].velocityOffsetY = 0.0f;
+
+        g_hover_state.monitors[1].is_active = 1;
+        g_hover_state.monitors[1].anim_count = 3;
+        g_hover_state.monitors[1].anim[1].velocityOffsetY = 0.0f;
+
+        // Bounce icon 1 on monitor 1
+        HRESULT hr = TE_FrameLoopTriggerIconBounceForMonitor(1, 1, 600.0f);
+        REQUIRE(hr == TE_S_OK);
+        REQUIRE(g_hover_state.monitors[1].anim[1].velocityOffsetY == -600.0f);
+        REQUIRE(g_hover_state.monitors[0].anim[1].velocityOffsetY == 0.0f);
+
+        // Bounce icon 2 on monitor 0
+        hr = TE_FrameLoopTriggerIconBounceForMonitor(0, 2, 800.0f);
+        REQUIRE(hr == TE_S_OK);
+        REQUIRE(g_hover_state.monitors[0].anim[2].velocityOffsetY == -800.0f);
+        REQUIRE(g_hover_state.monitors[1].anim[2].velocityOffsetY == 0.0f);
+
+        // Argument validation
+        REQUIRE(TE_FrameLoopTriggerIconBounceForMonitor(-1, 0, 500.0f) == TE_E_INVALIDARG);
+        REQUIRE(TE_FrameLoopTriggerIconBounceForMonitor(5, 0, 500.0f) == TE_E_INVALIDARG);
+        REQUIRE(TE_FrameLoopTriggerIconBounceForMonitor(0, 10, 500.0f) == TE_E_INVALIDARG);
+
+        g_hover_state = saved_state;
+    }
+}
+
+TEST_CASE("Icon Hover - UIA Cross-Thread Deadlock Fix", "[icon_hover][deadlock]") {
+    const PluginInterface* plugin = TE_IconHoverGetPluginInterface();
+    REQUIRE(plugin != nullptr);
+
+    WNDCLASSW wc = {};
+    wc.lpfnWndProc = DefWindowProcW;
+    wc.hInstance = GetModuleHandleW(NULL);
+    wc.lpszClassName = L"TE_DummyTaskbarDeadlock";
+    RegisterClassW(&wc);
+    HWND dummy_tb = CreateWindowW(L"TE_DummyTaskbarDeadlock", L"", WS_POPUP, 0, 0, 100, 100, NULL, NULL, GetModuleHandleW(NULL), NULL);
+
+    PluginContext ctx = {};
+    ctx.struct_size = sizeof(PluginContext);
+    ctx.taskbar_hwnd = dummy_tb;
+    ctx.subscribe = [](uint32_t, void (*)(uint32_t, const void*, void*), void*) -> HRESULT { return S_OK; };
+    ctx.unsubscribe = [](uint32_t, void (*)(uint32_t, const void*, void*)) -> HRESULT { return S_OK; };
+
+    // Full Warmup Cycle
+    plugin->Initialize(&ctx);
+    plugin->Enable();
+    plugin->Disable();
+    plugin->Shutdown();
+
+    // Measured Cycle
+    LARGE_INTEGER freq, start, end;
+    QueryPerformanceFrequency(&freq);
+
+    QueryPerformanceCounter(&start);
+    plugin->Initialize(&ctx);
+    QueryPerformanceCounter(&end);
+    double init_ms = (double)(end.QuadPart - start.QuadPart) * 1000.0 / freq.QuadPart;
+    REQUIRE(init_ms < 50.0);
+
+    QueryPerformanceCounter(&start);
+    plugin->Enable();
+    QueryPerformanceCounter(&end);
+    double enable_ms = (double)(end.QuadPart - start.QuadPart) * 1000.0 / freq.QuadPart;
+    REQUIRE(enable_ms < 50.0);
+
+    plugin->Disable();
+    plugin->Shutdown();
+
+    DestroyWindow(dummy_tb);
+    UnregisterClassW(L"TE_DummyTaskbarDeadlock", GetModuleHandleW(NULL));
+}

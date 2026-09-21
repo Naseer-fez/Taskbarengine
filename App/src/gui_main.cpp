@@ -33,6 +33,7 @@ static void LogGui(const std::string& msg);
 static bool IsEngineRunning()
 {
     if (GuiIpcIsConnected()) return true;
+    if (FindWindowW(L"TaskbarEngineHost", NULL) != NULL) return true;
     HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (hSnap != INVALID_HANDLE_VALUE) {
         PROCESSENTRY32W pe = { sizeof(pe) };
@@ -112,7 +113,26 @@ static bool StopEngineProcess()
     // Try clean IPC shutdown first so plugins unload cleanly from explorer.exe
     if (GuiIpcIsConnected()) {
         GuiIpcShutdown();
-        Sleep(150); // allow short grace period for plugins to unload
+    }
+
+    HWND hHost = FindWindowW(L"TaskbarEngineHost", NULL);
+    if (hHost) {
+        DWORD pid = 0;
+        GetWindowThreadProcessId(hHost, &pid);
+        PostMessageW(hHost, WM_CLOSE, 0, 0);
+        if (pid) {
+            HANDLE hProc = OpenProcess(SYNCHRONIZE | PROCESS_TERMINATE, FALSE, pid);
+            if (hProc) {
+                DWORD waitRes = WaitForSingleObject(hProc, 1500);
+                if (waitRes == WAIT_OBJECT_0) {
+                    CloseHandle(hProc);
+                    return true;
+                }
+                TerminateProcess(hProc, 0);
+                CloseHandle(hProc);
+                return true;
+            }
+        }
     }
 
     bool killed = false;
@@ -122,9 +142,11 @@ static bool StopEngineProcess()
         if (Process32FirstW(hSnap, &pe)) {
             do {
                 if (_wcsicmp(pe.szExeFile, L"TaskbarEngine.exe") == 0) {
-                    HANDLE hProc = OpenProcess(PROCESS_TERMINATE, FALSE, pe.th32ProcessID);
+                    HANDLE hProc = OpenProcess(SYNCHRONIZE | PROCESS_TERMINATE, FALSE, pe.th32ProcessID);
                     if (hProc) {
-                        TerminateProcess(hProc, 0);
+                        if (WaitForSingleObject(hProc, 500) != WAIT_OBJECT_0) {
+                            TerminateProcess(hProc, 0);
+                        }
                         CloseHandle(hProc);
                         killed = true;
                     }
@@ -309,17 +331,35 @@ struct App : ApplicationT<App, winrt::Microsoft::UI::Xaml::Markup::IXamlMetadata
         
         Frame contentFrame;
         
-        NavigationViewItem hoverItem;
-        hoverItem.Content(box_value(L"Icon Hover & Physics"));
-        hoverItem.Icon(SymbolIcon(Symbol::Zoom));
-        hoverItem.Tag(box_value(L"icon_hover"));
-        nav.MenuItems().Append(hoverItem);
-
         NavigationViewItem resizeItem;
         resizeItem.Content(box_value(L"Taskbar Resize"));
         resizeItem.Icon(SymbolIcon(Symbol::DockBottom));
         resizeItem.Tag(box_value(L"taskbar_resize"));
         nav.MenuItems().Append(resizeItem);
+
+        NavigationViewItem hoverItem;
+        hoverItem.Content(box_value(L"Icon Magnification"));
+        hoverItem.Icon(SymbolIcon(Symbol::Zoom));
+        hoverItem.Tag(box_value(L"icon_magnification"));
+        nav.MenuItems().Append(hoverItem);
+
+        NavigationViewItem physicsItem;
+        physicsItem.Content(box_value(L"Physics & Gestures"));
+        physicsItem.Icon(SymbolIcon(Symbol::Play));
+        physicsItem.Tag(box_value(L"icon_physics"));
+        nav.MenuItems().Append(physicsItem);
+
+        NavigationViewItem startItem;
+        startItem.Content(box_value(L"Start Button"));
+        startItem.Icon(SymbolIcon(Symbol::Home));
+        startItem.Tag(box_value(L"start_button"));
+        nav.MenuItems().Append(startItem);
+
+        NavigationViewItem islandItem;
+        islandItem.Content(box_value(L"Dynamic Island"));
+        islandItem.Icon(SymbolIcon(Symbol::MusicInfo));
+        islandItem.Tag(box_value(L"dynamic_island"));
+        nav.MenuItems().Append(islandItem);
 
         auto schemaOpt = GuiIpcGetSettings();
         if (schemaOpt.has_value()) {
@@ -332,7 +372,9 @@ struct App : ApplicationT<App, winrt::Microsoft::UI::Xaml::Markup::IXamlMetadata
                         cJSON* nameNode = cJSON_GetObjectItem(plugin, "name");
                         if (nameNode && cJSON_IsString(nameNode) && nameNode->valuestring) {
                             std::string nameStr = nameNode->valuestring;
-                            if (nameStr != "icon_hover" && nameStr != "taskbar_resize") {
+                            if (nameStr != "icon_hover" && nameStr != "taskbar_resize" &&
+                                nameStr != "icon_magnification" && nameStr != "icon_physics" &&
+                                nameStr != "start_button" && nameStr != "dynamic_island") {
                                 NavigationViewItem item;
                                 item.Content(box_value(to_hstring(nameStr)));
                                 item.Icon(SymbolIcon(Symbol::Setting));
@@ -353,11 +395,23 @@ struct App : ApplicationT<App, winrt::Microsoft::UI::Xaml::Markup::IXamlMetadata
         nav.FooterMenuItems().Append(aboutItem);
         
         nav.SelectionChanged([contentFrame](NavigationView const&, NavigationViewSelectionChangedEventArgs const& args) {
-            auto item = args.SelectedItem().as<NavigationViewItem>();
+            if (!args.SelectedItem()) return;
+            auto item = args.SelectedItem().try_as<NavigationViewItem>();
+            if (!item || !item.Tag()) return;
             auto tag = unbox_value<hstring>(item.Tag());
             
             if (tag == L"About") {
                 contentFrame.Content(CreateAboutPage());
+            } else if (tag == L"taskbar_resize") {
+                contentFrame.Content(CreateTaskbarResizePage());
+            } else if (tag == L"icon_magnification" || tag == L"icon_hover") {
+                contentFrame.Content(CreateIconMagnificationPage());
+            } else if (tag == L"icon_physics") {
+                contentFrame.Content(CreatePhysicsSettingsPage());
+            } else if (tag == L"start_button") {
+                contentFrame.Content(CreateStartButtonPage());
+            } else if (tag == L"dynamic_island") {
+                contentFrame.Content(CreateDynamicIslandPage());
             } else {
                 std::string pluginName = to_string(tag);
                 auto currentSchemaOpt = GuiIpcGetSettings();
@@ -486,8 +540,8 @@ struct App : ApplicationT<App, winrt::Microsoft::UI::Xaml::Markup::IXamlMetadata
         nav.Header(headerPanel);
         
         nav.Content(contentFrame);
-        nav.SelectedItem(hoverItem);
-        contentFrame.Content(CreateSettingsPage("icon_hover", "{}"));
+        nav.SelectedItem(resizeItem);
+        contentFrame.Content(CreateTaskbarResizePage());
         
         m_window.Content(nav);
         LogGui("Activating window...");

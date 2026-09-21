@@ -63,6 +63,8 @@ add_library(te_icon_hover_testlib STATIC
     ${CMAKE_SOURCE_DIR}/Modules/icon_hover/icon_capture.cpp
     ${CMAKE_SOURCE_DIR}/Modules/icon_hover/dcomp_overlay.cpp
     ${CMAKE_SOURCE_DIR}/Modules/icon_hover/frame_loop.cpp
+    ${CMAKE_SOURCE_DIR}/Modules/icon_hover/dynamic_island.cpp
+    ${CMAKE_SOURCE_DIR}/Modules/icon_hover/gsmtc_source.cpp
 )
 
 target_include_directories(te_icon_hover_testlib PUBLIC
@@ -86,6 +88,8 @@ target_link_libraries(te_icon_hover_testlib PUBLIC
     uuid
     windowscodecs
     shlwapi
+    windowsapp
+    dwrite
 )
 
 target_compile_definitions(te_icon_hover_testlib PRIVATE _USE_MATH_DEFINES TE_HOVER_TESTLIB)
@@ -105,6 +109,7 @@ add_executable(te_tests
     test_icon_hover.cpp
     test_config_io.cpp
     ${CMAKE_SOURCE_DIR}/App/src/config_io.cpp
+    test_dynamic_island.cpp
 )
 
 target_compile_definitions(te_tests PRIVATE _CRT_SECURE_NO_WARNINGS)
@@ -123,6 +128,8 @@ target_link_libraries(te_tests PRIVATE
     dxguid
     windowscodecs
     shlwapi
+    windowsapp
+    dwrite
     Catch2::Catch2WithMain
 )
 

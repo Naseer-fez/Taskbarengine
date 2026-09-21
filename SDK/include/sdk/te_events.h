@@ -52,6 +52,7 @@ typedef struct TE_TaskbarMouseData {
     POINT cursor_pos;
     BOOL is_in_taskbar;
     BOOL is_dragging;
+    HWND taskbar_hwnd;
 } TE_TaskbarMouseData;
 
 typedef struct TE_ShellHookData {
