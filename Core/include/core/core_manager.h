@@ -32,6 +32,16 @@ HRESULT TE_CoreManagerInit(HWND taskbar_hwnd);
 void TE_CoreManagerShutdown(void);
 
 /**
+ * Shut down the Core Manager with an optional taskbar window to exclude
+ * from immediate subclass removal (used during WM_DESTROY so subclass
+ * removal occurs safely in WM_NCDESTROY).
+ *
+ * @param except_hwnd Window handle whose subclass removal is deferred to WM_NCDESTROY (or NULL).
+ * @note Thread Safety: Must be called on UI thread.
+ */
+void TE_CoreManagerShutdownExcept(HWND except_hwnd);
+
+/**
  * Reload configuration from disk and dispatch CONFIG_CHANGED events.
  * Called on the UI thread (marshaled from config watcher or IPC).
  *

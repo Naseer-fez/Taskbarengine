@@ -15,10 +15,14 @@ add_library(te_core_testlib STATIC
     ${CMAKE_SOURCE_DIR}/Core/src/fault_isolation.c
     ${CMAKE_SOURCE_DIR}/Core/src/state_store.c
     ${CMAKE_SOURCE_DIR}/Core/src/plugin_loader.c
+    ${CMAKE_SOURCE_DIR}/Core/src/shell_hook.c
+    ${CMAKE_SOURCE_DIR}/Modules/taskbar_transparency/composition_api.c
+    ${CMAKE_SOURCE_DIR}/Modules/taskbar_transparency/tray_discovery.c
 )
 
 target_include_directories(te_core_testlib PUBLIC
     ${CMAKE_SOURCE_DIR}/Core/include
+    ${CMAKE_SOURCE_DIR}/Modules/taskbar_transparency
 )
 
 target_link_libraries(te_core_testlib PUBLIC
@@ -110,6 +114,11 @@ add_executable(te_tests
     test_config_io.cpp
     ${CMAKE_SOURCE_DIR}/App/src/config_io.cpp
     test_dynamic_island.cpp
+    test_phase1_verification.cpp
+    test_phase2_verification.cpp
+    test_phase3_verification.cpp
+    test_phase4_verification.cpp
+    test_phase5_verification.cpp
 )
 
 target_compile_definitions(te_tests PRIVATE _CRT_SECURE_NO_WARNINGS)

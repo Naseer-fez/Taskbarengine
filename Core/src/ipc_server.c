@@ -20,6 +20,7 @@ static char* GenerateSettingsJson(void) {
     cJSON* root = cJSON_CreateObject();
     cJSON* plugins_arr = cJSON_AddArrayToObject(root, "plugins");
     
+    TE_PluginLoaderLockShared();
     int count = TE_PluginLoaderGetCount();
     for (int i = 0; i < count; i++) {
         TE_PluginEntry* entry = TE_PluginLoaderGetEntry(i);
@@ -83,6 +84,7 @@ static char* GenerateSettingsJson(void) {
         }
         cJSON_AddItemToArray(plugins_arr, plugin_obj);
     }
+    TE_PluginLoaderUnlockShared();
     
     char* json_str = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
@@ -105,7 +107,9 @@ static HRESULT TE_IpcServerReadExact(HANDLE pipe, void* buffer, DWORD bytes, LPO
                         return HRESULT_FROM_WIN32(GetLastError());
                     }
                 } else {
-                    CancelIo(pipe);
+                    CancelIoEx(pipe, ol);
+                    DWORD dummy = 0;
+                    GetOverlappedResult(pipe, ol, &dummy, TRUE);
                     return HRESULT_FROM_WIN32(ERROR_OPERATION_ABORTED);
                 }
             } else {
@@ -134,7 +138,9 @@ static HRESULT TE_IpcServerWriteExact(HANDLE pipe, const void* buffer, DWORD byt
                         return HRESULT_FROM_WIN32(GetLastError());
                     }
                 } else {
-                    CancelIo(pipe);
+                    CancelIoEx(pipe, ol);
+                    DWORD dummy = 0;
+                    GetOverlappedResult(pipe, ol, &dummy, TRUE);
                     return HRESULT_FROM_WIN32(ERROR_OPERATION_ABORTED);
                 }
             } else {
@@ -149,69 +155,104 @@ static HRESULT TE_IpcServerWriteExact(HANDLE pipe, const void* buffer, DWORD byt
 
 static DWORD WINAPI TE_IpcServerThread(LPVOID lpParam) {
     (void)lpParam;
-    OVERLAPPED ol = {0};
-    ol.hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
-    if (!ol.hEvent) return 1;
+    OVERLAPPED connect_ol = {0};
+    connect_ol.hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
+    if (!connect_ol.hEvent) return 1;
 
-    HANDLE handles[2] = { ol.hEvent, g_ipc.hStopEvent };
+    OVERLAPPED read_ol = {0};
+    read_ol.hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
+    if (!read_ol.hEvent) {
+        CloseHandle(connect_ol.hEvent);
+        return 1;
+    }
+
+    OVERLAPPED write_ol = {0};
+    write_ol.hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
+    if (!write_ol.hEvent) {
+        CloseHandle(connect_ol.hEvent);
+        CloseHandle(read_ol.hEvent);
+        return 1;
+    }
+
+    HANDLE handles[2] = { connect_ol.hEvent, g_ipc.hStopEvent };
 
     while (g_ipc.is_running) {
-        if (!ConnectNamedPipe(g_ipc.hPipe, &ol)) {
+        BOOL connected = FALSE;
+        ResetEvent(connect_ol.hEvent);
+        connect_ol.Offset = 0;
+        connect_ol.OffsetHigh = 0;
+
+        if (!ConnectNamedPipe(g_ipc.hPipe, &connect_ol)) {
             DWORD err = GetLastError();
             if (err == ERROR_PIPE_CONNECTED) {
-                SetEvent(ol.hEvent);
-            } else if (err != ERROR_IO_PENDING) {
+                /* Client connected between pipe creation/disconnect and ConnectNamedPipe.
+                 * Immediate synchronous success; do NOT call GetOverlappedResult. */
+                connected = TRUE;
+            } else if (err == ERROR_IO_PENDING) {
+                DWORD wait_res = WaitForMultipleObjects(2, handles, FALSE, INFINITE);
+                if (wait_res == WAIT_OBJECT_0) {
+                    DWORD bytes_transferred = 0;
+                    if (GetOverlappedResult(g_ipc.hPipe, &connect_ol, &bytes_transferred, FALSE)) {
+                        connected = TRUE;
+                    } else {
+                        DisconnectNamedPipe(g_ipc.hPipe);
+                    }
+                } else {
+                    CancelIoEx(g_ipc.hPipe, &connect_ol);
+                    DWORD dummy = 0;
+                    GetOverlappedResult(g_ipc.hPipe, &connect_ol, &dummy, TRUE);
+                    break;
+                }
+            } else {
                 char msg[128];
                 snprintf(msg, sizeof(msg), "ConnectNamedPipe failed: %lu", (unsigned long)err);
                 TE_LogWrite(TE_LOG_ERROR, "IpcServer", msg);
                 Sleep(100);
                 continue;
             }
+        } else {
+            /* ConnectNamedPipe succeeded synchronously */
+            connected = TRUE;
         }
 
-        DWORD wait_res = WaitForMultipleObjects(2, handles, FALSE, INFINITE);
-        if (wait_res == WAIT_OBJECT_0 + 1) { /* Stop event */
-            CancelIo(g_ipc.hPipe);
-            break;
-        }
-
-        DWORD bytes_transferred = 0;
-        if (GetOverlappedResult(g_ipc.hPipe, &ol, &bytes_transferred, FALSE)) {
+        if (connected && g_ipc.is_running) {
             TE_IpcHeader header;
-            if (SUCCEEDED(TE_IpcServerReadExact(g_ipc.hPipe, &header, sizeof(header), &ol))) {
+            if (SUCCEEDED(TE_IpcServerReadExact(g_ipc.hPipe, &header, sizeof(header), &read_ol))) {
                 if (SUCCEEDED(TE_IpcValidateHeader(&header))) {
                     uint8_t payload[64 * 1024 + 1]; /* MAX_PAYLOAD + 1 for null terminator */
-                    if (header.payload_length == 0 || SUCCEEDED(TE_IpcServerReadExact(g_ipc.hPipe, payload, header.payload_length, &ol))) {
+                    if (header.payload_length == 0 || SUCCEEDED(TE_IpcServerReadExact(g_ipc.hPipe, payload, header.payload_length, &read_ol))) {
                         payload[header.payload_length] = '\0';
                         if (header.type == TE_IPC_MSG_RELOAD_CONFIG) {
                             PostMessage(g_ipc.taskbar_hwnd, WM_TE_IPC_COMMAND, TE_CMD_RELOAD_CONFIG, 0);
                             TE_IpcHeader resp_hdr;
                             TE_IpcBuildHeader(&resp_hdr, TE_IPC_MSG_STATUS, 0);
-                            TE_IpcServerWriteExact(g_ipc.hPipe, &resp_hdr, sizeof(resp_hdr), &ol);
+                            TE_IpcServerWriteExact(g_ipc.hPipe, &resp_hdr, sizeof(resp_hdr), &write_ol);
                         } else if (header.type == TE_IPC_MSG_SHUTDOWN) {
-                            PostMessage(g_ipc.taskbar_hwnd, WM_TE_IPC_COMMAND, TE_CMD_SHUTDOWN, 0);
                             TE_IpcHeader resp_hdr;
                             TE_IpcBuildHeader(&resp_hdr, TE_IPC_MSG_STATUS, 0);
-                            TE_IpcServerWriteExact(g_ipc.hPipe, &resp_hdr, sizeof(resp_hdr), &ol);
+                            TE_IpcServerWriteExact(g_ipc.hPipe, &resp_hdr, sizeof(resp_hdr), &write_ol);
+                            PostMessage(g_ipc.taskbar_hwnd, WM_TE_IPC_COMMAND, TE_CMD_SHUTDOWN, 0);
                         } else if (header.type == TE_IPC_MSG_ENABLE_PLUGIN || header.type == TE_IPC_MSG_DISABLE_PLUGIN) {
-                            char* name_copy = _strdup((const char*)payload);
-                            if (name_copy) {
-                                int cmd = (header.type == TE_IPC_MSG_ENABLE_PLUGIN) ? TE_CMD_ENABLE_PLUGIN : TE_CMD_DISABLE_PLUGIN;
-                                if (!PostMessage(g_ipc.taskbar_hwnd, WM_TE_IPC_COMMAND, cmd, (LPARAM)name_copy)) {
-                                    free(name_copy);
+                            if (IsWindow(g_ipc.taskbar_hwnd)) {
+                                char* name_copy = _strdup((const char*)payload);
+                                if (name_copy) {
+                                    int cmd = (header.type == TE_IPC_MSG_ENABLE_PLUGIN) ? TE_CMD_ENABLE_PLUGIN : TE_CMD_DISABLE_PLUGIN;
+                                    if (!PostMessage(g_ipc.taskbar_hwnd, WM_TE_IPC_COMMAND, cmd, (LPARAM)name_copy)) {
+                                        free(name_copy);
+                                    }
                                 }
-                                TE_IpcHeader resp_hdr;
-                                TE_IpcBuildHeader(&resp_hdr, TE_IPC_MSG_STATUS, 0);
-                                TE_IpcServerWriteExact(g_ipc.hPipe, &resp_hdr, sizeof(resp_hdr), &ol);
                             }
+                            TE_IpcHeader resp_hdr;
+                            TE_IpcBuildHeader(&resp_hdr, TE_IPC_MSG_STATUS, 0);
+                            TE_IpcServerWriteExact(g_ipc.hPipe, &resp_hdr, sizeof(resp_hdr), &write_ol);
                         } else if (header.type == TE_IPC_MSG_GET_SETTINGS) {
                             char* json_str = GenerateSettingsJson();
                             if (json_str) {
                                 uint32_t len = (uint32_t)strlen(json_str);
                                 TE_IpcHeader resp_hdr;
                                 TE_IpcBuildHeader(&resp_hdr, TE_IPC_MSG_SETTINGS_RESPONSE, len);
-                                TE_IpcServerWriteExact(g_ipc.hPipe, &resp_hdr, sizeof(resp_hdr), &ol);
-                                TE_IpcServerWriteExact(g_ipc.hPipe, json_str, len, &ol);
+                                TE_IpcServerWriteExact(g_ipc.hPipe, &resp_hdr, sizeof(resp_hdr), &write_ol);
+                                TE_IpcServerWriteExact(g_ipc.hPipe, json_str, len, &write_ol);
                                 cJSON_free(json_str);
                             }
                         } else if (header.type == TE_IPC_MSG_GET_PERF_STATS) {
@@ -219,29 +260,30 @@ static DWORD WINAPI TE_IpcServerThread(LPVOID lpParam) {
                             uint32_t len = (uint32_t)strlen(stats_json);
                             TE_IpcHeader resp_hdr;
                             TE_IpcBuildHeader(&resp_hdr, TE_IPC_MSG_PERF_STATS_RESPONSE, len);
-                            TE_IpcServerWriteExact(g_ipc.hPipe, &resp_hdr, sizeof(resp_hdr), &ol);
-                            TE_IpcServerWriteExact(g_ipc.hPipe, stats_json, len, &ol);
+                            TE_IpcServerWriteExact(g_ipc.hPipe, &resp_hdr, sizeof(resp_hdr), &write_ol);
+                            TE_IpcServerWriteExact(g_ipc.hPipe, stats_json, len, &write_ol);
                         } else if (header.type == TE_IPC_MSG_GET_PLUGIN_LIST) {
                             char* json_str = GenerateSettingsJson();
                             if (json_str) {
                                 uint32_t len = (uint32_t)strlen(json_str);
                                 TE_IpcHeader resp_hdr;
                                 TE_IpcBuildHeader(&resp_hdr, TE_IPC_MSG_PLUGIN_LIST, len);
-                                TE_IpcServerWriteExact(g_ipc.hPipe, &resp_hdr, sizeof(resp_hdr), &ol);
-                                TE_IpcServerWriteExact(g_ipc.hPipe, json_str, len, &ol);
+                                TE_IpcServerWriteExact(g_ipc.hPipe, &resp_hdr, sizeof(resp_hdr), &write_ol);
+                                TE_IpcServerWriteExact(g_ipc.hPipe, json_str, len, &write_ol);
                                 cJSON_free(json_str);
                             }
                         }
                     }
                 }
             }
-            FlushFileBuffers(g_ipc.hPipe);
             DisconnectNamedPipe(g_ipc.hPipe);
         }
-        ResetEvent(ol.hEvent);
+        ResetEvent(connect_ol.hEvent);
     }
     
-    CloseHandle(ol.hEvent);
+    CloseHandle(connect_ol.hEvent);
+    CloseHandle(read_ol.hEvent);
+    CloseHandle(write_ol.hEvent);
     return 0;
 }
 
@@ -298,15 +340,20 @@ void TE_IpcServerStop(void) {
     if (!g_ipc.is_running) return;
     
     g_ipc.is_running = FALSE;
-    SetEvent(g_ipc.hStopEvent);
+    if (g_ipc.hStopEvent) {
+        SetEvent(g_ipc.hStopEvent);
+    }
+    if (g_ipc.hPipe && g_ipc.hPipe != INVALID_HANDLE_VALUE) {
+        CancelIoEx(g_ipc.hPipe, NULL);
+    }
     
     if (g_ipc.hThread) {
-        WaitForSingleObject(g_ipc.hThread, 5000);
+        WaitForSingleObject(g_ipc.hThread, 3000);
         CloseHandle(g_ipc.hThread);
         g_ipc.hThread = NULL;
     }
     
-    if (g_ipc.hPipe) {
+    if (g_ipc.hPipe && g_ipc.hPipe != INVALID_HANDLE_VALUE) {
         CloseHandle(g_ipc.hPipe);
         g_ipc.hPipe = NULL;
     }

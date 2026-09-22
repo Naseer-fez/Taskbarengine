@@ -29,6 +29,11 @@ HRESULT TE_FrameLoopStart(void);
 void TE_FrameLoopStop(void);
 
 /**
+  * Completely shut down the frame loop and destroy the timer queue.
+  */
+void TE_FrameLoopShutdown(void);
+
+/**
  * Check whether the frame loop timer is currently active.
  *
  * @return Non-zero if the frame loop is running.
@@ -96,6 +101,17 @@ void TE_TriggerStartMenu(void);
  * Wakes the frame animation loop so opacity/size lerping proceeds immediately.
  */
 void TE_FrameLoopWakeDynamicIsland(void);
+
+/**
+ * Query current display refresh rate in Hz dynamically.
+ * Uses DwmGetCompositionTimingInfo or GetDeviceCaps.
+ */
+double TE_FrameLoopGetRefreshRate(void);
+
+/**
+ * Check whether high-resolution waitable timer is active.
+ */
+int TE_FrameLoopIsTimerHighResolution(void);
 
 #ifdef __cplusplus
 }

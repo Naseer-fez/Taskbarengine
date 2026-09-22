@@ -31,6 +31,8 @@ typedef struct TE_IconElementInfo {
     TE_TaskbarElementType element_type; /**< Classification of the element. */
     wchar_t app_id[256];       /**< Automation ID or app identifier string. */
     int icon_index;            /**< Index in the system image list for icon extraction. */
+    HWND hwnd;                 /**< Associated native window handle if available. */
+    DWORD pid;                 /**< Associated process ID if available. */
 } TE_IconElementInfo;
 
 /**
@@ -57,7 +59,7 @@ typedef struct TE_IconElementCache {
  * @param out_cache    Pointer to cache structure to populate.
  * @return TE_S_OK on success, TE_E_FAIL on UIA error, TE_E_INVALIDARG on NULL params.
  *
- * @note Thread Safety: Must be called on the UI thread only.
+ * @note Thread Safety: Safe to call from MTA worker threads (SYS-006 & SYS-007).
  * @note Performance: Typical execution time is 10-50ms. Never call during frame loop.
  */
 HRESULT TE_UiaDiscoverIcons(HWND taskbar_hwnd, TE_IconElementCache* out_cache);

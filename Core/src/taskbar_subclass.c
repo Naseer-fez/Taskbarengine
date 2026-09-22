@@ -1,6 +1,7 @@
 #include "core/taskbar_subclass.h"
 #include <windows.h>
 #include <commctrl.h>
+#include <stdlib.h>
 #include "core/core_manager.h"
 #include "core/event_dispatch.h"
 #include "core/shell_hook.h"
@@ -103,6 +104,10 @@ static BOOL AddTrackedInternal(HWND hwnd, BOOL is_primary) {
     s_tracked_taskbars[s_tracked_count].hwnd = hwnd;
     s_tracked_taskbars[s_tracked_count].monitor = MonitorFromWindow(hwnd, is_primary ? MONITOR_DEFAULTTOPRIMARY : MONITOR_DEFAULTTONEAREST);
     s_tracked_taskbars[s_tracked_count].is_primary = is_primary;
+    s_tracked_taskbars[s_tracked_count].was_in_taskbar = FALSE;
+    s_tracked_taskbars[s_tracked_count].was_dragging = FALSE;
+    s_tracked_taskbars[s_tracked_count].last_pt.x = 0;
+    s_tracked_taskbars[s_tracked_count].last_pt.y = 0;
     s_tracked_count++;
     return TRUE;
 }
@@ -170,22 +175,43 @@ uint32_t TE_TaskbarTrackAll(void) {
     return result_count;
 }
 
-void TE_TaskbarUntrackAll(void) {
-    AcquireSRWLockExclusive(&s_track_lock);
-    for (uint32_t i = 0; i < s_tracked_count; i++) {
-        if (s_tracked_taskbars[i].hwnd && IsWindow(s_tracked_taskbars[i].hwnd)) {
-            KillTimer(s_tracked_taskbars[i].hwnd, 1001);
-            TE_TaskbarSubclassRemove(s_tracked_taskbars[i].hwnd);
-        }
-    }
-    s_tracked_count = 0;
-    ReleaseSRWLockExclusive(&s_track_lock);
-}
+static UINT_PTR s_display_debounce_timer = 0;
 
 static VOID CALLBACK DisplayChangeDebounceProc(HWND hwnd, UINT uMsg, UINT_PTR idEvent, DWORD dwTime) {
     (void)hwnd; (void)uMsg; (void)dwTime;
     KillTimer(NULL, idEvent);
-    TE_TaskbarTrackAll();
+    if (s_display_debounce_timer == idEvent) {
+        s_display_debounce_timer = 0;
+    }
+    if (TE_CoreManagerIsInitialized()) {
+        TE_TaskbarTrackAll();
+    }
+}
+
+void TE_TaskbarUntrackAllExcept(HWND except_hwnd) {
+    if (s_display_debounce_timer) {
+        KillTimer(NULL, s_display_debounce_timer);
+        s_display_debounce_timer = 0;
+    }
+    AcquireSRWLockExclusive(&s_track_lock);
+    uint32_t remaining = 0;
+    for (uint32_t i = 0; i < s_tracked_count; i++) {
+        HWND h = s_tracked_taskbars[i].hwnd;
+        if (h && IsWindow(h)) {
+            KillTimer(h, 1001);
+            if (h != except_hwnd) {
+                RemoveWindowSubclass(h, TE_TaskbarSubclassProc, TE_SUBCLASS_ID);
+            } else {
+                s_tracked_taskbars[remaining++] = s_tracked_taskbars[i];
+            }
+        }
+    }
+    s_tracked_count = remaining;
+    ReleaseSRWLockExclusive(&s_track_lock);
+}
+
+void TE_TaskbarUntrackAll(void) {
+    TE_TaskbarUntrackAllExcept(NULL);
 }
 
 LRESULT CALLBACK TE_TaskbarSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData) {
@@ -203,7 +229,6 @@ LRESULT CALLBACK TE_TaskbarSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             if ((int)wParam == TE_CMD_SHUTDOWN) {
                 KillTimer(hwnd, 1001);
                 TE_CoreManagerHandleCommand((int)wParam, (void*)lParam);
-                TE_TaskbarSubclassRemove(hwnd);
                 return 0;
             }
             TE_CoreManagerHandleCommand((int)wParam, (void*)lParam);
@@ -220,6 +245,10 @@ LRESULT CALLBACK TE_TaskbarSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
         }
         
         case WM_DISPLAYCHANGE: {
+            HWND primary_tb = TE_CoreManagerGetTaskbarHwnd();
+            if (hwnd != primary_tb) {
+                break;
+            }
             TE_DisplayChangedData data;
             data.width = LOWORD(lParam);
             data.height = HIWORD(lParam);
@@ -228,19 +257,20 @@ LRESULT CALLBACK TE_TaskbarSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
 
             /* Immediate track and debounced check for secondary trays */
             TE_TaskbarTrackAll();
-            SetTimer(NULL, 0, 150, DisplayChangeDebounceProc);
+            if (s_display_debounce_timer) {
+                KillTimer(NULL, s_display_debounce_timer);
+                s_display_debounce_timer = 0;
+            }
+            s_display_debounce_timer = SetTimer(NULL, 0, 150, DisplayChangeDebounceProc);
             break;
         }
         
-        case WM_DESTROY:
-        case WM_ENDSESSION: {
+        case WM_DESTROY: {
             KillTimer(hwnd, 1001);
             HWND primary_tb = TE_CoreManagerGetTaskbarHwnd();
             if (hwnd == primary_tb) {
-                TE_CoreManagerShutdown();
-                TE_TaskbarSubclassRemove(hwnd);
+                TE_CoreManagerShutdownExcept(hwnd);
             } else {
-                TE_TaskbarSubclassRemove(hwnd);
                 AcquireSRWLockExclusive(&s_track_lock);
                 for (uint32_t i = 0; i < s_tracked_count; i++) {
                     if (s_tracked_taskbars[i].hwnd == hwnd) {
@@ -255,9 +285,47 @@ LRESULT CALLBACK TE_TaskbarSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             }
             break;
         }
+
+        case WM_ENDSESSION: {
+            if (wParam) { /* Non-zero indicates session is actually ending */
+                KillTimer(hwnd, 1001);
+                HWND primary_tb = TE_CoreManagerGetTaskbarHwnd();
+                if (hwnd == primary_tb) {
+                    TE_CoreManagerShutdownExcept(hwnd);
+                }
+            }
+            break;
+        }
+
+        case WM_NCDESTROY: {
+            KillTimer(hwnd, 1001);
+            RemoveWindowSubclass(hwnd, TE_TaskbarSubclassProc, uIdSubclass);
+            MSG pending_msg;
+            while (PeekMessageW(&pending_msg, hwnd, WM_TE_IPC_COMMAND, WM_TE_IPC_COMMAND, PM_REMOVE)) {
+                if ((pending_msg.wParam == TE_CMD_ENABLE_PLUGIN || pending_msg.wParam == TE_CMD_DISABLE_PLUGIN) && pending_msg.lParam) {
+                    free((void*)pending_msg.lParam);
+                }
+            }
+            AcquireSRWLockExclusive(&s_track_lock);
+            for (uint32_t i = 0; i < s_tracked_count; i++) {
+                if (s_tracked_taskbars[i].hwnd == hwnd) {
+                    for (uint32_t j = i; j + 1 < s_tracked_count; j++) {
+                        s_tracked_taskbars[j] = s_tracked_taskbars[j + 1];
+                    }
+                    s_tracked_count--;
+                    break;
+                }
+            }
+            ReleaseSRWLockExclusive(&s_track_lock);
+            return DefSubclassProc(hwnd, msg, wParam, lParam);
+        }
             
         case WM_TIMER: {
             if (wParam == 1001) {
+                if (!TE_CoreManagerIsInitialized()) {
+                    KillTimer(hwnd, 1001);
+                    return 0;
+                }
                 POINT pt;
                 GetCursorPos(&pt);
                 RECT rect;
@@ -274,24 +342,34 @@ LRESULT CALLBACK TE_TaskbarSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                     }
                 }
                 
-                static BOOL s_was_in_taskbar = FALSE;
-                static BOOL s_was_dragging = FALSE;
-                static POINT s_last_pt = {0, 0};
                 BOOL is_dragging = ((GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0);
-                
-                if (in_taskbar || s_was_in_taskbar) {
-                    if (pt.x != s_last_pt.x || pt.y != s_last_pt.y || in_taskbar != s_was_in_taskbar || is_dragging != s_was_dragging) {
-                        TE_TaskbarMouseData mouse_data;
-                        mouse_data.cursor_pos = pt;
-                        mouse_data.is_in_taskbar = in_taskbar;
-                        mouse_data.is_dragging = is_dragging;
-                        mouse_data.taskbar_hwnd = hwnd;
-                        TE_EventDispatchFire(TE_EVENT_TASKBAR_MOUSE, &mouse_data);
-                        
-                        s_last_pt = pt;
-                        s_was_in_taskbar = in_taskbar;
-                        s_was_dragging = is_dragging;
+                BOOL fire_event = FALSE;
+                TE_TaskbarMouseData mouse_data = {0};
+
+                AcquireSRWLockExclusive(&s_track_lock);
+                for (uint32_t i = 0; i < s_tracked_count; i++) {
+                    if (s_tracked_taskbars[i].hwnd == hwnd) {
+                        TE_TrackedTaskbar* tb = &s_tracked_taskbars[i];
+                        if (in_taskbar || tb->was_in_taskbar) {
+                            if (pt.x != tb->last_pt.x || pt.y != tb->last_pt.y ||
+                                in_taskbar != tb->was_in_taskbar || is_dragging != tb->was_dragging) {
+                                mouse_data.cursor_pos = pt;
+                                mouse_data.is_in_taskbar = in_taskbar;
+                                mouse_data.is_dragging = is_dragging;
+                                mouse_data.taskbar_hwnd = hwnd;
+                                tb->last_pt = pt;
+                                tb->was_in_taskbar = in_taskbar;
+                                tb->was_dragging = is_dragging;
+                                fire_event = TRUE;
+                            }
+                        }
+                        break;
                     }
+                }
+                ReleaseSRWLockExclusive(&s_track_lock);
+
+                if (fire_event) {
+                    TE_EventDispatchFire(TE_EVENT_TASKBAR_MOUSE, &mouse_data);
                 }
             }
             break;
@@ -318,9 +396,7 @@ LRESULT CALLBACK TE_TaskbarSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             break;
             
         default:
-            if (msg == TE_ShellHookGetMessageId() && msg != 0) {
-                TE_ShellHookProcess(wParam, lParam);
-            } else if (TE_IsMessageSubscribed(msg)) {
+            if (TE_IsMessageSubscribed(msg)) {
                 /* Forward subscribed messages to plugins */
             }
             break;

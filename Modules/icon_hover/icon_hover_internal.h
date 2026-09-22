@@ -117,6 +117,13 @@ typedef struct TE_MonitorState {
     TE_HoverMouseState mouse;                   /**< Mouse tracking state on this taskbar. */
     int target_index;                           /**< DirectComposition target index. */
     int is_active;                              /**< Non-zero if monitor is connected and active. */
+
+    /* Zero-repack Structure-of-Arrays (SoA) layout (PERF-303) */
+    float soa_scales[TE_HOVER_MAX_ICONS];
+    float soa_pos_x[TE_HOVER_MAX_ICONS];
+    float soa_pos_y[TE_HOVER_MAX_ICONS];
+    float soa_tilts_x[TE_HOVER_MAX_ICONS];
+    float soa_tilts_y[TE_HOVER_MAX_ICONS];
 } TE_MonitorState;
 
 /**
@@ -151,6 +158,11 @@ extern TE_IconHoverState g_hover_state;
  * Accessor for the icon hover plugin interface.
  */
 TE_EXPORT const PluginInterface* TE_IconHoverGetPluginInterface(void);
+
+/**
+ * Trigger asynchronous UI Automation icon discovery on background worker thread.
+ */
+TE_EXPORT void TE_IconHoverTriggerAsyncDiscovery(void);
 
 #ifdef __cplusplus
 }

@@ -281,33 +281,42 @@ struct GsmtcMediaSource::Impl {
                 return;
             }
 
+            /* PERF-505: Convert synchronous .get() to asynchronous continuation to avoid thread stalls */
             auto asyncMediaProps = m_currentSession.TryGetMediaPropertiesAsync();
-            auto mediaProps = asyncMediaProps.get();
-            if (!mediaProps) {
-                return;
-            }
+            asyncMediaProps.Completed([this](auto&& asyncOp, winrt::Windows::Foundation::AsyncStatus status) {
+                if (status != winrt::Windows::Foundation::AsyncStatus::Completed) {
+                    return;
+                }
+                try {
+                    auto mediaProps = asyncOp.GetResults();
+                    if (!mediaProps) {
+                        return;
+                    }
 
-            winrt::hstring titleH = mediaProps.Title();
-            winrt::hstring artistH = mediaProps.Artist();
-            winrt::hstring albumH = mediaProps.AlbumTitle();
+                    winrt::hstring titleH = mediaProps.Title();
+                    winrt::hstring artistH = mediaProps.Artist();
+                    winrt::hstring albumH = mediaProps.AlbumTitle();
 
-            const wchar_t* titleStr = titleH.c_str();
-            const wchar_t* artistStr = artistH.c_str();
-            const wchar_t* albumStr = albumH.c_str();
+                    const wchar_t* titleStr = titleH.c_str();
+                    const wchar_t* artistStr = artistH.c_str();
+                    const wchar_t* albumStr = albumH.c_str();
 
-            bool trackChanged = (std::wcscmp(m_cachedSnapshot.title, titleStr) != 0) ||
-                                (std::wcscmp(m_cachedSnapshot.artist, artistStr) != 0);
+                    bool trackChanged = (std::wcscmp(m_cachedSnapshot.title, titleStr) != 0) ||
+                                        (std::wcscmp(m_cachedSnapshot.artist, artistStr) != 0);
 
-            wcsncpy_s(m_cachedSnapshot.title, titleStr, _TRUNCATE);
-            wcsncpy_s(m_cachedSnapshot.artist, artistStr, _TRUNCATE);
-            wcsncpy_s(m_cachedSnapshot.album, albumStr, _TRUNCATE);
+                    wcsncpy_s(m_cachedSnapshot.title, titleStr, _TRUNCATE);
+                    wcsncpy_s(m_cachedSnapshot.artist, artistStr, _TRUNCATE);
+                    wcsncpy_s(m_cachedSnapshot.album, albumStr, _TRUNCATE);
 
-            m_cachedSnapshot.sequence_number = ++m_seq;
-            if (trackChanged) {
-                m_cachedSnapshot.track_change_id = ++m_trackId;
-            }
+                    m_cachedSnapshot.sequence_number = ++m_seq;
+                    if (trackChanged) {
+                        m_cachedSnapshot.track_change_id = ++m_trackId;
+                    }
 
-            m_bridge.PublishSnapshot(m_cachedSnapshot);
+                    m_bridge.PublishSnapshot(m_cachedSnapshot);
+                } catch (...) {
+                }
+            });
         } catch (...) {
         }
     }
@@ -329,7 +338,8 @@ struct GsmtcMediaSource::Impl {
             m_cachedSnapshot.duration_ms = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(dur).count());
 
             m_cachedSnapshot.sequence_number = ++m_seq;
-            m_bridge.PublishSnapshot(m_cachedSnapshot);
+            // PERF-501: Do not wake the animation frame loop on timeline position ticks
+            m_bridge.PublishSnapshot(m_cachedSnapshot, false);
         } catch (...) {
         }
     }

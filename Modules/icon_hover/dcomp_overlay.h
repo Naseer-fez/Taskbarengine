@@ -122,6 +122,14 @@ HRESULT TE_DCompSetOverlayAlpha(float alpha);
 HRESULT TE_DCompCommit(void);
 
 /**
+ * Handle DXGI device removal/reset by tearing down device-dependent resources
+ * and reinitializing the D3D11, D2D, and DComp devices (PERF-204).
+ *
+ * @return TE_S_OK on successful recovery, error code otherwise.
+ */
+HRESULT TE_DCompHandleDeviceLoss(void);
+
+/**
  * Ensure the overlay window remains above the taskbar in the Z-order.
  * Re-asserts HWND_TOPMOST if the taskbar window was elevated above the overlay.
  *

@@ -92,40 +92,48 @@ static void ApplyWorkArea(int new_height) {
         memset(&mi, 0, sizeof(mi));
         mi.cbSize = sizeof(MONITORINFO);
         if (GetMonitorInfoW(hMon, &mi)) {
-            int default_cy = TE_ScaleDPI(TE_DEFAULT_TASKBAR_HEIGHT, g_current_dpi);
-            RECT default_wa = mi.rcMonitor;
-            default_wa.bottom -= default_cy;
-
+            RECT target_wa;
             if (new_height == TE_DEFAULT_TASKBAR_HEIGHT) {
-                SystemParametersInfoW(SPI_SETWORKAREA, 0, &default_wa, SPIF_SENDCHANGE | SPIF_UPDATEINIFILE);
-                ResizeLog(TE_LOG_INFO, "ApplyWorkArea: restored standard work area bottom=%d for default height", default_wa.bottom);
+                int default_cy = TE_ScaleDPI(TE_DEFAULT_TASKBAR_HEIGHT, g_current_dpi);
+                target_wa = mi.rcMonitor;
+                target_wa.bottom -= default_cy;
+            } else if (!TE_CalculateWorkArea(&mi.rcMonitor, new_height, g_current_dpi, &target_wa)) {
                 return;
             }
 
-            RECT new_wa;
-            if (TE_CalculateWorkArea(&mi.rcMonitor, new_height, g_current_dpi, &new_wa)) {
-                SystemParametersInfoW(SPI_SETWORKAREA, 0, &new_wa, SPIF_SENDCHANGE | SPIF_UPDATEINIFILE);
-                ResizeLog(TE_LOG_INFO, "ApplyWorkArea: new work area bottom=%d (monitor bottom=%d, taskbar height=%d)",
-                          new_wa.bottom, mi.rcMonitor.bottom, TE_ScaleDPI(new_height, g_current_dpi));
+            RECT cur_wa;
+            if (!SystemParametersInfoW(SPI_GETWORKAREA, 0, &cur_wa, 0) || !EqualRect(&cur_wa, &target_wa)) {
+                SystemParametersInfoW(SPI_SETWORKAREA, 0, &target_wa, SPIF_SENDCHANGE | SPIF_UPDATEINIFILE);
+                ResizeLog(TE_LOG_INFO, "ApplyWorkArea: new work area bottom=%d", target_wa.bottom);
             }
         }
     }
 }
 
 static void RestoreWorkArea(void) {
-    HMONITOR hMon = (g_ctx && g_ctx->monitor) ? g_ctx->monitor : MonitorFromWindow(g_ctx ? g_ctx->taskbar_hwnd : NULL, MONITOR_DEFAULTTOPRIMARY);
-    MONITORINFO mi;
-    memset(&mi, 0, sizeof(mi));
-    mi.cbSize = sizeof(MONITORINFO);
-    if (GetMonitorInfoW(hMon, &mi)) {
-        int default_cy = TE_ScaleDPI(TE_DEFAULT_TASKBAR_HEIGHT, g_current_dpi);
-        RECT default_wa = mi.rcMonitor;
-        default_wa.bottom -= default_cy;
-        SystemParametersInfoW(SPI_SETWORKAREA, 0, &default_wa, SPIF_SENDCHANGE | SPIF_UPDATEINIFILE);
-        ResizeLog(TE_LOG_INFO, "RestoreWorkArea: restored standard work area bottom=%d", default_wa.bottom);
-    } else if (g_work_area_saved) {
-        SystemParametersInfoW(SPI_SETWORKAREA, 0, &g_original_work_area, SPIF_SENDCHANGE | SPIF_UPDATEINIFILE);
-        ResizeLog(TE_LOG_INFO, "RestoreWorkArea: fallback to saved bottom=%d", g_original_work_area.bottom);
+    RECT target_wa;
+    BOOL has_target = FALSE;
+    if (g_work_area_saved) {
+        target_wa = g_original_work_area;
+        has_target = TRUE;
+    } else {
+        HMONITOR hMon = (g_ctx && g_ctx->monitor) ? g_ctx->monitor : MonitorFromWindow(g_ctx ? g_ctx->taskbar_hwnd : NULL, MONITOR_DEFAULTTOPRIMARY);
+        MONITORINFO mi;
+        memset(&mi, 0, sizeof(mi));
+        mi.cbSize = sizeof(MONITORINFO);
+        if (GetMonitorInfoW(hMon, &mi)) {
+            int default_cy = TE_ScaleDPI(TE_DEFAULT_TASKBAR_HEIGHT, g_current_dpi);
+            target_wa = mi.rcMonitor;
+            target_wa.bottom -= default_cy;
+            has_target = TRUE;
+        }
+    }
+    if (has_target) {
+        RECT cur_wa;
+        if (!SystemParametersInfoW(SPI_GETWORKAREA, 0, &cur_wa, 0) || !EqualRect(&cur_wa, &target_wa)) {
+            SystemParametersInfoW(SPI_SETWORKAREA, 0, &target_wa, SPIF_SENDCHANGE | SPIF_UPDATEINIFILE);
+            ResizeLog(TE_LOG_INFO, "RestoreWorkArea: restored work area bottom=%d", target_wa.bottom);
+        }
     }
     g_work_area_saved = FALSE;
 }
@@ -134,6 +142,9 @@ static LRESULT CALLBACK BridgeSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, L
     (void)uIdSubclass;
     (void)dwRefData;
     switch (msg) {
+        case WM_NCDESTROY:
+            RemoveWindowSubclass(hwnd, BridgeSubclassProc, uIdSubclass);
+            return DefSubclassProc(hwnd, msg, wParam, lParam);
         case WM_WINDOWPOSCHANGING: {
             WINDOWPOS* wp = (WINDOWPOS*)lParam;
             if (g_current_child_cy > 0 && g_current_child_y_offset != 0) {
@@ -175,7 +186,10 @@ static void ResizeChildWindows(HWND parent, int new_height) {
 
             if (wcsstr(className, L"DesktopWindowContentBridge") != NULL) {
                 g_bridge_hwnd = child;
-                SetWindowSubclass(child, BridgeSubclassProc, SUBCLASS_BRIDGE_ID, 0);
+                DWORD_PTR ref_data = 0;
+                if (!GetWindowSubclass(child, BridgeSubclassProc, SUBCLASS_BRIDGE_ID, &ref_data)) {
+                    SetWindowSubclass(child, BridgeSubclassProc, SUBCLASS_BRIDGE_ID, 0);
+                }
                 SetWindowPos(child, NULL, 0, y_offset, parent_w, target_child_cy,
                              SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
             } else if (_wcsicmp(className, L"TrayNotifyWnd") == 0 ||
@@ -295,8 +309,11 @@ static void RestoreSecondaryTaskbars(void) {
     }
 }
 
+static BOOL s_in_layout = FALSE;
+
 static void ApplyTaskbarSize(HWND hwnd) {
-    if (!hwnd) return;
+    if (!hwnd || s_in_layout) return;
+    s_in_layout = TRUE;
     QueryDpi(hwnd);
     int new_cy = TE_ScaleDPI(g_config.height, g_current_dpi);
     HMONITOR hMon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTOPRIMARY);
@@ -313,13 +330,14 @@ static void ApplyTaskbarSize(HWND hwnd) {
         ApplyWorkArea(g_config.height);
         ResizeChildWindows(hwnd, new_cy);
         ApplySecondaryTaskbars(g_config.height);
-        SendMessageW(hwnd, WM_SIZE, SIZE_RESTORED, MAKELPARAM(cx, new_cy));
         RedrawWindow(hwnd, NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_FRAME | RDW_UPDATENOW);
     }
+    s_in_layout = FALSE;
 }
 
 static void RestoreTaskbarSize(HWND hwnd) {
-    if (!hwnd) return;
+    if (!hwnd || s_in_layout) return;
+    s_in_layout = TRUE;
     QueryDpi(hwnd);
     int default_cy = TE_ScaleDPI(TE_DEFAULT_TASKBAR_HEIGHT, g_current_dpi);
     HMONITOR hMon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTOPRIMARY);
@@ -335,9 +353,9 @@ static void RestoreTaskbarSize(HWND hwnd) {
         RestoreWorkArea();
         RestoreChildWindows(hwnd);
         RestoreSecondaryTaskbars();
-        SendMessageW(hwnd, WM_SIZE, SIZE_RESTORED, MAKELPARAM(cx, default_cy));
         RedrawWindow(hwnd, NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_FRAME | RDW_UPDATENOW);
     }
+    s_in_layout = FALSE;
 }
 
 static LRESULT CALLBACK ResizeSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData) {
@@ -345,6 +363,9 @@ static LRESULT CALLBACK ResizeSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, L
     (void)dwRefData;
     
     switch (msg) {
+        case WM_NCDESTROY:
+            RemoveWindowSubclass(hwnd, ResizeSubclassProc, uIdSubclass);
+            return DefSubclassProc(hwnd, msg, wParam, lParam);
         case WM_GETMINMAXINFO: {
             LRESULT res = DefSubclassProc(hwnd, msg, wParam, lParam);
             MINMAXINFO* mmi = (MINMAXINFO*)lParam;
@@ -374,8 +395,12 @@ static LRESULT CALLBACK ResizeSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, L
         case WM_SIZE:
         case WM_WINDOWPOSCHANGED: {
             LRESULT res = DefSubclassProc(hwnd, msg, wParam, lParam);
-            int new_cy = TE_ScaleDPI(g_config.height, g_current_dpi);
-            ResizeChildWindows(hwnd, new_cy);
+            if (!s_in_layout) {
+                s_in_layout = TRUE;
+                int new_cy = TE_ScaleDPI(g_config.height, g_current_dpi);
+                ResizeChildWindows(hwnd, new_cy);
+                s_in_layout = FALSE;
+            }
             return res;
         }
         case WM_DPICHANGED: {

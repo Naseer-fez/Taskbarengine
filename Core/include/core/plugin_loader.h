@@ -71,6 +71,12 @@ HRESULT TE_PluginLoaderEnablePluginByName(const char* name);
 /** Disable a single plugin by name. */
 void TE_PluginLoaderDisablePluginByName(const char* name);
 
+/** Synchronize multi-threaded access to plugin registry. */
+void TE_PluginLoaderLockShared(void);
+void TE_PluginLoaderUnlockShared(void);
+void TE_PluginLoaderLockExclusive(void);
+void TE_PluginLoaderUnlockExclusive(void);
+
 #ifdef __cplusplus
 }
 #endif

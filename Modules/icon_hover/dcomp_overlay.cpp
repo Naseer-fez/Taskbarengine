@@ -33,6 +33,7 @@ static IDCompositionVisual* s_island_visual_target0 = nullptr;
 #include <stdio.h>
 #include <math.h>
 #include <d3d11.h>
+#include <emmintrin.h>
 
 #ifdef _MSC_VER
 #pragma comment(lib, "dcomp.lib")
@@ -69,6 +70,13 @@ struct TE_TargetVisualTree {
     int visual_count;
     RECT start_button_bounds;
     bool is_active;
+
+    /* PERF-302: Identity matrix tracking */
+    bool icon_is_identity_matrix[TE_HOVER_MAX_ICONS];
+    /* PERF-202/203: Surface reuse cache */
+    HBITMAP cached_bitmaps[TE_HOVER_MAX_ICONS];
+    int cached_surface_w[TE_HOVER_MAX_ICONS];
+    int cached_surface_h[TE_HOVER_MAX_ICONS];
 };
 
 static TE_TargetVisualTree s_targets[TE_MAX_DCOMP_TARGETS] = {};
@@ -193,7 +201,7 @@ HRESULT TE_DCompInitDevice(HWND overlay_hwnd)
     s_overlay_hwnd_ref = overlay_hwnd;
 
     /* Create D2D factory */
-    HRESULT hr = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, __uuidof(ID2D1Factory), (void**)&s_d2d_factory);
+    HRESULT hr = D2D1CreateFactory(D2D1_FACTORY_TYPE_MULTI_THREADED, __uuidof(ID2D1Factory), (void**)&s_d2d_factory);
     if (FAILED(hr)) {
         TE_LogWrite(TE_LOG_ERROR, LOG_TAG, "Failed to create D2D factory");
         return TE_E_FAIL;
@@ -345,7 +353,7 @@ static void ReleaseVisualTreeForTarget(int target_idx)
     if (t->root_visual) {
         t->root_visual->RemoveAllVisuals();
     }
-    for (int i = 0; i < t->visual_count; i++) {
+    for (int i = 0; i < TE_HOVER_MAX_ICONS; i++) {
         if (t->icon_effect_groups[i]) { t->icon_effect_groups[i]->Release(); t->icon_effect_groups[i] = nullptr; }
         if (t->matrix_transforms[i]) { t->matrix_transforms[i]->Release(); t->matrix_transforms[i] = nullptr; }
         if (t->icon_surfaces[i]) { t->icon_surfaces[i]->Release(); t->icon_surfaces[i] = nullptr; }
@@ -353,6 +361,10 @@ static void ReleaseVisualTreeForTarget(int target_idx)
         if (t->scale_transforms[i]) { t->scale_transforms[i]->Release(); t->scale_transforms[i] = nullptr; }
         if (t->icon_visuals[i]) { t->icon_visuals[i]->Release(); t->icon_visuals[i] = nullptr; }
         t->icon_is_start[i] = false;
+        t->cached_bitmaps[i] = NULL;
+        t->cached_surface_w[i] = 0;
+        t->cached_surface_h[i] = 0;
+        t->icon_is_identity_matrix[i] = false;
     }
     t->visual_count = 0;
 }
@@ -418,42 +430,81 @@ HRESULT TE_DCompBuildVisualTreeForTarget(int target_index, int count, const TE_I
     if (count <= 0 || !elements) return TE_E_INVALIDARG;
     if (count > TE_HOVER_MAX_ICONS) count = TE_HOVER_MAX_ICONS;
 
-    /* Release any existing visual tree for this target */
-    ReleaseVisualTreeForTarget(target_index);
-
+    /* PERF-202/203: Do not tear down visual tree. Reuse existing visual nodes and surfaces. */
     HRESULT hr;
     int baseline_OVERLAY = baseline_y - overlay_y;
 
     for (int i = 0; i < count; i++) {
-        /* Create child visual */
-        hr = s_dcomp_device->CreateVisual(&t->icon_visuals[i]);
-        if (FAILED(hr)) continue;
+        /* 1. Ensure visual node, transforms and effect group exist for slot i */
+        if (!t->icon_visuals[i]) {
+            hr = s_dcomp_device->CreateVisual(&t->icon_visuals[i]);
+            if (FAILED(hr)) continue;
 
-        /* Create scale transform */
-        hr = s_dcomp_device->CreateScaleTransform(&t->scale_transforms[i]);
-        if (FAILED(hr)) {
-            t->icon_visuals[i]->Release();
-            t->icon_visuals[i] = nullptr;
-            continue;
+            hr = s_dcomp_device->CreateScaleTransform(&t->scale_transforms[i]);
+            if (FAILED(hr)) {
+                t->icon_visuals[i]->Release();
+                t->icon_visuals[i] = nullptr;
+                continue;
+            }
+
+            hr = s_dcomp_device->CreateTranslateTransform(&t->translate_transforms[i]);
+            if (FAILED(hr)) {
+                t->scale_transforms[i]->Release();
+                t->scale_transforms[i] = nullptr;
+                t->icon_visuals[i]->Release();
+                t->icon_visuals[i] = nullptr;
+                continue;
+            }
+
+            IDCompositionTransform* transforms[2] = {
+                t->scale_transforms[i],
+                t->translate_transforms[i]
+            };
+            IDCompositionTransform* group = nullptr;
+            hr = s_dcomp_device->CreateTransformGroup(transforms, 2, &group);
+            if (SUCCEEDED(hr) && group) {
+                t->icon_visuals[i]->SetTransform(group);
+                group->Release();
+            }
+
+            hr = s_dcomp_device->CreateMatrixTransform3D(&t->matrix_transforms[i]);
+            if (SUCCEEDED(hr) && t->matrix_transforms[i]) {
+                D3DMATRIX identity = {
+                    1.0f, 0.0f, 0.0f, 0.0f,
+                    0.0f, 1.0f, 0.0f, 0.0f,
+                    0.0f, 0.0f, 1.0f, 0.0f,
+                    0.0f, 0.0f, 0.0f, 1.0f
+                };
+                t->matrix_transforms[i]->SetMatrix(identity);
+                t->icon_is_identity_matrix[i] = true;
+            }
+
+            hr = s_dcomp_device->CreateEffectGroup(&t->icon_effect_groups[i]);
+            if (SUCCEEDED(hr) && t->icon_effect_groups[i]) {
+                if (t->matrix_transforms[i]) {
+                    t->icon_effect_groups[i]->SetTransform3D(t->matrix_transforms[i]);
+                }
+                t->icon_effect_groups[i]->SetOpacity(0.0f);
+                t->icon_visuals[i]->SetEffect(t->icon_effect_groups[i]);
+            } else if (t->matrix_transforms[i]) {
+                t->icon_visuals[i]->SetEffect(t->matrix_transforms[i]);
+            }
+
+            /* Add as child of root visual */
+            if (i == 0) {
+                t->root_visual->AddVisual(t->icon_visuals[i], TRUE, nullptr);
+            } else if (t->icon_visuals[i - 1]) {
+                t->root_visual->AddVisual(t->icon_visuals[i], TRUE, t->icon_visuals[i - 1]);
+            }
         }
 
-        /* Create translate transform */
-        hr = s_dcomp_device->CreateTranslateTransform(&t->translate_transforms[i]);
-        if (FAILED(hr)) {
-            t->scale_transforms[i]->Release();
-            t->scale_transforms[i] = nullptr;
-            t->icon_visuals[i]->Release();
-            t->icon_visuals[i] = nullptr;
-            continue;
-        }
-
-        /* Set initial transform values (identity) */
+        /* 2. Reset initial transform values (identity) */
         t->scale_transforms[i]->SetScaleX(1.0f);
         t->scale_transforms[i]->SetScaleY(1.0f);
         t->translate_transforms[i]->SetOffsetX(0.0f);
         t->translate_transforms[i]->SetOffsetY(0.0f);
 
-        /* Calculate positions using glyphCenter and taskbar baseline */
+        /* 3. Calculate positions using glyphCenter and taskbar baseline */
         const RECT* btn = &elements[i].buttonRect;
         const RECT* gl = &elements[i].glyphRect;
 
@@ -469,13 +520,13 @@ HRESULT TE_DCompBuildVisualTreeForTarget(int target_index, int count, const TE_I
         float c_x = w_surf / 2.0f;
         float c_y = (float)baseline_OVERLAY - Y_visual_base;
 
-        /* Set scale center to invariant baseline anchor */
         t->scale_transforms[i]->SetCenterX(c_x);
         t->scale_transforms[i]->SetCenterY(c_y);
-
-        /* Set offset to the base visual position */
         t->icon_visuals[i]->SetOffsetX(X_visual_base);
         t->icon_visuals[i]->SetOffsetY(Y_visual_base);
+
+        t->icon_centers[i].x = w_surf / 2.0f;
+        t->icon_centers[i].y = h_surf / 2.0f;
 
         bool is_start_button = (elements[i].element_type == TE_ELEM_START_BUTTON);
         t->icon_is_start[i] = is_start_button;
@@ -483,157 +534,143 @@ HRESULT TE_DCompBuildVisualTreeForTarget(int target_index, int count, const TE_I
             t->start_button_bounds = *btn;
         }
 
-        /* Create a DComp surface for the icon bitmap or custom start image */
+        /* 4. Surface reuse or creation (PERF-202/203) */
         if (is_start_button || (bitmaps && bitmaps[i])) {
             int bmp_w = (int)w_surf;
             int bmp_h = (int)h_surf;
             if (bmp_w <= 0) bmp_w = 48;
             if (bmp_h <= 0) bmp_h = 48;
 
-            hr = s_dcomp_device->CreateSurface(
-                (UINT)bmp_w, (UINT)bmp_h,
-                DXGI_FORMAT_B8G8R8A8_UNORM,
-                DXGI_ALPHA_MODE_PREMULTIPLIED,
-                &t->icon_surfaces[i]
-            );
+            HBITMAP current_hbmp = (bitmaps && bitmaps[i]) ? bitmaps[i] : NULL;
+            bool surface_matches = (t->icon_surfaces[i] != nullptr &&
+                                    t->cached_surface_w[i] == bmp_w &&
+                                    t->cached_surface_h[i] == bmp_h &&
+                                    t->cached_bitmaps[i] == current_hbmp &&
+                                    !is_start_button);
 
-            if (SUCCEEDED(hr) && t->icon_surfaces[i]) {
-                IDXGISurface* dxgi_surface = nullptr;
-                POINT offset_point = {};
-                hr = t->icon_surfaces[i]->BeginDraw(NULL, __uuidof(IDXGISurface), (void**)&dxgi_surface, &offset_point);
-                if (SUCCEEDED(hr) && dxgi_surface) {
-                    D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
-                        D2D1_RENDER_TARGET_TYPE_DEFAULT,
-                        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED)
-                    );
-                    ID2D1RenderTarget* rt = nullptr;
-                    hr = s_d2d_factory->CreateDxgiSurfaceRenderTarget(dxgi_surface, &props, &rt);
-                    
-                    if (SUCCEEDED(hr) && rt) {
-                        rt->BeginDraw();
-                        rt->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
-
-                        if (is_start_button && (s_start_button_bitmap || s_start_pixel_data)) {
-                            ID2D1Bitmap* start_bmp = s_start_button_bitmap;
-                            bool release_bmp = false;
-                            if (!start_bmp && s_start_pixel_data) {
-                                D2D1_BITMAP_PROPERTIES bp = D2D1::BitmapProperties(
-                                    D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED)
-                                );
-                                if (SUCCEEDED(rt->CreateBitmap(D2D1::SizeU(s_start_pixel_w, s_start_pixel_h),
-                                                               s_start_pixel_data, s_start_pixel_stride,
-                                                               &bp, &start_bmp))) {
-                                    release_bmp = true;
-                                }
-                            }
-
-                            if (start_bmp) {
-                                float gl_w = (float)(gl->right - gl->left);
-                                float gl_h = (float)(gl->bottom - gl->top);
-                                if (gl_w <= 0.0f) gl_w = (float)bmp_w * 0.60f;
-                                if (gl_h <= 0.0f) gl_h = (float)bmp_h * 0.60f;
-
-                                float dest_x = (float)offset_point.x + ((float)bmp_w - gl_w) / 2.0f;
-                                float dest_y = (float)offset_point.y + ((float)bmp_h - gl_h) / 2.0f;
-
-                                D2D1_RECT_F dest_rect = D2D1::RectF(
-                                    dest_x, dest_y,
-                                    dest_x + gl_w, dest_y + gl_h
-                                );
-
-                                rt->DrawBitmap(start_bmp, dest_rect, 1.0f,
-                                               D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
-
-                                if (release_bmp && start_bmp) start_bmp->Release();
-                            }
-                        } else if (bitmaps && bitmaps[i]) {
-                            DIBSECTION dib;
-                            if (GetObject(bitmaps[i], sizeof(DIBSECTION), &dib) == sizeof(DIBSECTION) && dib.dsBm.bmBits) {
-                                D2D1_BITMAP_PROPERTIES bmpProps = D2D1::BitmapProperties(
-                                    D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED)
-                                );
-                                ID2D1Bitmap* d2d_bmp = nullptr;
-                                hr = rt->CreateBitmap(D2D1::SizeU(dib.dsBm.bmWidth, dib.dsBm.bmHeight),
-                                                      dib.dsBm.bmBits,
-                                                      dib.dsBm.bmWidthBytes,
-                                                      &bmpProps,
-                                                      &d2d_bmp);
-                                if (SUCCEEDED(hr) && d2d_bmp) {
-                                    float dest_w = (float)dib.dsBm.bmWidth;
-                                    float dest_h = (float)dib.dsBm.bmHeight;
-                                    float dest_x = (float)offset_point.x + ((float)bmp_w - dest_w) / 2.0f;
-                                    float dest_y = (float)offset_point.y + ((float)bmp_h - dest_h) / 2.0f;
-
-                                    D2D1_RECT_F dest_rect = D2D1::RectF(
-                                        dest_x,
-                                        dest_y,
-                                        dest_x + dest_w,
-                                        dest_y + dest_h
-                                    );
-                                    rt->DrawBitmap(d2d_bmp, dest_rect);
-                                    d2d_bmp->Release();
-                                }
-                            }
-                        }
-                        rt->EndDraw();
-                        rt->Release();
-                    }
-                    dxgi_surface->Release();
-                    t->icon_surfaces[i]->EndDraw();
+            if (!surface_matches) {
+                if (t->icon_surfaces[i] && (t->cached_surface_w[i] != bmp_w || t->cached_surface_h[i] != bmp_h)) {
+                    t->icon_surfaces[i]->Release();
+                    t->icon_surfaces[i] = nullptr;
                 }
 
-                t->icon_visuals[i]->SetContent(t->icon_surfaces[i]);
+                if (!t->icon_surfaces[i]) {
+                    hr = s_dcomp_device->CreateSurface(
+                        (UINT)bmp_w, (UINT)bmp_h,
+                        DXGI_FORMAT_B8G8R8A8_UNORM,
+                        DXGI_ALPHA_MODE_PREMULTIPLIED,
+                        &t->icon_surfaces[i]
+                    );
+                }
+
+                if (t->icon_surfaces[i]) {
+                    IDXGISurface* dxgi_surface = nullptr;
+                    POINT offset_point = {};
+                    hr = t->icon_surfaces[i]->BeginDraw(NULL, __uuidof(IDXGISurface), (void**)&dxgi_surface, &offset_point);
+                    if (SUCCEEDED(hr) && dxgi_surface) {
+                        D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
+                            D2D1_RENDER_TARGET_TYPE_DEFAULT,
+                            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED)
+                        );
+                        ID2D1RenderTarget* rt = nullptr;
+                        hr = s_d2d_factory->CreateDxgiSurfaceRenderTarget(dxgi_surface, &props, &rt);
+
+                        if (SUCCEEDED(hr) && rt) {
+                            rt->BeginDraw();
+                            rt->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
+
+                            if (is_start_button && (s_start_button_bitmap || s_start_pixel_data)) {
+                                ID2D1Bitmap* start_bmp = s_start_button_bitmap;
+                                bool release_bmp = false;
+                                if (!start_bmp && s_start_pixel_data) {
+                                    D2D1_BITMAP_PROPERTIES bp = D2D1::BitmapProperties(
+                                        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED)
+                                    );
+                                    if (SUCCEEDED(rt->CreateBitmap(D2D1::SizeU(s_start_pixel_w, s_start_pixel_h),
+                                                                   s_start_pixel_data, s_start_pixel_stride,
+                                                                   &bp, &start_bmp))) {
+                                        release_bmp = true;
+                                    }
+                                }
+
+                                if (start_bmp) {
+                                    float gl_w = (float)(gl->right - gl->left);
+                                    float gl_h = (float)(gl->bottom - gl->top);
+                                    if (gl_w <= 0.0f) gl_w = (float)bmp_w * 0.60f;
+                                    if (gl_h <= 0.0f) gl_h = (float)bmp_h * 0.60f;
+
+                                    float dest_x = (float)offset_point.x + ((float)bmp_w - gl_w) / 2.0f;
+                                    float dest_y = (float)offset_point.y + ((float)bmp_h - gl_h) / 2.0f;
+
+                                    D2D1_RECT_F dest_rect = D2D1::RectF(
+                                        dest_x, dest_y,
+                                        dest_x + gl_w, dest_y + gl_h
+                                    );
+
+                                    rt->DrawBitmap(start_bmp, dest_rect, 1.0f,
+                                                   D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+
+                                    if (release_bmp && start_bmp) start_bmp->Release();
+                                }
+                            } else if (bitmaps && bitmaps[i]) {
+                                DIBSECTION dib;
+                                if (GetObject(bitmaps[i], sizeof(DIBSECTION), &dib) == sizeof(DIBSECTION) && dib.dsBm.bmBits) {
+                                    D2D1_BITMAP_PROPERTIES bmpProps = D2D1::BitmapProperties(
+                                        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED)
+                                    );
+                                    ID2D1Bitmap* d2d_bmp = nullptr;
+                                    hr = rt->CreateBitmap(D2D1::SizeU(dib.dsBm.bmWidth, dib.dsBm.bmHeight),
+                                                          dib.dsBm.bmBits,
+                                                          dib.dsBm.bmWidthBytes,
+                                                          &bmpProps,
+                                                          &d2d_bmp);
+                                    if (SUCCEEDED(hr) && d2d_bmp) {
+                                        float dest_w = (float)dib.dsBm.bmWidth;
+                                        float dest_h = (float)dib.dsBm.bmHeight;
+                                        float dest_x = (float)offset_point.x + ((float)bmp_w - dest_w) / 2.0f;
+                                        float dest_y = (float)offset_point.y + ((float)bmp_h - dest_h) / 2.0f;
+
+                                        D2D1_RECT_F dest_rect = D2D1::RectF(
+                                            dest_x,
+                                            dest_y,
+                                            dest_x + dest_w,
+                                            dest_y + dest_h
+                                        );
+                                        rt->DrawBitmap(d2d_bmp, dest_rect);
+                                        d2d_bmp->Release();
+                                    }
+                                }
+                            }
+                            rt->EndDraw();
+                            rt->Release();
+                        }
+                        dxgi_surface->Release();
+                        t->icon_surfaces[i]->EndDraw();
+                    }
+
+                    t->cached_surface_w[i] = bmp_w;
+                    t->cached_surface_h[i] = bmp_h;
+                    t->cached_bitmaps[i] = current_hbmp;
+                    t->icon_visuals[i]->SetContent(t->icon_surfaces[i]);
+                }
             }
         }
 
-        /* Apply transform group: scale then translate */
-        IDCompositionTransform* transforms[2] = {
-            t->scale_transforms[i],
-            t->translate_transforms[i]
-        };
-        IDCompositionTransform* group = nullptr;
-        hr = s_dcomp_device->CreateTransformGroup(transforms, 2, &group);
-        if (SUCCEEDED(hr) && group) {
-            t->icon_visuals[i]->SetTransform(group);
-            group->Release();
-        }
-
-        /* Create 3D matrix transform for tilt perspective */
-        t->icon_centers[i].x = w_surf / 2.0f;
-        t->icon_centers[i].y = h_surf / 2.0f;
-        hr = s_dcomp_device->CreateMatrixTransform3D(&t->matrix_transforms[i]);
-        if (SUCCEEDED(hr) && t->matrix_transforms[i]) {
-            D3DMATRIX identity = {
-                1.0f, 0.0f, 0.0f, 0.0f,
-                0.0f, 1.0f, 0.0f, 0.0f,
-                0.0f, 0.0f, 1.0f, 0.0f,
-                0.0f, 0.0f, 0.0f, 1.0f
-            };
-            t->matrix_transforms[i]->SetMatrix(identity);
-        }
-
-        /* Create per-icon effect group for independent opacity and 3D tilt */
-        hr = s_dcomp_device->CreateEffectGroup(&t->icon_effect_groups[i]);
-        if (SUCCEEDED(hr) && t->icon_effect_groups[i]) {
-            if (t->matrix_transforms[i]) {
-                t->icon_effect_groups[i]->SetTransform3D(t->matrix_transforms[i]);
-            }
-            float init_opacity = is_start_button ? 1.0f : 0.0f;
+        /* 5. Set initial opacity */
+        float init_opacity = is_start_button ? 1.0f : 0.0f;
+        if (t->icon_effect_groups[i]) {
             t->icon_effect_groups[i]->SetOpacity(init_opacity);
-            t->icon_visuals[i]->SetEffect(t->icon_effect_groups[i]);
-        } else if (t->matrix_transforms[i]) {
-            t->icon_visuals[i]->SetEffect(t->matrix_transforms[i]);
         }
-
-        /* Add as child of root */
-        if (i == 0) {
-            t->root_visual->AddVisual(t->icon_visuals[i], TRUE, nullptr);
-        } else {
-            t->root_visual->AddVisual(t->icon_visuals[i], TRUE, t->icon_visuals[i - 1]);
-        }
-
-        t->visual_count = i + 1;
     }
+
+    /* 6. Hide inactive visuals beyond count in the pool (PERF-202) */
+    for (int j = count; j < TE_HOVER_MAX_ICONS; j++) {
+        if (t->icon_effect_groups[j]) {
+            t->icon_effect_groups[j]->SetOpacity(0.0f);
+        }
+        t->icon_is_start[j] = false;
+    }
+    t->visual_count = count;
 
     char msg[64];
     snprintf(msg, sizeof(msg), "Built visual tree for target %d with %d icon visuals", target_index, t->visual_count);
@@ -660,14 +697,23 @@ HRESULT TE_DCompBuildVisualTree(int count, const TE_IconElementInfo* elements, c
 }
 
 static D3DMATRIX MatrixMultiply(const D3DMATRIX& a, const D3DMATRIX& b) {
-    D3DMATRIX out = {};
+    D3DMATRIX out;
+    __m128 b0 = _mm_loadu_ps(&b.m[0][0]);
+    __m128 b1 = _mm_loadu_ps(&b.m[1][0]);
+    __m128 b2 = _mm_loadu_ps(&b.m[2][0]);
+    __m128 b3 = _mm_loadu_ps(&b.m[3][0]);
+
     for (int r = 0; r < 4; r++) {
-        for (int c = 0; c < 4; c++) {
-            out.m[r][c] = a.m[r][0] * b.m[0][c] +
-                          a.m[r][1] * b.m[1][c] +
-                          a.m[r][2] * b.m[2][c] +
-                          a.m[r][3] * b.m[3][c];
-        }
+        __m128 a0 = _mm_set1_ps(a.m[r][0]);
+        __m128 a1 = _mm_set1_ps(a.m[r][1]);
+        __m128 a2 = _mm_set1_ps(a.m[r][2]);
+        __m128 a3 = _mm_set1_ps(a.m[r][3]);
+
+        __m128 row = _mm_add_ps(
+            _mm_add_ps(_mm_mul_ps(a0, b0), _mm_mul_ps(a1, b1)),
+            _mm_add_ps(_mm_mul_ps(a2, b2), _mm_mul_ps(a3, b3))
+        );
+        _mm_storeu_ps(&out.m[r][0], row);
     }
     return out;
 }
@@ -757,8 +803,14 @@ HRESULT TE_DCompUpdateTransformsForTarget(int target_index, int count, const flo
         if (t->matrix_transforms[i]) {
             float tx = tilt_x ? tilt_x[i] : 0.0f;
             float ty = tilt_y ? tilt_y[i] : 0.0f;
-            D3DMATRIX mat = ComputeTiltPerspectiveMatrix(tx, ty, t->icon_centers[i].x, t->icon_centers[i].y);
-            t->matrix_transforms[i]->SetMatrix(mat);
+            bool is_zero_tilt = (fabsf(tx) < 0.001f && fabsf(ty) < 0.001f);
+            if (is_zero_tilt && t->icon_is_identity_matrix[i]) {
+                /* PERF-302: Already identity, skip redundant SetMatrix call */
+            } else {
+                D3DMATRIX mat = ComputeTiltPerspectiveMatrix(tx, ty, t->icon_centers[i].x, t->icon_centers[i].y);
+                t->matrix_transforms[i]->SetMatrix(mat);
+                t->icon_is_identity_matrix[i] = is_zero_tilt;
+            }
         }
     }
 
@@ -830,14 +882,72 @@ HRESULT TE_DCompSetOverlayAlpha(float alpha)
     return TE_S_OK;
 }
 
+HRESULT TE_DCompHandleDeviceLoss(void)
+{
+    TE_LogWrite(TE_LOG_WARNING, LOG_TAG, "Handling DirectComposition device loss recovery");
+
+    struct SavedTarget {
+        HWND taskbar_hwnd;
+        HWND overlay_hwnd;
+        bool is_active;
+    } saved[TE_MAX_DCOMP_TARGETS] = {};
+
+    int saved_count = s_target_count;
+    for (int i = 0; i < s_target_count && i < TE_MAX_DCOMP_TARGETS; i++) {
+        saved[i].taskbar_hwnd = s_targets[i].taskbar_hwnd;
+        saved[i].overlay_hwnd = s_targets[i].overlay_hwnd;
+        saved[i].is_active = s_targets[i].is_active;
+    }
+    HWND primary_overlay = s_overlay_hwnd_ref ? s_overlay_hwnd_ref : (saved_count > 0 ? saved[0].overlay_hwnd : NULL);
+
+    wchar_t cached_path[MAX_PATH] = {};
+    if (s_cached_start_path[0] != L'\0') {
+        wcscpy_s(cached_path, MAX_PATH, s_cached_start_path);
+    }
+    int custom_start = s_custom_start_enabled;
+
+    TE_DCompDestroyDevice();
+
+    if (!primary_overlay || !IsWindow(primary_overlay)) {
+        TE_LogWrite(TE_LOG_ERROR, LOG_TAG, "Device loss recovery aborted: no valid primary overlay window");
+        return TE_E_FAIL;
+    }
+
+    HRESULT hr = TE_DCompInitDevice(primary_overlay);
+    if (FAILED(hr)) {
+        TE_LogWrite(TE_LOG_ERROR, LOG_TAG, "Device loss recovery failed to re-initialize device");
+        return hr;
+    }
+
+    for (int i = 1; i < saved_count; i++) {
+        if (saved[i].is_active && saved[i].overlay_hwnd && IsWindow(saved[i].overlay_hwnd)) {
+            int out_idx = -1;
+            TE_DCompAddTarget(saved[i].taskbar_hwnd, saved[i].overlay_hwnd, &out_idx);
+        }
+    }
+
+    if (cached_path[0] != L'\0' && custom_start) {
+        TE_DCompLoadStartImage(cached_path);
+    }
+
+    TE_LogWrite(TE_LOG_INFO, LOG_TAG, "DirectComposition device loss recovery succeeded");
+    return TE_S_OK;
+}
+
 HRESULT TE_DCompCommit(void)
 {
     if (!s_dcomp_device) return TE_E_FAIL;
 
     HRESULT hr = s_dcomp_device->Commit();
     if (FAILED(hr)) {
+        HRESULT reason = s_d3d_device ? s_d3d_device->GetDeviceRemovedReason() : S_OK;
+        if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET ||
+            hr == D2DERR_RECREATE_TARGET || (s_d3d_device && FAILED(reason))) {
+            TE_LogWrite(TE_LOG_WARNING, LOG_TAG, "DComp Commit device loss detected, recovering...");
+            return TE_DCompHandleDeviceLoss();
+        }
         TE_LogWrite(TE_LOG_WARNING, LOG_TAG, "DComp Commit failed");
-        return TE_E_FAIL;
+        return hr;
     }
 
     return TE_S_OK;
@@ -967,7 +1077,7 @@ HRESULT TE_DCompLoadStartImage(const wchar_t* image_path)
             }
         }
         if (!s_d2d_factory) {
-            D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, __uuidof(ID2D1Factory), (void**)&s_d2d_factory);
+            D2D1CreateFactory(D2D1_FACTORY_TYPE_MULTI_THREADED, __uuidof(ID2D1Factory), (void**)&s_d2d_factory);
         }
 
         if (s_d3d_device && s_d2d_factory) {
@@ -1117,7 +1227,7 @@ HRESULT TE_DCompLoadStartImage(const wchar_t* image_path)
         }
     }
     if (!s_d2d_factory) {
-        D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, __uuidof(ID2D1Factory), (void**)&s_d2d_factory);
+        D2D1CreateFactory(D2D1_FACTORY_TYPE_MULTI_THREADED, __uuidof(ID2D1Factory), (void**)&s_d2d_factory);
     }
 
     if (s_d3d_device && s_d2d_factory) {

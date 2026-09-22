@@ -33,7 +33,7 @@ public:
     }
 
     // Called by background worker thread (Exclusive Publish)
-    void PublishSnapshot(const TEMediaStateSnapshot& newSnapshot) {
+    void PublishSnapshot(const TEMediaStateSnapshot& newSnapshot, bool wakeAnimation = true) {
         AcquireSRWLockExclusive(&m_lock);
         const int writeIndex = 1 - m_readIndex.load(std::memory_order_relaxed);
         m_buffers[writeIndex] = newSnapshot;
@@ -41,7 +41,7 @@ public:
         m_dirty.store(true, std::memory_order_release);
         ReleaseSRWLockExclusive(&m_lock);
 
-        if (m_wakeCallback) {
+        if (wakeAnimation && m_wakeCallback) {
             m_wakeCallback();
         }
     }

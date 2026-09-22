@@ -1,18 +1,14 @@
 /**
  * @file frame_loop.cpp
- * @brief Vsync-aligned animation timer and DComp commit loop for IconHover.
+ * @brief High-refresh scanout-aligned animation timer and DComp commit loop for IconHover.
  *
- * Uses CreateTimerQueueTimer at ~8ms (125 Hz) to drive the magnification
- * animation. On each tick:
- *   1. Read cursor position from shared hover state
- *   2. Compute TE_MagnifyComputeScales() for all icons
- *   3. Lerp current scales toward target (smooth interpolation)
- *   4. Compute displaced icon positions (push neighbors outward)
- *   5. Call TE_DCompUpdateTransforms() + TE_DCompCommit()
- *
- * Self-canceling: when mouse has left and max(|scale - 1.0|) < 0.001,
- * the timer deletes itself. Safety fallback: cancel if no WM_MOUSEMOVE
- * received for 500ms.
+ * Drives the magnification, spring bounce, 3D tilt, and dynamic island animations:
+ *   1. Paced dynamically to monitor refresh rates (60 Hz, 120 Hz, 144 Hz, 240 Hz)
+ *      via DwmGetCompositionTimingInfo and CREATE_WAITABLE_TIMER_HIGH_RESOLUTION (PERF-103).
+ *   2. Dedicated worker thread with explicit COM MTA apartment initialization (SYS-009).
+ *   3. Lockless double-buffered snapshot architecture for tear-free physics reads (PERF-101).
+ *   4. Stationary mouse hover detection settling to 0.0% CPU (PERF-104).
+ *   5. Geometry generation latching across frame boundaries without frame drops (PERF-105).
  */
 
 #include "frame_loop.h"
@@ -23,26 +19,92 @@
 #include <sdk/te_log.h>
 
 #include <windows.h>
+#include <objbase.h>
+#include <dwmapi.h>
 #include <math.h>
+#include <atomic>
+#include <algorithm>
 
-/** Frame loop timer interval in milliseconds (~125 Hz). */
-#define FRAME_TIMER_INTERVAL_MS 8
-
-/** Safety timeout: cancel if no mouse move received for this many ms. */
-#define MOUSE_TIMEOUT_MS 500
+#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
+#endif
 
 static const char* LOG_TAG = "FrameLoop";
 
-/** Timer queue and timer handle. */
-static HANDLE s_timer_queue = NULL;
-static HANDLE s_timer_handle = NULL;
+/**
+ * Double-buffered input snapshot for concurrency isolation (PERF-101).
+ */
+struct TE_MouseSnapshot {
+    float cursor_x;
+    float cursor_y;
+    int is_in_taskbar;
+    int is_dragging;
+    int is_settling;
+    float settle_progress;
+    uint64_t last_mousemove_qpc;
+};
+
+struct TE_MonitorDoubleBuffer {
+    TE_MouseSnapshot mouse_snapshots[2];
+    std::atomic<int> active_idx{0};
+    std::atomic<float> pending_impulses[TE_HOVER_MAX_ICONS];
+};
+
+static TE_MonitorDoubleBuffer s_monitor_buffers[TE_MAX_MONITORS];
+
+/** Thread, timer, and event handles. */
+static HANDLE s_thread = NULL;
+static HANDLE s_waitable_timer = NULL;
+static HANDLE s_wake_event = NULL;
+static HANDLE s_stop_event = NULL;
+static HANDLE s_shutdown_event = NULL;
 static volatile LONG s_loop_active = 0;
+static thread_local bool s_is_callback_thread = false;
+static bool s_worker_initialized = false;
+static int s_is_high_res = 0;
 
 /** QPC frequency for delta time calculation. */
 static LARGE_INTEGER s_qpc_freq = {};
 static uint64_t s_last_tick_qpc = 0;
 
+/** Stationary hover cursor history (PERF-104). */
+static float s_prev_cursor_x[TE_MAX_MONITORS] = { 0 };
+static float s_prev_cursor_y[TE_MAX_MONITORS] = { 0 };
+static bool s_has_prev_cursor[TE_MAX_MONITORS] = { false };
 
+/* Forward declarations */
+static VOID CALLBACK FrameTimerCallback(PVOID lpParam, BOOLEAN timer_or_wait_fired);
+static void EnsureWorkerInitialized(void);
+
+double TE_FrameLoopGetRefreshRate(void)
+{
+    DWM_TIMING_INFO timing_info = {};
+    timing_info.cbSize = sizeof(timing_info);
+    if (SUCCEEDED(DwmGetCompositionTimingInfo(NULL, &timing_info)) &&
+        timing_info.rateRefresh.uiDenominator > 0 &&
+        timing_info.rateRefresh.uiNumerator > 0) {
+        double rate = (double)timing_info.rateRefresh.uiNumerator / (double)timing_info.rateRefresh.uiDenominator;
+        if (rate >= 24.0 && rate <= 500.0) {
+            return rate;
+        }
+    }
+
+    HDC hdc = GetDC(NULL);
+    if (hdc) {
+        int vrefresh = GetDeviceCaps(hdc, VREFRESH);
+        ReleaseDC(NULL, hdc);
+        if (vrefresh > 1 && vrefresh <= 500) {
+            return (double)vrefresh;
+        }
+    }
+
+    return 60.0;
+}
+
+int TE_FrameLoopIsTimerHighResolution(void)
+{
+    return s_is_high_res;
+}
 
 /**
  * Compute displaced X positions when icons magnify or during drag-and-drop.
@@ -99,6 +161,7 @@ static void ComputeDisplacedPositions(
  */
 static bool ProcessMonitorTick(
     TE_MonitorState* mon,
+    int monitor_idx,
     const TE_HoverConfig* config,
     float dt,
     uint64_t now_qpc,
@@ -106,10 +169,55 @@ static bool ProcessMonitorTick(
     bool has_cur,
     bool* out_is_dirty)
 {
+    (void)now_qpc;
+    (void)cur;
+    (void)has_cur;
     int icon_count = mon->anim_count;
     if (icon_count <= 0) {
         if (out_is_dirty) *out_is_dirty = false;
         return true;
+    }
+
+    /* PERF-101: Consume any pending bounce impulses locklessly */
+    if (monitor_idx >= 0 && monitor_idx < TE_MAX_MONITORS) {
+        for (int i = 0; i < icon_count; i++) {
+            float imp = s_monitor_buffers[monitor_idx].pending_impulses[i].exchange(0.0f, std::memory_order_acq_rel);
+            if (imp > 0.0f) {
+                mon->anim[i].velocityOffsetY = -imp;
+                mon->anim[i].targetOffsetY = 0.0f;
+            }
+        }
+    }
+
+    /* PERF-101: Read double-buffered mouse snapshot locklessly */
+    if (monitor_idx >= 0 && monitor_idx < TE_MAX_MONITORS) {
+        int read_idx = s_monitor_buffers[monitor_idx].active_idx.load(std::memory_order_acquire);
+        const TE_MouseSnapshot& snap = s_monitor_buffers[monitor_idx].mouse_snapshots[read_idx];
+        if (snap.last_mousemove_qpc > mon->mouse.last_mousemove_qpc) {
+            mon->mouse.cursor_x = snap.cursor_x;
+            mon->mouse.cursor_y = snap.cursor_y;
+            mon->mouse.is_in_taskbar = snap.is_in_taskbar;
+            mon->mouse.is_dragging = snap.is_dragging;
+            mon->mouse.is_settling = snap.is_settling;
+            mon->mouse.settle_progress = snap.settle_progress;
+            mon->mouse.last_mousemove_qpc = snap.last_mousemove_qpc;
+        }
+    }
+
+    /* PERF-104: Stationary cursor velocity detection */
+    bool cursor_stationary = false;
+    if (monitor_idx >= 0 && monitor_idx < TE_MAX_MONITORS) {
+        if (s_has_prev_cursor[monitor_idx]) {
+            float cdx = mon->mouse.cursor_x - s_prev_cursor_x[monitor_idx];
+            float cdy = mon->mouse.cursor_y - s_prev_cursor_y[monitor_idx];
+            float dist_sq = cdx * cdx + cdy * cdy;
+            if (dist_sq < 0.01f) {
+                cursor_stationary = true;
+            }
+        }
+        s_prev_cursor_x[monitor_idx] = mon->mouse.cursor_x;
+        s_prev_cursor_y[monitor_idx] = mon->mouse.cursor_y;
+        s_has_prev_cursor[monitor_idx] = true;
     }
 
     float old_scales[TE_HOVER_MAX_ICONS];
@@ -126,38 +234,28 @@ static bool ProcessMonitorTick(
     }
 
 
-    /* Active cursor position validation: check if cursor is in active taskbar rect */
-    RECT active_rect = mon->geometry.taskbarRect;
-    active_rect.top -= mon->geometry.headroom_y;
 
-    if (mon->mouse.is_in_taskbar && has_cur) {
-        if (active_rect.right > active_rect.left && !PtInRect(&active_rect, cur)) {
-            /* Cursor left the taskbar region: begin smooth settle */
-            mon->mouse.is_in_taskbar = 0;
-            mon->mouse.is_settling = 1;
-            mon->mouse.settle_progress = 0.0f;
-        } else {
-            /* Cursor is still in taskbar: update current cursor position */
-            mon->mouse.cursor_x = (float)cur.x;
-            mon->mouse.cursor_y = (float)cur.y;
-            mon->mouse.last_mousemove_qpc = now_qpc;
-            if (mon->mouse.is_dragging && !(GetAsyncKeyState(VK_LBUTTON) & 0x8000)) {
-                mon->mouse.is_dragging = 0;
-            }
-        }
-    }
-
-    /* Validate geometry generation */
-    int generation_mismatch = 0;
+    /* PERF-105: Latch geometry generation changes atomically across frame boundaries */
+    uint64_t current_geom_gen = mon->geometry.generation;
     for (int i = 0; i < icon_count; i++) {
-        if (mon->anim[i].geometry_generation != mon->geometry.generation) {
-            generation_mismatch = 1;
-            break;
+        if (mon->anim[i].geometry_generation != current_geom_gen) {
+            mon->anim[i].geometry_generation = current_geom_gen;
+
+            /* Apply immediate position clamping so visuals smoothly interpolate without drops */
+            float max_headroom = (float)mon->geometry.headroom_y;
+            if (max_headroom <= 0.0f) max_headroom = (float)TE_HOVER_HEADROOM_BASE_PX;
+            if (mon->anim[i].currentOffsetY < -max_headroom) {
+                mon->anim[i].currentOffsetY = -max_headroom;
+                mon->anim[i].velocityOffsetY = 0.0f;
+            }
+            if (mon->anim[i].currentOffsetY > 0.0f) {
+                mon->anim[i].currentOffsetY = 0.0f;
+                mon->anim[i].velocityOffsetY = 0.0f;
+            }
+            float push_limit = (config->drop_zone_push > 0.0f) ? config->drop_zone_push : 50.0f;
+            if (mon->anim[i].current_pos_x > push_limit) mon->anim[i].current_pos_x = push_limit;
+            if (mon->anim[i].current_pos_x < -push_limit) mon->anim[i].current_pos_x = -push_limit;
         }
-    }
-    if (generation_mismatch) {
-        /* Drop frame during resize transition to prevent floating artifacts */
-        return false;
     }
 
     /* Compute target scales */
@@ -227,15 +325,17 @@ static bool ProcessMonitorTick(
         float speed = mon->mouse.is_in_taskbar ? in_speed : out_speed;
         float delta = (target - current) * speed;
 
-        if (fabsf(target - current) > 0.0001f) {
+        float new_scale;
+        if (fabsf(target - current) < 0.005f) {
+            new_scale = target;
+        } else {
             if (fabsf(delta) < min_step) {
                 delta = (target > current) ? min_step : -min_step;
             }
-        }
-
-        float new_scale = current + delta;
-        if ((current < target && new_scale > target) || (current > target && new_scale < target)) {
-            new_scale = target;
+            new_scale = current + delta;
+            if ((current < target && new_scale > target) || (current > target && new_scale < target)) {
+                new_scale = target;
+            }
         }
 
         float min_scale = drag_active ? recession : 1.0f;
@@ -355,36 +455,43 @@ static bool ProcessMonitorTick(
                               config->drop_zone_push,
                               target_pos_x, pos_y);
 
-    /* Smooth lerp of horizontal positions */
-    float pos_lerp_speed = 15.0f * dt;
+    /* Smooth lerp of horizontal positions matching animation speed */
+    float pos_lerp_speed = (config->speed_ms > 0)
+                         ? (1000.0f / (float)config->speed_ms) * dt * 3.0f
+                         : 15.0f * dt;
     if (pos_lerp_speed > 1.0f) pos_lerp_speed = 1.0f;
 
-    float pos_x[TE_HOVER_MAX_ICONS];
+    float max_pos_diff = 0.0f;
     for (int i = 0; i < icon_count; i++) {
-        mon->anim[i].current_pos_x += (target_pos_x[i] - mon->anim[i].current_pos_x) * pos_lerp_speed;
-        pos_x[i] = mon->anim[i].current_pos_x;
+        float dist_target = target_pos_x[i] - mon->anim[i].current_pos_x;
+        if (fabsf(dist_target) < 0.1f) {
+            mon->anim[i].current_pos_x = target_pos_x[i];
+        } else {
+            mon->anim[i].current_pos_x += dist_target * pos_lerp_speed;
+        }
+        mon->soa_pos_x[i] = mon->anim[i].current_pos_x;
+        mon->soa_pos_y[i] = mon->anim[i].currentOffsetY;
+        mon->soa_scales[i] = mon->anim[i].current_scale;
+        mon->soa_tilts_x[i] = mon->anim[i].current_tilt_x;
+        mon->soa_tilts_y[i] = mon->anim[i].current_tilt_y;
+
+        float pd = fabsf(mon->anim[i].current_pos_x - target_pos_x[i]);
+        if (pd > max_pos_diff) max_pos_diff = pd;
     }
 
-    /* Update DComp transforms for target including 3D tilts */
-    float scales[TE_HOVER_MAX_ICONS];
-    float tilts_x[TE_HOVER_MAX_ICONS];
-    float tilts_y[TE_HOVER_MAX_ICONS];
-    for (int i = 0; i < icon_count; i++) {
-        scales[i] = mon->anim[i].current_scale;
-        tilts_x[i] = mon->anim[i].current_tilt_x;
-        tilts_y[i] = mon->anim[i].current_tilt_y;
-    }
-
-    TE_DCompUpdateTransformsForTarget(mon->target_index, icon_count, scales, pos_x, pos_y, tilts_x, tilts_y);
+    /* Zero-repack Structure-of-Arrays (SoA) layout passed directly to DComp (PERF-303) */
+    TE_DCompUpdateTransformsForTarget(mon->target_index, icon_count,
+                                      mon->soa_scales, mon->soa_pos_x, mon->soa_pos_y,
+                                      mon->soa_tilts_x, mon->soa_tilts_y);
 
     if (out_is_dirty) {
         bool is_dirty = false;
         for (int i = 0; i < icon_count; i++) {
-            if (fabsf(scales[i] - old_scales[i]) > 0.0001f ||
-                fabsf(pos_x[i] - old_pos_x[i]) > 0.0001f ||
-                fabsf(pos_y[i] - old_pos_y[i]) > 0.0001f ||
-                fabsf(tilts_x[i] - old_tilt_x[i]) > 0.0001f ||
-                fabsf(tilts_y[i] - old_tilt_y[i]) > 0.0001f) {
+            if (fabsf(mon->soa_scales[i] - old_scales[i]) > 0.0001f ||
+                fabsf(mon->soa_pos_x[i] - old_pos_x[i]) > 0.0001f ||
+                fabsf(mon->soa_pos_y[i] - old_pos_y[i]) > 0.0001f ||
+                fabsf(mon->soa_tilts_x[i] - old_tilt_x[i]) > 0.0001f ||
+                fabsf(mon->soa_tilts_y[i] - old_tilt_y[i]) > 0.0001f) {
                 is_dirty = true;
                 break;
             }
@@ -392,38 +499,50 @@ static bool ProcessMonitorTick(
         *out_is_dirty = is_dirty;
     }
 
-    /* Check settlement */
-    bool is_settled = (!mon->mouse.is_in_taskbar && max_diff < 0.001f && all_y_settled && all_tilt_settled);
-    if (is_settled) {
-        TE_DCompSetOverlayAlphaForTarget(mon->target_index, 0.0f);
+    /* PERF-104: Stationary Hover Settlement Evaluation */
+    bool is_settled = false;
+    if (!mon->mouse.is_in_taskbar) {
+        if (max_diff < 0.001f && max_pos_diff < 0.001f && all_y_settled && all_tilt_settled) {
+            is_settled = true;
+            TE_DCompSetOverlayAlphaForTarget(mon->target_index, 0.0f);
 
-        mon->mouse.is_settling = 0;
-        mon->mouse.settle_progress = 1.0f;
+            mon->mouse.is_settling = 0;
+            mon->mouse.settle_progress = 1.0f;
 
-        for (int i = 0; i < icon_count; i++) {
-            mon->anim[i].current_scale = 1.0f;
-            mon->anim[i].target_scale = 1.0f;
-            mon->anim[i].currentOffsetY = 0.0f;
-            mon->anim[i].targetOffsetY = 0.0f;
-            mon->anim[i].velocityOffsetY = 0.0f;
-            mon->anim[i].current_tilt_x = 0.0f;
-            mon->anim[i].target_tilt_x = 0.0f;
-            mon->anim[i].velocity_tilt_x = 0.0f;
-            mon->anim[i].current_tilt_y = 0.0f;
-            mon->anim[i].target_tilt_y = 0.0f;
-            mon->anim[i].velocity_tilt_y = 0.0f;
-            mon->anim[i].current_pos_x = 0.0f;
+            for (int i = 0; i < icon_count; i++) {
+                mon->anim[i].current_scale = 1.0f;
+                mon->anim[i].target_scale = 1.0f;
+                mon->anim[i].currentOffsetY = 0.0f;
+                mon->anim[i].targetOffsetY = 0.0f;
+                mon->anim[i].velocityOffsetY = 0.0f;
+                mon->anim[i].current_tilt_x = 0.0f;
+                mon->anim[i].target_tilt_x = 0.0f;
+                mon->anim[i].velocity_tilt_x = 0.0f;
+                mon->anim[i].current_tilt_y = 0.0f;
+                mon->anim[i].target_tilt_y = 0.0f;
+                mon->anim[i].velocity_tilt_y = 0.0f;
+                mon->anim[i].current_pos_x = 0.0f;
+            }
+        } else {
+            TE_DCompSetOverlayAlphaForTarget(mon->target_index, 1.0f);
         }
     } else {
-        TE_DCompSetOverlayAlphaForTarget(mon->target_index, 1.0f);
+        /* Cursor is stationary in taskbar and all dimensions have reached resting equilibrium */
+        if (cursor_stationary && max_diff < 0.001f && max_pos_diff < 0.001f && all_y_settled && all_tilt_settled) {
+            is_settled = true;
+            /* Maintain visible overlay alpha during resting hover state */
+            TE_DCompSetOverlayAlphaForTarget(mon->target_index, 1.0f);
+        } else {
+            TE_DCompSetOverlayAlphaForTarget(mon->target_index, 1.0f);
+        }
     }
 
     return is_settled;
 }
 
 /**
- * Timer callback — the animation hot path.
- * Called on a thread pool thread by the timer queue.
+ * Animation hot path tick:
+ * Evaluates monitors and dynamic island, then commits DirectComposition.
  */
 static VOID CALLBACK FrameTimerCallback(PVOID lpParam, BOOLEAN timer_or_wait_fired)
 {
@@ -433,6 +552,18 @@ static VOID CALLBACK FrameTimerCallback(PVOID lpParam, BOOLEAN timer_or_wait_fir
     if (!s_loop_active) return;
     TE_IconHoverState* state = &g_hover_state;
     if (!state->enabled) return;
+
+    /* SYS-009: Explicitly initialize COM as MTA upon entry if uninitialized */
+    struct ComMtaScopeGuard {
+        HRESULT hr;
+        ComMtaScopeGuard() { hr = CoInitializeEx(NULL, COINIT_MULTITHREADED); }
+        ~ComMtaScopeGuard() { if (SUCCEEDED(hr)) CoUninitialize(); }
+    } com_guard;
+
+    struct CallbackThreadGuard {
+        CallbackThreadGuard() { s_is_callback_thread = true; }
+        ~CallbackThreadGuard() { s_is_callback_thread = false; }
+    } guard;
 
     /* Calculate delta time */
     LARGE_INTEGER now;
@@ -448,10 +579,7 @@ static VOID CALLBACK FrameTimerCallback(PVOID lpParam, BOOLEAN timer_or_wait_fir
     if (dt <= 0.0f) dt = 0.008f;
     if (dt > 0.05f) dt = 0.05f;
 
-    /* Ensure overlays stay on top of taskbars even if user clicked taskbar */
-    if (state->config.keep_on_top) {
-        TE_DCompEnsureTopmost(NULL);
-    }
+    /* PERF-205: Eliminate per-frame synchronous Z-order traversal */
 
     POINT cur = {};
     bool has_cur = (GetCursorPos(&cur) != FALSE);
@@ -478,7 +606,7 @@ static VOID CALLBACK FrameTimerCallback(PVOID lpParam, BOOLEAN timer_or_wait_fir
             TE_MonitorState* mon = &state->monitors[m];
             if (!mon->is_active || mon->anim_count <= 0) continue;
             bool monitor_dirty = false;
-            bool settled = ProcessMonitorTick(mon, &state->config, dt, (uint64_t)now.QuadPart, cur, has_cur, &monitor_dirty);
+            bool settled = ProcessMonitorTick(mon, m, &state->config, dt, (uint64_t)now.QuadPart, cur, has_cur, &monitor_dirty);
             if (monitor_dirty) {
                 any_monitor_dirty = true;
             }
@@ -505,7 +633,7 @@ static VOID CALLBACK FrameTimerCallback(PVOID lpParam, BOOLEAN timer_or_wait_fir
         memcpy(legacy_mon.anim, state->anim, sizeof(TE_IconAnimState) * state->anim_count);
 
         bool legacy_dirty = false;
-        bool settled = ProcessMonitorTick(&legacy_mon, &state->config, dt, (uint64_t)now.QuadPart, cur, has_cur, &legacy_dirty);
+        bool settled = ProcessMonitorTick(&legacy_mon, 0, &state->config, dt, (uint64_t)now.QuadPart, cur, has_cur, &legacy_dirty);
         if (legacy_dirty) any_monitor_dirty = true;
         if (!settled) {
             all_monitors_settled = false;
@@ -533,14 +661,121 @@ static VOID CALLBACK FrameTimerCallback(PVOID lpParam, BOOLEAN timer_or_wait_fir
     /* Check if settle animation is complete across all monitors and dynamic island */
     if (all_monitors_settled && island_settled) {
         if (InterlockedCompareExchange(&s_loop_active, 0, 1) == 1) {
-            if (s_timer_handle) {
-                DeleteTimerQueueTimer(s_timer_queue, s_timer_handle, NULL);
-                s_timer_handle = NULL;
+            if (s_waitable_timer) {
+                CancelWaitableTimer(s_waitable_timer);
             }
             s_last_tick_qpc = 0;
             TE_LogWrite(TE_LOG_DEBUG, LOG_TAG, "Settle complete for all displays, frame loop stopped automatically");
         }
     }
+}
+
+/**
+ * Dedicated frame loop thread procedure (SYS-009, PERF-103).
+ */
+static DWORD WINAPI FrameLoopWorkerThread(LPVOID lpParam)
+{
+    (void)lpParam;
+
+    /* Explicit COM MTA initialization for entire worker thread lifetime (SYS-009) */
+    struct ComMtaScopeGuard {
+        HRESULT hr;
+        ComMtaScopeGuard() { hr = CoInitializeEx(NULL, COINIT_MULTITHREADED); }
+        ~ComMtaScopeGuard() { if (SUCCEEDED(hr)) CoUninitialize(); }
+    } com_guard;
+
+    s_is_callback_thread = true;
+
+    HANDLE idle_events[2] = { s_shutdown_event, s_wake_event };
+
+    while (true) {
+        DWORD res = WaitForMultipleObjects(2, idle_events, FALSE, INFINITE);
+        if (res == WAIT_OBJECT_0) {
+            break; // Shutdown signaled
+        }
+
+        ResetEvent(s_stop_event);
+
+        double refresh_rate = TE_FrameLoopGetRefreshRate();
+        if (refresh_rate < 24.0) refresh_rate = 60.0;
+        LONGLONG interval_100ns = (LONGLONG)(10000000.0 / refresh_rate);
+        if (interval_100ns < 20000) interval_100ns = 20000; // Cap at 500 Hz
+
+        /* First tick fires immediately */
+        LARGE_INTEGER due_time;
+        due_time.QuadPart = -1;
+        SetWaitableTimer(s_waitable_timer, &due_time, 0, NULL, NULL, FALSE);
+
+        HANDLE active_events[3] = { s_shutdown_event, s_stop_event, s_waitable_timer };
+
+        while (s_loop_active) {
+            DWORD active_res = WaitForMultipleObjects(3, active_events, FALSE, INFINITE);
+            if (active_res == WAIT_OBJECT_0) {
+                CancelWaitableTimer(s_waitable_timer);
+                goto thread_exit;
+            }
+            if (active_res == WAIT_OBJECT_0 + 1) {
+                CancelWaitableTimer(s_waitable_timer);
+                break;
+            }
+            if (active_res == WAIT_OBJECT_0 + 2) {
+                if (!s_loop_active) {
+                    CancelWaitableTimer(s_waitable_timer);
+                    break;
+                }
+
+                FrameTimerCallback(NULL, TRUE);
+
+                if (!s_loop_active) {
+                    CancelWaitableTimer(s_waitable_timer);
+                    break;
+                }
+
+                due_time.QuadPart = -interval_100ns;
+                SetWaitableTimer(s_waitable_timer, &due_time, 0, NULL, NULL, FALSE);
+            }
+        }
+    }
+
+thread_exit:
+    s_is_callback_thread = false;
+    return 0;
+}
+
+static void EnsureWorkerInitialized(void)
+{
+    if (s_worker_initialized && s_thread != NULL) {
+        return;
+    }
+
+    if (!s_wake_event) {
+        s_wake_event = CreateEventW(NULL, FALSE, FALSE, NULL);
+    }
+    if (!s_stop_event) {
+        s_stop_event = CreateEventW(NULL, TRUE, FALSE, NULL);
+    }
+    if (!s_shutdown_event) {
+        s_shutdown_event = CreateEventW(NULL, TRUE, FALSE, NULL);
+    }
+
+    if (!s_waitable_timer) {
+        s_waitable_timer = CreateWaitableTimerExW(NULL, NULL, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+        if (s_waitable_timer) {
+            s_is_high_res = 1;
+        } else {
+            s_waitable_timer = CreateWaitableTimerW(NULL, FALSE, NULL);
+            s_is_high_res = 0;
+        }
+    }
+
+    if (!s_thread) {
+        s_thread = CreateThread(NULL, 0, FrameLoopWorkerThread, NULL, 0, NULL);
+        if (s_thread) {
+            SetThreadPriority(s_thread, THREAD_PRIORITY_HIGHEST);
+        }
+    }
+
+    s_worker_initialized = (s_thread != NULL);
 }
 
 void TE_FrameLoopWakeDynamicIsland(void)
@@ -553,9 +788,15 @@ HRESULT TE_FrameLoopStart(void)
     /* Register dynamic island wake callback */
     TE_DynamicIslandSetWakeCallback(TE_FrameLoopWakeDynamicIsland);
 
+    EnsureWorkerInitialized();
+
     /* Already running? No-op */
     if (InterlockedCompareExchange(&s_loop_active, 1, 0) == 1) {
         return TE_S_OK;
+    }
+
+    if (s_stop_event) {
+        ResetEvent(s_stop_event);
     }
 
     /* Initialize QPC frequency */
@@ -567,33 +808,6 @@ HRESULT TE_FrameLoopStart(void)
     QueryPerformanceCounter(&now);
     s_last_tick_qpc = (uint64_t)now.QuadPart;
 
-    /* Create timer queue if needed */
-    if (!s_timer_queue) {
-        s_timer_queue = CreateTimerQueue();
-        if (!s_timer_queue) {
-            TE_LogWrite(TE_LOG_ERROR, LOG_TAG, "Failed to create timer queue");
-            InterlockedExchange(&s_loop_active, 0);
-            return TE_E_FAIL;
-        }
-    }
-
-    /* Create periodic timer */
-    BOOL ok = CreateTimerQueueTimer(
-        &s_timer_handle,
-        s_timer_queue,
-        FrameTimerCallback,
-        NULL,
-        0,                        /* Due time: fire immediately */
-        FRAME_TIMER_INTERVAL_MS,  /* Period: ~8ms (125 Hz) */
-        WT_EXECUTEDEFAULT
-    );
-
-    if (!ok) {
-        TE_LogWrite(TE_LOG_ERROR, LOG_TAG, "Failed to create timer queue timer");
-        InterlockedExchange(&s_loop_active, 0);
-        return TE_E_FAIL;
-    }
-
     /* Show overlay */
     TE_DCompSetOverlayAlpha(1.0f);
     if (g_hover_state.monitor_count > 0) {
@@ -603,7 +817,14 @@ HRESULT TE_FrameLoopStart(void)
             }
         }
     }
+    if (g_hover_state.config.keep_on_top) {
+        TE_DCompEnsureTopmost(NULL);
+    }
     TE_DCompCommit();
+
+    if (s_wake_event) {
+        SetEvent(s_wake_event);
+    }
 
     TE_LogWrite(TE_LOG_DEBUG, LOG_TAG, "Frame loop started");
     return TE_S_OK;
@@ -615,15 +836,49 @@ void TE_FrameLoopStop(void)
         return; /* Already stopped */
     }
 
-    if (s_timer_handle) {
-        /* Use NULL to cancel asynchronously and prevent thread-pool self-deadlocks */
-        DeleteTimerQueueTimer(s_timer_queue, s_timer_handle, NULL);
-        s_timer_handle = NULL;
+    if (s_stop_event) {
+        SetEvent(s_stop_event);
+    }
+    if (s_waitable_timer) {
+        CancelWaitableTimer(s_waitable_timer);
     }
 
     s_last_tick_qpc = 0;
 
     TE_LogWrite(TE_LOG_DEBUG, LOG_TAG, "Frame loop stopped");
+}
+
+void TE_FrameLoopShutdown(void)
+{
+    TE_FrameLoopStop();
+    if (s_shutdown_event) {
+        SetEvent(s_shutdown_event);
+    }
+    if (s_thread) {
+        WaitForSingleObject(s_thread, 1000);
+        CloseHandle(s_thread);
+        s_thread = NULL;
+    }
+    if (s_waitable_timer) {
+        CloseHandle(s_waitable_timer);
+        s_waitable_timer = NULL;
+    }
+    if (s_wake_event) {
+        CloseHandle(s_wake_event);
+        s_wake_event = NULL;
+    }
+    if (s_stop_event) {
+        CloseHandle(s_stop_event);
+        s_stop_event = NULL;
+    }
+    if (s_shutdown_event) {
+        CloseHandle(s_shutdown_event);
+        s_shutdown_event = NULL;
+    }
+    s_worker_initialized = false;
+    for (int m = 0; m < TE_MAX_MONITORS; m++) {
+        s_has_prev_cursor[m] = false;
+    }
 }
 
 int TE_FrameLoopIsActive(void)
@@ -682,6 +937,18 @@ void TE_FrameLoopOnMouseMoveEx(float cursor_x, float cursor_y, int is_dragging, 
                 state->monitors[i].mouse.is_settling = 1;
                 state->monitors[i].mouse.settle_progress = 0.0f;
             }
+
+            /* PERF-101: Atomically swap double-buffered snapshot */
+            int cur_b = s_monitor_buffers[i].active_idx.load(std::memory_order_relaxed);
+            int next_b = 1 - cur_b;
+            s_monitor_buffers[i].mouse_snapshots[next_b].cursor_x = state->monitors[i].mouse.cursor_x;
+            s_monitor_buffers[i].mouse_snapshots[next_b].cursor_y = state->monitors[i].mouse.cursor_y;
+            s_monitor_buffers[i].mouse_snapshots[next_b].is_in_taskbar = state->monitors[i].mouse.is_in_taskbar;
+            s_monitor_buffers[i].mouse_snapshots[next_b].is_dragging = state->monitors[i].mouse.is_dragging;
+            s_monitor_buffers[i].mouse_snapshots[next_b].is_settling = state->monitors[i].mouse.is_settling;
+            s_monitor_buffers[i].mouse_snapshots[next_b].settle_progress = state->monitors[i].mouse.settle_progress;
+            s_monitor_buffers[i].mouse_snapshots[next_b].last_mousemove_qpc = state->monitors[i].mouse.last_mousemove_qpc;
+            s_monitor_buffers[i].active_idx.store(next_b, std::memory_order_release);
         }
     }
 
@@ -702,17 +969,28 @@ void TE_FrameLoopOnMouseMoveEx(float cursor_x, float cursor_y, int is_dragging, 
         }
     }
 
+    if (state->monitor_count == 0) {
+        int cur_b = s_monitor_buffers[0].active_idx.load(std::memory_order_relaxed);
+        int next_b = 1 - cur_b;
+        s_monitor_buffers[0].mouse_snapshots[next_b].cursor_x = state->mouse.cursor_x;
+        s_monitor_buffers[0].mouse_snapshots[next_b].cursor_y = state->mouse.cursor_y;
+        s_monitor_buffers[0].mouse_snapshots[next_b].is_in_taskbar = state->mouse.is_in_taskbar;
+        s_monitor_buffers[0].mouse_snapshots[next_b].is_dragging = state->mouse.is_dragging;
+        s_monitor_buffers[0].mouse_snapshots[next_b].is_settling = state->mouse.is_settling;
+        s_monitor_buffers[0].mouse_snapshots[next_b].settle_progress = state->mouse.settle_progress;
+        s_monitor_buffers[0].mouse_snapshots[next_b].last_mousemove_qpc = state->mouse.last_mousemove_qpc;
+        s_monitor_buffers[0].active_idx.store(next_b, std::memory_order_release);
+    }
+
     ReleaseSRWLockExclusive(&state->state_lock);
 
     if (TE_DynamicIslandIsEnabled()) {
         TE_DynamicIslandOnMouseMove(cursor_x, cursor_y);
     }
 
-    /* Start frame loop if not already running, or re-assert topmost if running */
+    /* Start frame loop if not already running */
     if (!TE_FrameLoopIsActive()) {
         TE_FrameLoopStart();
-    } else if (state->config.keep_on_top) {
-        TE_DCompEnsureTopmost(taskbar_hwnd);
     }
 }
 
@@ -726,6 +1004,10 @@ void TE_FrameLoopOnMouseLeave(void)
     TE_IconHoverState* state = &g_hover_state;
     AcquireSRWLockExclusive(&state->state_lock);
 
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    uint64_t now_qpc = (uint64_t)now.QuadPart;
+
     if (state->monitor_count > 0) {
         for (int i = 0; i < state->monitor_count; i++) {
             if (state->monitors[i].mouse.is_in_taskbar) {
@@ -733,7 +1015,20 @@ void TE_FrameLoopOnMouseLeave(void)
                 state->monitors[i].mouse.is_dragging = 0;
                 state->monitors[i].mouse.is_settling = 1;
                 state->monitors[i].mouse.settle_progress = 0.0f;
+                state->monitors[i].mouse.last_mousemove_qpc = now_qpc;
             }
+
+            /* PERF-101: Atomically swap double-buffered snapshot */
+            int cur_b = s_monitor_buffers[i].active_idx.load(std::memory_order_relaxed);
+            int next_b = 1 - cur_b;
+            s_monitor_buffers[i].mouse_snapshots[next_b].cursor_x = state->monitors[i].mouse.cursor_x;
+            s_monitor_buffers[i].mouse_snapshots[next_b].cursor_y = state->monitors[i].mouse.cursor_y;
+            s_monitor_buffers[i].mouse_snapshots[next_b].is_in_taskbar = 0;
+            s_monitor_buffers[i].mouse_snapshots[next_b].is_dragging = 0;
+            s_monitor_buffers[i].mouse_snapshots[next_b].is_settling = 1;
+            s_monitor_buffers[i].mouse_snapshots[next_b].settle_progress = 0.0f;
+            s_monitor_buffers[i].mouse_snapshots[next_b].last_mousemove_qpc = now_qpc;
+            s_monitor_buffers[i].active_idx.store(next_b, std::memory_order_release);
         }
     }
 
@@ -741,6 +1036,20 @@ void TE_FrameLoopOnMouseLeave(void)
     state->mouse.is_dragging = 0;
     state->mouse.is_settling = 1;
     state->mouse.settle_progress = 0.0f;
+    state->mouse.last_mousemove_qpc = now_qpc;
+
+    if (state->monitor_count == 0) {
+        int cur_b = s_monitor_buffers[0].active_idx.load(std::memory_order_relaxed);
+        int next_b = 1 - cur_b;
+        s_monitor_buffers[0].mouse_snapshots[next_b].cursor_x = state->mouse.cursor_x;
+        s_monitor_buffers[0].mouse_snapshots[next_b].cursor_y = state->mouse.cursor_y;
+        s_monitor_buffers[0].mouse_snapshots[next_b].is_in_taskbar = 0;
+        s_monitor_buffers[0].mouse_snapshots[next_b].is_dragging = 0;
+        s_monitor_buffers[0].mouse_snapshots[next_b].is_settling = 1;
+        s_monitor_buffers[0].mouse_snapshots[next_b].settle_progress = 0.0f;
+        s_monitor_buffers[0].mouse_snapshots[next_b].last_mousemove_qpc = now_qpc;
+        s_monitor_buffers[0].active_idx.store(next_b, std::memory_order_release);
+    }
 
     ReleaseSRWLockExclusive(&state->state_lock);
 
@@ -748,7 +1057,10 @@ void TE_FrameLoopOnMouseLeave(void)
         TE_DynamicIslandOnMouseLeave();
     }
 
-    /* Frame loop continues running to animate the settle */
+    /* Start frame loop if not already running to animate return to baseline */
+    if (!TE_FrameLoopIsActive()) {
+        TE_FrameLoopStart();
+    }
 }
 
 HRESULT TE_FrameLoopTriggerIconBounceForMonitor(int monitor_index, int icon_index, float impulse_strength)
@@ -783,6 +1095,12 @@ HRESULT TE_FrameLoopTriggerIconBounceForMonitor(int monitor_index, int icon_inde
         }
         state->anim[icon_index].velocityOffsetY = -fabsf(impulse_strength);
         state->anim[icon_index].targetOffsetY = 0.0f;
+    }
+
+    /* PERF-101: Lockless atomic impulse registration */
+    int m_idx = (state->monitor_count > 0) ? monitor_index : 0;
+    if (m_idx >= 0 && m_idx < TE_MAX_MONITORS && icon_index >= 0 && icon_index < TE_HOVER_MAX_ICONS) {
+        s_monitor_buffers[m_idx].pending_impulses[icon_index].store(fabsf(impulse_strength), std::memory_order_release);
     }
 
     ReleaseSRWLockExclusive(&state->state_lock);

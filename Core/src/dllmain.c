@@ -44,8 +44,39 @@ static void TE_WriteStartupError(HINSTANCE hInst, const char* msg) {
     }
 }
 
+static volatile LONG g_is_detaching = 0;
+static HANDLE g_hDelayedInitThread = NULL;
+
+static DWORD WINAPI TE_DelayedStartupThread(LPVOID lpParam) {
+    HINSTANCE hinstDLL = (HINSTANCE)lpParam;
+    HMODULE hModule = NULL;
+    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, (LPCWSTR)TE_DelayedStartupThread, &hModule);
+
+    HWND taskbar_hwnd = NULL;
+    for (int i = 0; i < 600 && !InterlockedCompareExchange(&g_is_detaching, 0, 0); i++) {
+        taskbar_hwnd = FindWindowW(L"Shell_TrayWnd", NULL);
+        if (taskbar_hwnd) {
+            break;
+        }
+        Sleep(50);
+    }
+    if (taskbar_hwnd && !InterlockedCompareExchange(&g_is_detaching, 0, 0)) {
+        g_taskbarHwnd = taskbar_hwnd;
+        TE_TaskbarSubclassInstall(taskbar_hwnd);
+        PostMessage(taskbar_hwnd, WM_TE_INIT, 0, 0);
+    } else if (!taskbar_hwnd && !InterlockedCompareExchange(&g_is_detaching, 0, 0)) {
+        TE_WriteStartupError(hinstDLL, "CRITICAL ERROR: Shell_TrayWnd not found in Explorer process within timeout. Cannot initialize Core Manager.");
+    }
+
+    if (hModule) {
+        FreeLibraryAndExitThread(hModule, 0);
+    }
+    return 0;
+}
+
 BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
 {
+    (void)lpvReserved;
     switch (fdwReason) {
         case DLL_PROCESS_ATTACH:
         {
@@ -53,9 +84,6 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
                 return TRUE;
             }
             
-            HMODULE hPin = NULL;
-            GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN, (LPCWSTR)DllMain, &hPin);
-
             DisableThreadLibraryCalls(hinstDLL);
             g_hinstDLL = hinstDLL;
             
@@ -67,22 +95,22 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
                 TE_TaskbarSubclassInstall(taskbar_hwnd);
                 PostMessage(taskbar_hwnd, WM_TE_INIT, 0, 0);
             } else {
-                TE_WriteStartupError(hinstDLL, "CRITICAL ERROR: Shell_TrayWnd not found in Explorer process. Cannot initialize Core Manager.");
+                g_hDelayedInitThread = CreateThread(NULL, 0, TE_DelayedStartupThread, (LPVOID)hinstDLL, 0, NULL);
             }
             break;
         }
         case DLL_PROCESS_DETACH:
         {
-            if (TE_IsExplorerProcess()) {
-                TE_TaskbarUntrackAll();
-                g_taskbarHwnd = NULL;
-                /* If lpvReserved != NULL, the process is terminating and worker
-                 * threads are already terminated by the OS; waiting on them under
-                 * loader lock causes an unrecoverable deadlock. */
-                if (lpvReserved == NULL) {
-                    TE_ShutdownEngine();
-                }
+            /* Invariant (SYS-002): Never acquire user locks, wait on synchronization
+             * primitives (WaitForSingleObject), or signal threads from inside DllMain.
+             * Module shutdown and thread termination must be triggered asynchronously
+             * from the UI message loop prior to uninjection. */
+            InterlockedExchange(&g_is_detaching, 1);
+            if (g_hDelayedInitThread) {
+                CloseHandle(g_hDelayedInitThread);
+                g_hDelayedInitThread = NULL;
             }
+            g_taskbarHwnd = NULL;
             break;
         }
     }

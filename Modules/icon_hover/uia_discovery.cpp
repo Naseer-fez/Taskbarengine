@@ -82,44 +82,52 @@ static BOOL ContainsSubstringI(BSTR str, const wchar_t* sub) {
 }
 
 static BOOL DiscoverGlyphRect(IUIAutomation* uia, IUIAutomationElement* btn, RECT btn_rect, RECT* out_glyph) {
+    (void)uia;
     BOOL success = FALSE;
-    IUIAutomationCondition* img_cond = NULL;
-    VARIANT var_img;
-    var_img.vt = VT_I4;
-    var_img.lVal = UIA_ImageControlTypeId;
-    
-    if (SUCCEEDED(uia->CreatePropertyCondition(UIA_ControlTypePropertyId, var_img, &img_cond)) && img_cond) {
-        IUIAutomationElement* img_child = NULL;
-        if (SUCCEEDED(btn->FindFirst(TreeScope_Children, img_cond, &img_child)) && img_child) {
-            RECT gl_rect = {0, 0, 0, 0};
-            if (SUCCEEDED(img_child->get_CurrentBoundingRectangle(&gl_rect))) {
-                int w_btn = btn_rect.right - btn_rect.left;
-                int w_gl = gl_rect.right - gl_rect.left;
-                int h_gl = gl_rect.bottom - gl_rect.top;
-                
-                if (w_gl >= 8 && h_gl >= 8 &&
-                    gl_rect.left >= btn_rect.left - 2 &&
-                    gl_rect.top >= btn_rect.top - 2 &&
-                    gl_rect.right <= btn_rect.right + 2 &&
-                    gl_rect.bottom <= btn_rect.bottom + 2) {
-                    
-                    float aspect = (float)w_gl / (float)h_gl;
-                    float size_ratio = (float)w_gl / (float)w_btn;
-                    
-                    if (aspect >= 0.6f && aspect <= 1.4f &&
-                        size_ratio >= 0.35f && size_ratio <= 0.90f) {
-                        *out_glyph = gl_rect;
-                        success = TRUE;
+    int w_btn = btn_rect.right - btn_rect.left;
+
+    /* Check pre-cached child elements (0 RPC roundtrips) */
+    IUIAutomationElementArray* children = NULL;
+    if (btn && SUCCEEDED(btn->GetCachedChildren(&children)) && children) {
+        int child_count = 0;
+        children->get_Length(&child_count);
+        for (int c = 0; c < child_count; c++) {
+            IUIAutomationElement* img_child = NULL;
+            if (SUCCEEDED(children->GetElement(c, &img_child)) && img_child) {
+                CONTROLTYPEID ctype = 0;
+                img_child->get_CachedControlType(&ctype);
+                if (ctype == UIA_ImageControlTypeId) {
+                    RECT gl_rect = { 0 };
+                    if (SUCCEEDED(img_child->get_CachedBoundingRectangle(&gl_rect))) {
+                        int w_gl = gl_rect.right - gl_rect.left;
+                        int h_gl = gl_rect.bottom - gl_rect.top;
+
+                        if (w_gl >= 8 && h_gl >= 8 &&
+                            gl_rect.left >= btn_rect.left - 2 &&
+                            gl_rect.top >= btn_rect.top - 2 &&
+                            gl_rect.right <= btn_rect.right + 2 &&
+                            gl_rect.bottom <= btn_rect.bottom + 2) {
+
+                            float aspect = (float)w_gl / (float)h_gl;
+                            float size_ratio = (float)w_gl / (float)w_btn;
+
+                            if (aspect >= 0.6f && aspect <= 1.4f &&
+                                size_ratio >= 0.35f && size_ratio <= 0.90f) {
+                                *out_glyph = gl_rect;
+                                success = TRUE;
+                            }
+                        }
                     }
                 }
+                img_child->Release();
             }
-            img_child->Release();
+            if (success) break;
         }
-        img_cond->Release();
+        children->Release();
     }
-    
+
+    /* Fallback to standard 60% proportional taskbar glyph geometry */
     if (!success) {
-        int w_btn = btn_rect.right - btn_rect.left;
         int h_btn = btn_rect.bottom - btn_rect.top;
         int targetGlyphDim = (int)(h_btn * 0.60f + 0.5f);
         int insetX = (w_btn - targetGlyphDim) / 2;
@@ -133,16 +141,19 @@ static BOOL DiscoverGlyphRect(IUIAutomation* uia, IUIAutomationElement* btn, REC
 }
 
 static TE_TaskbarElementType ClassifyElement(IUIAutomation* uia, IUIAutomationElement* btn, RECT btn_rect, BSTR auto_id, BSTR class_name) {
+    (void)uia;
     int w = btn_rect.right - btn_rect.left;
     int h = btn_rect.bottom - btn_rect.top;
     if (w < 16 || w > 200 || h < 16 || h > 200) return TE_ELEM_UNKNOWN;
-    
+
     float aspect = (float)w / (float)h;
     if (aspect < 0.4f || aspect > 2.5f) return TE_ELEM_UNKNOWN;
-    
+
     BSTR name = NULL;
-    btn->get_CurrentName(&name);
-    
+    if (btn && FAILED(btn->get_CachedName(&name)) || !name) {
+        if (btn) btn->get_CurrentName(&name);
+    }
+
     auto MatchesAny = [&](const wchar_t** patterns, int count) -> BOOL {
         for (int i = 0; i < count; i++) {
             if (ContainsSubstringI(auto_id, patterns[i])) return TRUE;
@@ -151,82 +162,70 @@ static TE_TaskbarElementType ClassifyElement(IUIAutomation* uia, IUIAutomationEl
         }
         return FALSE;
     };
-    
-    const wchar_t* start_patterns[] = {L"Start", L"StartButton"};
-    const wchar_t* search_patterns[] = {L"Search", L"SearchButton", L"SearchHost", L"SearchBox"};
-    const wchar_t* system_patterns[] = {L"TaskView", L"TaskViewButton", L"Widgets", L"Weather", L"People", L"InputIndicator"};
-    const wchar_t* notify_patterns[] = {L"Notification", L"Notify", L"Clock", L"Tray"};
-    
+
+    const wchar_t* start_patterns[] = { L"Start", L"StartButton" };
+    const wchar_t* search_patterns[] = { L"Search", L"SearchButton", L"SearchHost", L"SearchBox" };
+    const wchar_t* system_patterns[] = { L"TaskView", L"TaskViewButton", L"Widgets", L"Weather", L"People", L"InputIndicator", L"Copilot" };
+    const wchar_t* notify_patterns[] = {
+        L"Notification", L"Notify", L"Clock", L"Tray", L"Overflow",
+        L"Chevron", L"QuickSettings", L"ControlCenter", L"SystemTrayIcon",
+        L"TrayNotifyWnd"
+    };
+
     if (MatchesAny(start_patterns, 2)) {
         if (name) SysFreeString(name);
         return TE_ELEM_START_BUTTON;
     }
-    
-    if (MatchesAny(search_patterns, 4) || 
-        MatchesAny(system_patterns, 6) || MatchesAny(notify_patterns, 4)) {
+
+    if (MatchesAny(search_patterns, 4) || MatchesAny(system_patterns, 7)) {
         if (name) SysFreeString(name);
         return TE_ELEM_SHELL_CONTROL;
     }
-    
-    IUIAutomationTreeWalker* walker = NULL;
-    if (SUCCEEDED(uia->get_ControlViewWalker(&walker)) && walker) {
-        IUIAutomationElement* current = btn;
-        current->AddRef();
-        for (int i = 0; i < 3; i++) {
-            IUIAutomationElement* parent = NULL;
-            if (FAILED(walker->GetParentElement(current, &parent)) || !parent) {
-                break;
-            }
-            BSTR parent_class = NULL;
-            BSTR parent_id = NULL;
-            parent->get_CurrentClassName(&parent_class);
-            parent->get_CurrentAutomationId(&parent_id);
-            
-            BOOL is_tray = FALSE;
-            if (ContainsSubstringI(parent_class, L"TrayNotifyWnd") ||
-                ContainsSubstringI(parent_class, L"Windows.UI.Composition.DesktopWindowContentBridge") ||
-                ContainsSubstringI(parent_id, L"SystemTrayIcon")) {
-                is_tray = TRUE;
-            }
-            
-            if (parent_class) SysFreeString(parent_class);
-            if (parent_id) SysFreeString(parent_id);
-            
-            current->Release();
-            current = parent;
-            
-            if (is_tray) {
-                current->Release();
-                walker->Release();
-                if (name) SysFreeString(name);
-                return TE_ELEM_SYSTEM_TRAY;
-            }
-        }
-        current->Release();
-        walker->Release();
+
+    if (MatchesAny(notify_patterns, 10)) {
+        if (name) SysFreeString(name);
+        return TE_ELEM_SYSTEM_TRAY;
     }
-    
+
+    /* Fast cached check for child image elements (0 RPC roundtrips) */
     BOOL has_image = FALSE;
-    IUIAutomationCondition* img_cond = NULL;
-    VARIANT var_img;
-    var_img.vt = VT_I4;
-    var_img.lVal = UIA_ImageControlTypeId;
-    if (SUCCEEDED(uia->CreatePropertyCondition(UIA_ControlTypePropertyId, var_img, &img_cond)) && img_cond) {
-        IUIAutomationElement* img_child = NULL;
-        if (SUCCEEDED(btn->FindFirst(TreeScope_Children, img_cond, &img_child)) && img_child) {
-            has_image = TRUE;
-            img_child->Release();
+    IUIAutomationElementArray* children = NULL;
+    if (btn && SUCCEEDED(btn->GetCachedChildren(&children)) && children) {
+        int child_count = 0;
+        children->get_Length(&child_count);
+        for (int c = 0; c < child_count; c++) {
+            IUIAutomationElement* ch = NULL;
+            if (SUCCEEDED(children->GetElement(c, &ch)) && ch) {
+                CONTROLTYPEID ct = 0;
+                ch->get_CachedControlType(&ct);
+                if (ct == UIA_ImageControlTypeId) {
+                    has_image = TRUE;
+                }
+                ch->Release();
+            }
+            if (has_image) break;
         }
-        img_cond->Release();
+        children->Release();
     }
-    
-    BOOL has_app_id = ContainsSubstringI(auto_id, L"AppID:");
+
+    /* Fast cached check for invoke pattern */
+    if (!has_image && btn) {
+        IUnknown* unk = NULL;
+        if (SUCCEEDED(btn->GetCachedPattern(UIA_InvokePatternId, &unk)) && unk) {
+            has_image = TRUE;
+            unk->Release();
+        }
+    }
+
+    BOOL has_app_id = ContainsSubstringI(auto_id, L"AppID:") ||
+                      ContainsSubstringI(auto_id, L"Taskbar") ||
+                      ContainsSubstringI(auto_id, L"App");
     if (name) SysFreeString(name);
-    
+
     if (!has_image && !has_app_id) {
         return TE_ELEM_UNKNOWN;
     }
-    
+
     return TE_ELEM_APP_ICON;
 }
 
@@ -243,13 +242,23 @@ HRESULT TE_UiaDiscoverIcons(HWND taskbar_hwnd, TE_IconElementCache* out_cache)
         return TE_S_OK;
     }
 
-    HRESULT hr_co = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+    /* Enforce MTA strictly across all UIA discovery routines (SYS-007 & PERF-404) */
+    HRESULT hr_co = CoInitializeEx(NULL, COINIT_MULTITHREADED);
+    if (hr_co == RPC_E_CHANGED_MODE) {
+        TE_LogWrite(TE_LOG_ERROR, LOG_TAG, "Apartment mode collision: thread is not MTA (RPC_E_CHANGED_MODE)");
+        return RPC_E_CHANGED_MODE;
+    }
+    if (FAILED(hr_co)) {
+        TE_LogWrite(TE_LOG_ERROR, LOG_TAG, "Failed to initialize COM MTA on discovery thread");
+        return hr_co;
+    }
 
     HRESULT hr = S_OK;
     IUIAutomation* uia = NULL;
     IUIAutomationElement* taskbar_elem = NULL;
     IUIAutomationCondition* button_cond = NULL;
     IUIAutomationElementArray* buttons = NULL;
+    IUIAutomationCacheRequest* cache_req = NULL;
 
     /* Create the UIAutomation COM object */
     hr = CoCreateInstance(
@@ -262,10 +271,25 @@ HRESULT TE_UiaDiscoverIcons(HWND taskbar_hwnd, TE_IconElementCache* out_cache)
         return TE_E_FAIL;
     }
 
+    /* Batch-fetch properties and patterns in a single cross-process RPC roundtrip (SYS-006 & PERF-401) */
+    hr = uia->CreateCacheRequest(&cache_req);
+    if (SUCCEEDED(hr) && cache_req) {
+        cache_req->AddProperty(UIA_BoundingRectanglePropertyId);
+        cache_req->AddProperty(UIA_AutomationIdPropertyId);
+        cache_req->AddProperty(UIA_ClassNamePropertyId);
+        cache_req->AddProperty(UIA_NamePropertyId);
+        cache_req->AddProperty(UIA_ControlTypePropertyId);
+        cache_req->AddProperty(UIA_NativeWindowHandlePropertyId);
+        cache_req->AddProperty(UIA_ProcessIdPropertyId);
+        cache_req->AddPattern(UIA_InvokePatternId);
+        cache_req->put_TreeScope((TreeScope)(TreeScope_Element | TreeScope_Children));
+    }
+
     /* Get the taskbar UIA element from HWND */
     hr = uia->ElementFromHandle(taskbar_hwnd, &taskbar_elem);
     if (FAILED(hr) || !taskbar_elem) {
         TE_LogWrite(TE_LOG_ERROR, LOG_TAG, "Failed to get UIA element from taskbar HWND");
+        if (cache_req) cache_req->Release();
         uia->Release();
         if (SUCCEEDED(hr_co)) CoUninitialize();
         return TE_E_FAIL;
@@ -278,16 +302,22 @@ HRESULT TE_UiaDiscoverIcons(HWND taskbar_hwnd, TE_IconElementCache* out_cache)
     hr = uia->CreatePropertyCondition(UIA_ControlTypePropertyId, var_button, &button_cond);
     if (FAILED(hr) || !button_cond) {
         TE_LogWrite(TE_LOG_ERROR, LOG_TAG, "Failed to create UIA property condition");
+        if (cache_req) cache_req->Release();
         taskbar_elem->Release();
         uia->Release();
         if (SUCCEEDED(hr_co)) CoUninitialize();
         return TE_E_FAIL;
     }
 
-    /* Find all descendant button elements */
-    hr = taskbar_elem->FindAll(TreeScope_Descendants, button_cond, &buttons);
+    /* Find all descendant button elements with pre-cached properties */
+    if (cache_req) {
+        hr = taskbar_elem->FindAllBuildCache(TreeScope_Descendants, button_cond, cache_req, &buttons);
+    } else {
+        hr = taskbar_elem->FindAll(TreeScope_Descendants, button_cond, &buttons);
+    }
     if (FAILED(hr) || !buttons) {
         TE_LogWrite(TE_LOG_WARNING, LOG_TAG, "No taskbar button elements found via UIA");
+        if (cache_req) cache_req->Release();
         button_cond->Release();
         taskbar_elem->Release();
         uia->Release();
@@ -310,21 +340,28 @@ HRESULT TE_UiaDiscoverIcons(HWND taskbar_hwnd, TE_IconElementCache* out_cache)
         hr = buttons->GetElement(i, &btn);
         if (FAILED(hr) || !btn) continue;
 
-        /* Extract bounding rectangle */
+        /* Extract bounding rectangle from cache (0 RPC) or fallback */
         RECT bounds;
         memset(&bounds, 0, sizeof(bounds));
-        hr = btn->get_CurrentBoundingRectangle(&bounds);
-        if (FAILED(hr) || (bounds.right - bounds.left) <= 0 || (bounds.bottom - bounds.top) <= 0) {
+        if (FAILED(btn->get_CachedBoundingRectangle(&bounds)) || (bounds.right - bounds.left) <= 0 || (bounds.bottom - bounds.top) <= 0) {
+            btn->get_CurrentBoundingRectangle(&bounds);
+        }
+        if ((bounds.right - bounds.left) <= 0 || (bounds.bottom - bounds.top) <= 0) {
             btn->Release();
             continue;
         }
 
-        /* Extract automation ID */
+        /* Extract automation ID from cache or fallback */
         BSTR auto_id = NULL;
-        btn->get_CurrentAutomationId(&auto_id);
+        if (FAILED(btn->get_CachedAutomationId(&auto_id)) || !auto_id) {
+            btn->get_CurrentAutomationId(&auto_id);
+        }
 
+        /* Extract class name from cache or fallback */
         BSTR class_name = NULL;
-        btn->get_CurrentClassName(&class_name);
+        if (FAILED(btn->get_CachedClassName(&class_name)) || !class_name) {
+            btn->get_CurrentClassName(&class_name);
+        }
 
         TE_TaskbarElementType type = ClassifyElement(uia, btn, bounds, auto_id, class_name);
         if (type == TE_ELEM_APP_ICON || type == TE_ELEM_START_BUTTON) {
@@ -334,6 +371,33 @@ HRESULT TE_UiaDiscoverIcons(HWND taskbar_hwnd, TE_IconElementCache* out_cache)
             info->element_type = type;
             CopyAutomationId(info->app_id, 256, auto_id);
             info->icon_index = (int)icon_count; /* Default index; refined by icon_capture */
+
+            /* Extract HWND and PID from pre-cached properties (SYS-018 & PERF-403) */
+            UIA_HWND uia_hwnd = NULL;
+            if (FAILED(btn->get_CachedNativeWindowHandle(&uia_hwnd)) || !uia_hwnd) {
+                btn->get_CurrentNativeWindowHandle(&uia_hwnd);
+            }
+            info->hwnd = (HWND)uia_hwnd;
+
+            int uia_pid = 0;
+            if (FAILED(btn->get_CachedProcessId(&uia_pid)) || uia_pid <= 0) {
+                btn->get_CurrentProcessId(&uia_pid);
+            }
+            info->pid = (uia_pid > 0) ? (DWORD)uia_pid : 0;
+
+            if (info->pid == 0 && info->hwnd && IsWindow(info->hwnd)) {
+                GetWindowThreadProcessId(info->hwnd, &info->pid);
+            }
+
+            /* If app_id string is empty but we have a PID, resolve process image path */
+            if (info->app_id[0] == L'\0' && info->pid > 0) {
+                HANDLE h_proc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, info->pid);
+                if (h_proc) {
+                    DWORD sz = 256;
+                    QueryFullProcessImageNameW(h_proc, 0, info->app_id, &sz);
+                    CloseHandle(h_proc);
+                }
+            }
 
             icon_count++;
         }
@@ -355,6 +419,7 @@ HRESULT TE_UiaDiscoverIcons(HWND taskbar_hwnd, TE_IconElementCache* out_cache)
     TE_LogWrite(TE_LOG_INFO, LOG_TAG, msg);
 
     /* Cleanup */
+    if (cache_req) cache_req->Release();
     buttons->Release();
     button_cond->Release();
     taskbar_elem->Release();

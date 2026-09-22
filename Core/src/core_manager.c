@@ -160,22 +160,32 @@ HRESULT TE_CoreManagerInit(HWND taskbar_hwnd) {
     return TE_S_OK;
 }
 
-void TE_CoreManagerShutdown(void) {
+void TE_CoreManagerShutdownExcept(HWND except_hwnd) {
     if (!g_core.initialized) return;
     
     TE_IpcServerStop();
     TE_ConfigWatcherStop();
     TE_ShellHookShutdown(g_core.taskbar_hwnd);
     TE_VDesktopShutdown();
+    TE_TaskbarUntrackAllExcept(except_hwnd);
     TE_PluginLoaderDisableAll();
     TE_PluginLoaderShutdownAll();
     TE_PluginLoaderShutdown();
     TE_EventDispatchShutdown();
 
-    if (g_core.taskbar_hwnd) {
+    if (g_core.taskbar_hwnd && g_core.taskbar_hwnd != except_hwnd) {
         TE_TaskbarSubclassRemove(g_core.taskbar_hwnd);
     }
     
+    if (g_core.taskbar_hwnd && IsWindow(g_core.taskbar_hwnd)) {
+        MSG pending_msg;
+        while (PeekMessageW(&pending_msg, g_core.taskbar_hwnd, WM_TE_IPC_COMMAND, WM_TE_IPC_COMMAND, PM_REMOVE)) {
+            if ((pending_msg.wParam == TE_CMD_ENABLE_PLUGIN || pending_msg.wParam == TE_CMD_DISABLE_PLUGIN) && pending_msg.lParam) {
+                free((void*)pending_msg.lParam);
+            }
+        }
+    }
+
     if (g_core.config_root) {
         TE_JsoncFree(g_core.config_root);
         g_core.config_root = NULL;
@@ -184,6 +194,10 @@ void TE_CoreManagerShutdown(void) {
     TE_LogFlush();
     TE_LogShutdown();
     memset(&g_core, 0, sizeof(g_core));
+}
+
+void TE_CoreManagerShutdown(void) {
+    TE_CoreManagerShutdownExcept(NULL);
 }
 
 HRESULT TE_CoreManagerReloadConfig(void) {
@@ -198,10 +212,17 @@ HRESULT TE_CoreManagerReloadConfig(void) {
     int changed_count = 0;
     TE_ConfigDiffPlugins(g_core.config_root, new_root,
                          changed_names, &changed_count, TE_MAX_PLUGINS);
+    if (changed_count > TE_MAX_PLUGINS) {
+        changed_count = TE_MAX_PLUGINS;
+    }
     
-    char* saved_names[TE_MAX_PLUGINS];
+    char saved_names[TE_MAX_PLUGINS][64];
     for (int i = 0; i < changed_count; i++) {
-        saved_names[i] = _strdup(changed_names[i]);
+        if (changed_names[i]) {
+            strncpy_s(saved_names[i], sizeof(saved_names[i]), changed_names[i], _TRUNCATE);
+        } else {
+            saved_names[i][0] = '\0';
+        }
     }
     
     cJSON* old_root = g_core.config_root;
@@ -211,6 +232,7 @@ HRESULT TE_CoreManagerReloadConfig(void) {
     }
     
     for (int i = 0; i < changed_count; i++) {
+        if (saved_names[i][0] == '\0') continue;
         const struct cJSON* sec = TE_ConfigGetPluginSection(g_core.config_root, saved_names[i]);
         BOOL enabled = TE_ConfigGetBool(sec, "enabled", TRUE);
         if (enabled) {
@@ -222,13 +244,18 @@ HRESULT TE_CoreManagerReloadConfig(void) {
         data.plugin_name = saved_names[i];
         data.new_config = sec;
         TE_EventDispatchFire(TE_EVENT_CONFIG_CHANGED, &data);
-        free(saved_names[i]);
     }
     
     return TE_S_OK;
 }
 
 void TE_CoreManagerHandleCommand(int cmd_type, void* payload) {
+    if (!g_core.initialized && cmd_type != TE_CMD_SHUTDOWN) {
+        if ((cmd_type == TE_CMD_ENABLE_PLUGIN || cmd_type == TE_CMD_DISABLE_PLUGIN) && payload) {
+            free(payload);
+        }
+        return;
+    }
     switch (cmd_type) {
         case TE_CMD_RELOAD_CONFIG:
             TE_CoreManagerReloadConfig();

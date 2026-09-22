@@ -74,10 +74,10 @@ public:
         m_bridge.PublishSnapshot(m_snapshot);
     }
 
-    void SimulatePositionChange(uint64_t position_ms) {
+    void SimulatePositionChange(uint64_t position_ms, bool wakeAnimation = false) {
         m_snapshot.position_ms = position_ms;
         m_snapshot.sequence_number = ++m_seq;
-        m_bridge.PublishSnapshot(m_snapshot);
+        m_bridge.PublishSnapshot(m_snapshot, wakeAnimation);
     }
 
     void TogglePlayPauseAsync() override {

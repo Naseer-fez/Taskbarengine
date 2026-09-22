@@ -398,16 +398,43 @@ static void RebuildGeometry(void) {
 #define WM_TE_ICONS_DISCOVERED (WM_APP + 142)
 #define SUBCLASS_HOVER_ID 0x5448
 
-typedef struct {
+typedef struct DiscoveryPayload {
     int monitor_index;
     HWND taskbar_hwnd;
     TE_IconElementCache cache;
+    HBITMAP bitmaps[TE_HOVER_MAX_ICONS];
 } DiscoveryPayload;
 
-static void FinishRebuildIconDataForMonitor(int m, const TE_IconElementCache* new_cache) {
-    if (m < 0 || m >= g_hover_state.monitor_count) return;
-    TE_MonitorState* mon = &g_hover_state.monitors[m];
+static HANDLE s_discovery_thread = NULL;
+static HANDLE s_discovery_trigger_event = NULL;
+static HANDLE s_discovery_stop_event = NULL;
+static SRWLOCK s_discovery_lock = SRWLOCK_INIT;
+static volatile DiscoveryPayload* s_pending_discovery[TE_MAX_MONITORS] = { 0 };
+
+static DWORD WINAPI UiaDiscoveryWorkerThread(LPVOID lpParam);
+
+static void TriggerAsyncUiaDiscovery(void) {
+    AcquireSRWLockExclusive(&s_discovery_lock);
+    if (!s_discovery_stop_event) {
+        s_discovery_stop_event = CreateEventW(NULL, TRUE, FALSE, NULL);
+    }
+    if (!s_discovery_trigger_event) {
+        s_discovery_trigger_event = CreateEventW(NULL, FALSE, FALSE, NULL);
+    }
+    if (!s_discovery_thread) {
+        s_discovery_thread = CreateThread(NULL, 0, UiaDiscoveryWorkerThread, NULL, 0, NULL);
+    }
+    if (s_discovery_trigger_event) {
+        SetEvent(s_discovery_trigger_event);
+    }
+    ReleaseSRWLockExclusive(&s_discovery_lock);
+}
+
+static void FinishRebuildIconDataForMonitor(int m, const TE_IconElementCache* new_cache, const HBITMAP* bitmaps) {
+    if (m < 0 || (g_hover_state.monitor_count > 0 && m >= g_hover_state.monitor_count)) return;
+    TE_MonitorState* mon = (g_hover_state.monitor_count > 0) ? &g_hover_state.monitors[m] : &g_hover_state.monitors[0];
     HWND tb = mon->taskbar_hwnd;
+    if (!tb && g_hover_state.ctx) tb = g_hover_state.ctx->taskbar_hwnd;
     if (!tb || !IsWindow(tb)) return;
 
     /* Save old animation state to preserve scales across rebuilds */
@@ -426,6 +453,7 @@ static void FinishRebuildIconDataForMonitor(int m, const TE_IconElementCache* ne
         HoverLog(TE_LOG_WARNING, "No taskbar icons discovered for monitor %d", m);
         return;
     }
+    if (count > TE_HOVER_MAX_ICONS) count = TE_HOVER_MAX_ICONS;
 
     /* Initialize animation state from discovered bounds */
     mon->anim_count = (int)count;
@@ -452,7 +480,7 @@ static void FinishRebuildIconDataForMonitor(int m, const TE_IconElementCache* ne
         mon->anim[i].base_height = h;
         mon->anim[i].current_scale = initial_scale;
         mon->anim[i].target_scale = initial_target;
-        mon->anim[i].geometry_generation = mon->geometry.generation;
+        mon->anim[i].geometry_generation = mon->geometry.generation + 1;
         mon->anim[i].targetOffsetY = 0.0f;
         mon->anim[i].currentOffsetY = 0.0f;
         mon->anim[i].velocityOffsetY = 0.0f;
@@ -465,113 +493,198 @@ static void FinishRebuildIconDataForMonitor(int m, const TE_IconElementCache* ne
         mon->anim[i].current_pos_x = 0.0f;
     }
 
-    /* Capture icon bitmaps */
-    HBITMAP bitmaps[TE_HOVER_MAX_ICONS] = { 0 };
-    for (uint32_t i = 0; i < count; i++) {
-        if (mon->icon_cache.items[i].element_type == TE_ELEM_START_BUTTON) {
-            bitmaps[i] = NULL;
-        } else {
-            TE_IconCaptureGetBitmapWithBounds(
-                mon->icon_cache.items[i].app_id,
-                mon->icon_cache.items[i].icon_index,
-                &mon->icon_cache.items[i].glyphRect,
-                &bitmaps[i]
-            );
+    HBITMAP local_bitmaps[TE_HOVER_MAX_ICONS] = { 0 };
+    if (!bitmaps) {
+        for (uint32_t i = 0; i < count; i++) {
+            if (mon->icon_cache.items[i].element_type != TE_ELEM_START_BUTTON) {
+                TE_IconCaptureGetBitmapEx(
+                    mon->icon_cache.items[i].app_id,
+                    mon->icon_cache.items[i].icon_index,
+                    &mon->icon_cache.items[i].glyphRect,
+                    mon->icon_cache.items[i].hwnd,
+                    mon->icon_cache.items[i].pid,
+                    &local_bitmaps[i]
+                );
+            }
         }
+        bitmaps = local_bitmaps;
     }
 
-    /* Build/rebuild DComp visual tree for this target */
+    /* Build/rebuild DComp visual tree for this target with pre-extracted bitmaps */
     int overlay_x = mon->geometry.taskbarRect.left + 1;
     int overlay_y = mon->geometry.taskbarRect.top - mon->geometry.headroom_y + 1;
     int baseline_y = mon->geometry.baselineY;
 
-    TE_DCompBuildVisualTreeForTarget(
-        mon->target_index,
-        (int)count,
-        mon->icon_cache.items,
-        bitmaps,
-        baseline_y,
-        overlay_x,
-        overlay_y
-    );
+    if (g_hover_state.monitor_count > 0) {
+        TE_DCompBuildVisualTreeForTarget(
+            mon->target_index,
+            (int)count,
+            mon->icon_cache.items,
+            bitmaps,
+            baseline_y,
+            overlay_x,
+            overlay_y
+        );
+    } else {
+        TE_DCompBuildVisualTree(
+            (int)count,
+            mon->icon_cache.items,
+            bitmaps,
+            baseline_y,
+            overlay_x,
+            overlay_y
+        );
+    }
+
+    /* Atomically bump generation so next frame tick picks up new geometry (PERF-402) */
+    InterlockedIncrement((volatile LONG*)&mon->geometry.generation);
 
     /* Mirror monitor 0 to global legacy state */
     if (m == 0) {
         g_hover_state.anim_count = mon->anim_count;
         memcpy(g_hover_state.anim, mon->anim, sizeof(TE_IconAnimState) * count);
         memcpy(&g_hover_state.icon_cache, &mon->icon_cache, sizeof(TE_IconElementCache));
+        g_hover_state.geometry.generation = mon->geometry.generation;
     }
 
-    HoverLog(TE_LOG_INFO, "Icon data rebuilt for monitor %d (target %d): %u icons",
-             m, mon->target_index, count);
+    HoverLog(TE_LOG_INFO, "Icon data rebuilt for monitor %d: %u icons (lockless swap)", m, count);
 }
 
-static void RebuildIconDataForMonitor(int m) {
-    if (m < 0 || m >= g_hover_state.monitor_count) return;
-    TE_MonitorState* mon = &g_hover_state.monitors[m];
-    HWND tb = mon->taskbar_hwnd;
-    if (!tb || !IsWindow(tb)) return;
-
-    TE_IconElementCache temp_cache = {0};
-    HRESULT hr = TE_UiaDiscoverIcons(tb, &temp_cache);
-    if (TE_FAILED(hr)) {
-        HoverLog(TE_LOG_WARNING, "UIA icon discovery failed for monitor %d", m);
-        return;
-    }
-    FinishRebuildIconDataForMonitor(m, &temp_cache);
-}
-
-static DWORD WINAPI UiaDiscoveryThread(LPVOID lpParam) {
+static DWORD WINAPI UiaDiscoveryWorkerThread(LPVOID lpParam) {
     (void)lpParam;
-    CoInitializeEx(NULL, COINIT_MULTITHREADED);
+    /* Initialize COM strictly as MTA for worker thread (SYS-007 & PERF-404) */
+    HRESULT hr_co = CoInitializeEx(NULL, COINIT_MULTITHREADED);
 
-    for (int m = 0; m < g_hover_state.monitor_count; m++) {
-        if (!g_hover_state.monitors[m].is_active) continue;
-        HWND tb = g_hover_state.monitors[m].taskbar_hwnd;
-        if (!tb || !IsWindow(tb)) continue;
+    while (1) {
+        HANDLE events[2] = { s_discovery_stop_event, s_discovery_trigger_event };
+        if (!events[0] || !events[1]) break;
 
-        DiscoveryPayload* payload = (DiscoveryPayload*)calloc(1, sizeof(DiscoveryPayload));
-        if (payload) {
-            payload->monitor_index = m;
-            payload->taskbar_hwnd = tb;
-            TE_UiaDiscoverIcons(tb, &payload->cache);
+        DWORD wr = WaitForMultipleObjects(2, events, FALSE, INFINITE);
+        if (wr == WAIT_OBJECT_0) {
+            break; /* Stop event signaled */
+        }
+        if (wr == WAIT_OBJECT_0 + 1) {
+            if (!g_hover_state.enabled || WaitForSingleObject(s_discovery_stop_event, 0) == WAIT_OBJECT_0) {
+                continue;
+            }
 
-            HWND primary_tb = g_hover_state.monitors[0].taskbar_hwnd;
-            if (primary_tb) {
-                PostMessageW(primary_tb, WM_TE_ICONS_DISCOVERED, 0, (LPARAM)payload);
-            } else {
-                free(payload);
+            int mon_count = (g_hover_state.monitor_count > 0) ? g_hover_state.monitor_count : 1;
+            for (int m = 0; m < mon_count; m++) {
+                if (WaitForSingleObject(s_discovery_stop_event, 0) == WAIT_OBJECT_0 || !g_hover_state.enabled) {
+                    break;
+                }
+
+                if (g_hover_state.monitor_count > 0 && !g_hover_state.monitors[m].is_active) continue;
+                HWND tb = (g_hover_state.monitor_count > 0) ? g_hover_state.monitors[m].taskbar_hwnd
+                                                            : (g_hover_state.ctx ? g_hover_state.ctx->taskbar_hwnd : NULL);
+                if (!tb || !IsWindow(tb)) continue;
+
+                DiscoveryPayload* payload = (DiscoveryPayload*)calloc(1, sizeof(DiscoveryPayload));
+                if (!payload) continue;
+
+                payload->monitor_index = m;
+                payload->taskbar_hwnd = tb;
+
+                /* Offload all UIA tree queries to MTA background worker thread (SYS-006 & PERF-401) */
+                TE_UiaDiscoverIcons(tb, &payload->cache);
+
+                if (WaitForSingleObject(s_discovery_stop_event, 0) == WAIT_OBJECT_0 || !g_hover_state.enabled) {
+                    free(payload);
+                    payload = NULL;
+                    break;
+                }
+
+                /* Execute extraction asynchronously on background worker (PERF-402) */
+                uint32_t count = payload->cache.count;
+                if (count > TE_HOVER_MAX_ICONS) count = TE_HOVER_MAX_ICONS;
+                for (uint32_t i = 0; i < count; i++) {
+                    if (WaitForSingleObject(s_discovery_stop_event, 0) == WAIT_OBJECT_0 || !g_hover_state.enabled) {
+                        free(payload);
+                        payload = NULL;
+                        break;
+                    }
+
+                    if (payload->cache.items[i].element_type == TE_ELEM_START_BUTTON) {
+                        payload->bitmaps[i] = NULL;
+                    } else {
+                        TE_IconCaptureGetBitmapEx(
+                            payload->cache.items[i].app_id,
+                            payload->cache.items[i].icon_index,
+                            &payload->cache.items[i].glyphRect,
+                            payload->cache.items[i].hwnd,
+                            payload->cache.items[i].pid,
+                            &payload->bitmaps[i]
+                        );
+                    }
+                }
+
+                if (!payload) {
+                    break;
+                }
+
+                if (WaitForSingleObject(s_discovery_stop_event, 0) == WAIT_OBJECT_0 || !g_hover_state.enabled) {
+                    free(payload);
+                    break;
+                }
+
+                /* Lockless structure swap into pending slot */
+                DiscoveryPayload* old_p = (DiscoveryPayload*)InterlockedExchangePointer(
+                    (PVOID*)&s_pending_discovery[m],
+                    (PVOID)payload
+                );
+                if (old_p) {
+                    free(old_p);
+                }
+
+                /* Post completion to UI thread */
+                HWND notify_hwnd = (g_hover_state.monitor_count > 0) ? g_hover_state.monitors[0].taskbar_hwnd
+                                                                     : (g_hover_state.ctx ? g_hover_state.ctx->taskbar_hwnd : NULL);
+                if (notify_hwnd && IsWindow(notify_hwnd)) {
+                    PostMessageW(notify_hwnd, WM_TE_ICONS_DISCOVERED, 0, (LPARAM)m);
+                }
             }
         }
     }
 
-    CoUninitialize();
+    if (SUCCEEDED(hr_co)) {
+        CoUninitialize();
+    }
     return 0;
 }
 
 static LRESULT CALLBACK IconHoverSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData) {
     (void)uIdSubclass; (void)dwRefData;
+    if (msg == WM_NCDESTROY) {
+        RemoveWindowSubclass(hwnd, IconHoverSubclassProc, uIdSubclass);
+        return DefSubclassProc(hwnd, msg, wParam, lParam);
+    }
     if (msg == WM_TE_ICONS_DISCOVERED) {
-        DiscoveryPayload* payload = (DiscoveryPayload*)lParam;
-        if (payload) {
-            int was_active = TE_FrameLoopIsActive();
-            if (was_active) {
-                TE_FrameLoopStop();
+        int m = (int)lParam;
+        if (m >= 0 && m < TE_MAX_MONITORS) {
+            /* Lockless structure swap (SYS-006 & PERF-401) */
+            DiscoveryPayload* payload = (DiscoveryPayload*)InterlockedExchangePointer(
+                (PVOID*)&s_pending_discovery[m],
+                NULL
+            );
+            if (payload) {
+                if (g_hover_state.enabled) {
+                    /* Seamless swap into next frame tick without stopping frame loop (PERF-402) */
+                    FinishRebuildIconDataForMonitor(payload->monitor_index, &payload->cache, payload->bitmaps);
+                }
+                free(payload);
             }
-            FinishRebuildIconDataForMonitor(payload->monitor_index, &payload->cache);
-            if (was_active) {
-                TE_FrameLoopStart();
-            }
-            free(payload);
         }
         return 0;
     }
-    if (msg == WM_LBUTTONUP && TE_DCompIsCustomStartButtonEnabled()) {
+    if ((msg == WM_LBUTTONUP || msg == WM_LBUTTONDOWN || msg == WM_LBUTTONDBLCLK) && TE_DCompIsCustomStartButtonEnabled()) {
         POINT pt = { (short)LOWORD(lParam), (short)HIWORD(lParam) };
         ClientToScreen(hwnd, &pt);
         RECT sb_bounds;
         if (TE_DCompGetStartButtonBounds(&sb_bounds) && PtInRect(&sb_bounds, pt)) {
-            PostMessageW(hwnd, WM_SYSCOMMAND, SC_TASKLIST, 0);
+            if (msg == WM_LBUTTONUP) {
+                PostMessageW(hwnd, WM_SYSCOMMAND, SC_TASKLIST, 0);
+            }
+            return 0;
         }
     }
     return DefSubclassProc(hwnd, msg, wParam, lParam);
@@ -579,64 +692,10 @@ static LRESULT CALLBACK IconHoverSubclassProc(HWND hwnd, UINT msg, WPARAM wParam
 
 /**
  * Rebuild icon discovery, capture, and visual tree across all active displays.
- * Called on initial enable and when apps change (shell hook).
+ * Completely asynchronous via dedicated MTA background worker thread.
  */
 static void RebuildIconData(void) {
-    /* Stop timer to prevent concurrent DComp tree modification */
-    int was_active = TE_FrameLoopIsActive();
-    if (was_active) {
-        TE_FrameLoopStop();
-    }
-
-    if (g_hover_state.monitor_count > 0) {
-        for (int m = 0; m < g_hover_state.monitor_count; m++) {
-            if (g_hover_state.monitors[m].is_active) {
-                RebuildIconDataForMonitor(m);
-            }
-        }
-    } else {
-        /* Single monitor / legacy fallback */
-        HWND taskbar_hwnd = g_hover_state.ctx ? g_hover_state.ctx->taskbar_hwnd : NULL;
-        if (taskbar_hwnd) {
-            TE_UiaCacheInvalidate(&g_hover_state.icon_cache);
-            HRESULT hr = TE_UiaDiscoverIcons(taskbar_hwnd, &g_hover_state.icon_cache);
-            if (TE_SUCCEEDED(hr) && g_hover_state.icon_cache.count > 0) {
-                uint32_t count = g_hover_state.icon_cache.count;
-                g_hover_state.anim_count = (int)count;
-                for (uint32_t i = 0; i < count; i++) {
-                    const RECT* b = &g_hover_state.icon_cache.items[i].buttonRect;
-                    float w = (float)(b->right - b->left);
-                    float h = (float)(b->bottom - b->top);
-                    g_hover_state.anim[i].center_x = (float)b->left + w / 2.0f;
-                    g_hover_state.anim[i].center_y = (float)b->top + h / 2.0f;
-                    g_hover_state.anim[i].base_width = w;
-                    g_hover_state.anim[i].base_height = h;
-                    g_hover_state.anim[i].current_scale = 1.0f;
-                    g_hover_state.anim[i].target_scale = 1.0f;
-                    g_hover_state.anim[i].geometry_generation = g_hover_state.geometry.generation;
-                }
-                HBITMAP bitmaps[TE_HOVER_MAX_ICONS] = { 0 };
-                for (uint32_t i = 0; i < count; i++) {
-                    if (g_hover_state.icon_cache.items[i].element_type != TE_ELEM_START_BUTTON) {
-                        TE_IconCaptureGetBitmapWithBounds(
-                            g_hover_state.icon_cache.items[i].app_id,
-                            g_hover_state.icon_cache.items[i].icon_index,
-                            &g_hover_state.icon_cache.items[i].glyphRect,
-                            &bitmaps[i]
-                        );
-                    }
-                }
-                int overlay_x = g_hover_state.geometry.taskbarRect.left + 1;
-                int overlay_y = g_hover_state.geometry.taskbarRect.top - g_hover_state.geometry.headroom_y + 1;
-                int baseline_y = g_hover_state.geometry.baselineY;
-                TE_DCompBuildVisualTree((int)count, g_hover_state.icon_cache.items, bitmaps, baseline_y, overlay_x, overlay_y);
-            }
-        }
-    }
-
-    if (was_active) {
-        TE_FrameLoopStart();
-    }
+    TriggerAsyncUiaDiscovery();
 }
 
 #ifndef HSHELL_REDRAW
@@ -751,13 +810,14 @@ static VOID CALLBACK ShellHookDebounceProc(HWND hwnd, UINT uMsg, UINT_PTR idEven
     s_shell_hook_rebuild_timer = 0;
     if (!g_hover_state.enabled) return;
 
-    HoverLog(TE_LOG_INFO, "Debounced shell hook timer fired, rebuilding icon cache");
+    HoverLog(TE_LOG_INFO, "Debounced shell hook timer fired, triggering async icon discovery");
     for (int m = 0; m < g_hover_state.monitor_count; m++) {
         TE_UiaCacheInvalidate(&g_hover_state.monitors[m].icon_cache);
     }
     TE_UiaCacheInvalidate(&g_hover_state.icon_cache);
-    TE_IconCaptureInvalidate();
-    RebuildIconData();
+
+    /* Offload discovery to dedicated MTA background worker (SYS-006, PERF-401, PERF-402) */
+    TriggerAsyncUiaDiscovery();
 }
 
 /**
@@ -804,6 +864,11 @@ static void OnShellHook(uint32_t type, const void* data, void* user_data) {
         if (g_hover_state.monitors[m].overlay_hwnd && hook_data->target_hwnd == g_hover_state.monitors[m].overlay_hwnd) {
             return;
         }
+    }
+
+    /* Fine-grained cache invalidation for the specific window (SYS-018 & PERF-403) */
+    if (hook_data->target_hwnd) {
+        TE_IconCaptureInvalidateHwnd(hook_data->target_hwnd);
     }
 
     /* Debounce rapid bursts of window creations/destructions (250ms quiet period) to prevent UI thread lock */
@@ -1162,11 +1227,8 @@ static HRESULT Enable(void) {
         SetWindowSubclass(primary, IconHoverSubclassProc, SUBCLASS_HOVER_ID, 0);
     }
 
-    /* Discover icons asynchronously via MTA background thread */
-    HANDLE hThread = CreateThread(NULL, 0, UiaDiscoveryThread, NULL, 0, NULL);
-    if (hThread) {
-        CloseHandle(hThread);
-    }
+    /* Discover icons asynchronously via dedicated MTA background worker thread */
+    TriggerAsyncUiaDiscovery();
 
     /* Subscribe to engine events */
     g_hover_state.ctx->subscribe(TE_EVENT_SHELL_HOOK, OnShellHook, NULL);
@@ -1253,6 +1315,33 @@ static HRESULT Disable(void) {
     g_hover_state.monitors[0].is_active = 0;
     g_hover_state.monitor_count = 0;
 
+    /* Terminate MTA background discovery thread and flush pending payloads */
+    AcquireSRWLockExclusive(&s_discovery_lock);
+    if (s_discovery_stop_event) {
+        SetEvent(s_discovery_stop_event);
+    }
+    if (s_discovery_thread) {
+        WaitForSingleObject(s_discovery_thread, 3000);
+        CloseHandle(s_discovery_thread);
+        s_discovery_thread = NULL;
+    }
+    if (s_discovery_trigger_event) {
+        CloseHandle(s_discovery_trigger_event);
+        s_discovery_trigger_event = NULL;
+    }
+    if (s_discovery_stop_event) {
+        CloseHandle(s_discovery_stop_event);
+        s_discovery_stop_event = NULL;
+    }
+    ReleaseSRWLockExclusive(&s_discovery_lock);
+    for (int m = 0; m < TE_MAX_MONITORS; m++) {
+        DiscoveryPayload* p = (DiscoveryPayload*)InterlockedExchangePointer(
+            (PVOID*)&s_pending_discovery[m],
+            NULL
+        );
+        if (p) free(p);
+    }
+
     /* Release icon cache */
     TE_IconCaptureShutdown();
 
@@ -1269,6 +1358,7 @@ static HRESULT Update(float delta_time) {
 static HRESULT Shutdown(void) {
     HoverLog(TE_LOG_INFO, "Shutdown called");
     TE_DynamicIslandShutdown();
+    TE_FrameLoopShutdown();
     g_hover_state.ctx = NULL;
     return TE_S_OK;
 }
@@ -1295,6 +1385,10 @@ static const PluginInterface g_interface = {
 
 TE_EXPORT const PluginInterface* TE_IconHoverGetPluginInterface(void) {
     return &g_interface;
+}
+
+TE_EXPORT void TE_IconHoverTriggerAsyncDiscovery(void) {
+    TriggerAsyncUiaDiscovery();
 }
 
 #ifndef TE_HOVER_TESTLIB

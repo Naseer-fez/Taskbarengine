@@ -11,7 +11,7 @@ static HWND g_taskbar_hwnd = NULL;
 
 static DWORD WINAPI WatcherThread(LPVOID param) {
     (void)param;
-    DWORD align_buf[1024 / sizeof(DWORD)];
+    DWORD align_buf[4096 / sizeof(DWORD)];
     
     OVERLAPPED ol = {0};
     ol.hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
@@ -30,7 +30,12 @@ static DWORD WINAPI WatcherThread(LPVOID param) {
         ResetEvent(ol.hEvent);
         if (!ReadDirectoryChangesW(g_hDir, align_buf, sizeof(align_buf), FALSE, notify_filter, NULL, &ol, NULL)) {
             DWORD err = GetLastError();
-            if (err != ERROR_IO_PENDING) {
+            if (err == ERROR_NOTIFY_ENUM_DIR) {
+                TE_LogWrite(TE_LOG_WARNING, "ConfigWatcher", "Directory change buffer overflow (ERROR_NOTIFY_ENUM_DIR), triggering reload");
+                PostMessageW(g_taskbar_hwnd, WM_TE_IPC_COMMAND, TE_CMD_RELOAD_CONFIG, 0);
+                Sleep(150);
+                continue;
+            } else if (err != ERROR_IO_PENDING) {
                 char err_buf[128];
                 snprintf(err_buf, sizeof(err_buf), "ReadDirectoryChangesW failed: %lu", err);
                 TE_LogWrite(TE_LOG_WARNING, "ConfigWatcher", err_buf);
@@ -40,12 +45,30 @@ static DWORD WINAPI WatcherThread(LPVOID param) {
         
         DWORD wait_res = WaitForMultipleObjects(2, handles, FALSE, INFINITE);
         if (wait_res == WAIT_OBJECT_0) {
-            CancelIo(g_hDir);
+            CancelIoEx(g_hDir, &ol);
+            DWORD dummy = 0;
+            GetOverlappedResult(g_hDir, &ol, &dummy, TRUE);
             break;
         } else if (wait_res == WAIT_OBJECT_0 + 1) {
+            DWORD bytes = 0;
+            if (!GetOverlappedResult(g_hDir, &ol, &bytes, FALSE)) {
+                DWORD err = GetLastError();
+                if (err == ERROR_NOTIFY_ENUM_DIR) {
+                    TE_LogWrite(TE_LOG_WARNING, "ConfigWatcher", "GetOverlappedResult buffer overflow, triggering reload");
+                } else if (err == ERROR_OPERATION_ABORTED) {
+                    break;
+                } else {
+                    char err_buf[128];
+                    snprintf(err_buf, sizeof(err_buf), "GetOverlappedResult failed: %lu", err);
+                    TE_LogWrite(TE_LOG_WARNING, "ConfigWatcher", err_buf);
+                    break;
+                }
+            }
             // Change detected - debounce for 150ms
             if (WaitForSingleObject(g_stop_event, 150) == WAIT_OBJECT_0) {
-                CancelIo(g_hDir);
+                CancelIoEx(g_hDir, &ol);
+                DWORD dummy = 0;
+                GetOverlappedResult(g_hDir, &ol, &dummy, TRUE);
                 break;
             }
             TE_LogWrite(TE_LOG_INFO, "ConfigWatcher", "Config directory change detected, posting TE_CMD_RELOAD_CONFIG");
@@ -101,12 +124,14 @@ void TE_ConfigWatcherStop(void) {
     if (g_stop_event) {
         SetEvent(g_stop_event);
         if (g_hDir != INVALID_HANDLE_VALUE) {
-            CancelIo(g_hDir);
+            CancelIoEx(g_hDir, NULL);
         }
-        WaitForSingleObject(g_thread, 3000);
-        CloseHandle(g_thread);
+        if (g_thread) {
+            WaitForSingleObject(g_thread, 3000);
+            CloseHandle(g_thread);
+            g_thread = NULL;
+        }
         CloseHandle(g_stop_event);
-        g_thread = NULL;
         g_stop_event = NULL;
     }
     if (g_hDir != INVALID_HANDLE_VALUE) {

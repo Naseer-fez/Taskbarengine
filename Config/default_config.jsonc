@@ -14,9 +14,9 @@
 		},
 		"icon_hover":	{
 			"enabled":	true,
-			"max_scale":	2.4,
-			"radius":	250,
-			"curve":	"gaussian",
+			"max_scale":	3.15,
+			"radius":	150,
+			"curve":	"cubic",
 			"speed_ms":	500,
 			"bounce_enabled":	true,
 			"bounce_strength":	800,

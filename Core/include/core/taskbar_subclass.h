@@ -52,6 +52,9 @@ typedef struct TE_TrackedTaskbar {
     HWND hwnd;
     HMONITOR monitor;
     BOOL is_primary;
+    BOOL was_in_taskbar;
+    BOOL was_dragging;
+    POINT last_pt;
 } TE_TrackedTaskbar;
 
 /**
@@ -92,6 +95,13 @@ HWND TE_TaskbarFindRoot(HWND hwnd);
  * Remove subclass and untrack all secondary (and optionally primary) taskbars.
  */
 void TE_TaskbarUntrackAll(void);
+
+/**
+ * Remove subclass and untrack all taskbars, killing secondary timers,
+ * optionally skipping immediate subclass removal for except_hwnd so that
+ * Comctl32 can remove it during WM_NCDESTROY without corrupting the subclass chain.
+ */
+void TE_TaskbarUntrackAllExcept(HWND except_hwnd);
 
 #ifdef __cplusplus
 }

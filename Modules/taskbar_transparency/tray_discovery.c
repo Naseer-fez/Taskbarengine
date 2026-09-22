@@ -9,15 +9,24 @@ static VOID CALLBACK DebounceTimerProc(HWND hwnd, UINT uMsg, UINT_PTR idEvent, D
     (void)dwTime;
     KillTimer(NULL, idEvent);
 
-    if (s_pActiveState && s_pActiveState->debounce_timer_id == idEvent) {
-        s_pActiveState->debounce_timer_id = 0;
-        TE_TrayDiscoverAll(s_pActiveState);
-        TE_TrayApplyPolicyToAll(s_pActiveState, &s_pActiveState->current_policy);
+    TE_TrayDiscoveryState* pState = s_pActiveState;
+    if (pState && pState->debounce_timer_id == idEvent) {
+        pState->debounce_timer_id = 0;
+        TE_TrayDiscoverAll(pState);
+        TE_TrayApplyPolicyToAll(pState, &pState->current_policy);
     }
 }
 
 void TE_TrayDiscoveryInit(TE_TrayDiscoveryState* state) {
     if (!state) return;
+    if (state->debounce_timer_id != 0) {
+        KillTimer(NULL, state->debounce_timer_id);
+        state->debounce_timer_id = 0;
+    }
+    if (s_pActiveState && s_pActiveState != state && s_pActiveState->debounce_timer_id != 0) {
+        KillTimer(NULL, s_pActiveState->debounce_timer_id);
+        s_pActiveState->debounce_timer_id = 0;
+    }
     memset(state, 0, sizeof(TE_TrayDiscoveryState));
     state->apply_secondary = true;
     s_pActiveState = state;
@@ -112,6 +121,10 @@ void TE_TrayRestoreAll(TE_TrayDiscoveryState* state) {
         state->debounce_timer_id = 0;
     }
 
+    if (s_pActiveState == state) {
+        s_pActiveState = NULL;
+    }
+
     for (uint32_t i = 0; i < state->count; i++) {
         if (state->taskbars[i].hwnd && IsWindow(state->taskbars[i].hwnd)) {
             TE_RestoreNativeAccent(state->taskbars[i].hwnd);
@@ -142,6 +155,10 @@ void TE_TrayHandleDisplayChange(TE_TrayDiscoveryState* state, const ACCENT_POLIC
 void TE_TrayCleanup(TE_TrayDiscoveryState* state) {
     if (!state) return;
 
+    if (s_pActiveState == state) {
+        s_pActiveState = NULL;
+    }
+
     if (state->debounce_timer_id != 0) {
         KillTimer(NULL, state->debounce_timer_id);
         state->debounce_timer_id = 0;
@@ -149,8 +166,4 @@ void TE_TrayCleanup(TE_TrayDiscoveryState* state) {
 
     TE_TrayRestoreAll(state);
     state->count = 0;
-
-    if (s_pActiveState == state) {
-        s_pActiveState = NULL;
-    }
 }

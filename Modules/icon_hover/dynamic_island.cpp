@@ -60,6 +60,51 @@ static bool s_state_dirty = true;
 
 static uint64_t s_announce_end_time_ms = 0;
 static uint64_t s_last_track_change_id = 0;
+static PTP_TIMER s_announce_timer = nullptr;
+static bool s_is_announcing = false;
+static TE_DynamicIslandWakeCallback s_wake_callback = nullptr;
+
+static VOID CALLBACK DynamicIslandAnnounceTimerCallback(PTP_CALLBACK_INSTANCE Instance, PVOID Context, PTP_TIMER Timer) {
+    (void)Instance;
+    (void)Context;
+    (void)Timer;
+    s_is_announcing = false;
+    s_announce_end_time_ms = 0;
+    s_state_dirty = true;
+    if (s_wake_callback) {
+        s_wake_callback();
+    }
+}
+
+static void StartAnnouncementTimer(void) {
+    if (s_config.announce_duration_ms <= 0) {
+        s_is_announcing = false;
+        s_announce_end_time_ms = 0;
+        return;
+    }
+    s_is_announcing = true;
+    s_announce_end_time_ms = GetTickCount64() + (uint64_t)s_config.announce_duration_ms;
+
+    if (!s_announce_timer) {
+        s_announce_timer = CreateThreadpoolTimer(DynamicIslandAnnounceTimerCallback, nullptr, nullptr);
+    }
+    if (s_announce_timer) {
+        FILETIME ft;
+        ULARGE_INTEGER ul;
+        ul.QuadPart = (ULONGLONG)-(LONGLONG)(s_config.announce_duration_ms * 10000ULL);
+        ft.dwLowDateTime = ul.LowPart;
+        ft.dwHighDateTime = ul.HighPart;
+        SetThreadpoolTimer(s_announce_timer, &ft, 0, 0);
+    }
+}
+
+static void CancelAnnouncementTimer(void) {
+    s_is_announcing = false;
+    s_announce_end_time_ms = 0;
+    if (s_announce_timer) {
+        SetThreadpoolTimer(s_announce_timer, nullptr, 0, 0);
+    }
+}
 
 // DirectComposition & Direct2D / DirectWrite handles
 static IDCompositionVisual* s_island_visual = nullptr;
@@ -79,11 +124,14 @@ static IDWriteTextFormat* s_text_format_artist = nullptr;
 static IDWriteInlineObject* s_ellipsis_title = nullptr;
 static IDWriteInlineObject* s_ellipsis_artist = nullptr;
 
+// Cached static geometries (PERF-504)
+static ID2D1PathGeometry* s_note_flag_geometry = nullptr;
+static ID2D1PathGeometry* s_play_triangle_geometry = nullptr;
+
 // Media Source
 static IMediaSource* s_media_source = nullptr;
 static std::unique_ptr<IMediaSource> s_owned_media_source;
 static TEMediaStateSnapshot s_current_media_state = {};
-static TE_DynamicIslandWakeCallback s_wake_callback = nullptr;
 
 // Helper Declarations
 static void UpdateLayoutAndBounds();
@@ -274,6 +322,45 @@ static void EnsureDirectWrite() {
     }
 }
 
+static void EnsureStaticGeometries(ID2D1Factory* factory) {
+    if (!factory) return;
+    if (!s_note_flag_geometry) {
+        if (SUCCEEDED(factory->CreatePathGeometry(&s_note_flag_geometry)) && s_note_flag_geometry) {
+            ID2D1GeometrySink* sink = nullptr;
+            if (SUCCEEDED(s_note_flag_geometry->Open(&sink)) && sink) {
+                sink->BeginFigure(D2D1::Point2F(0.58f, 0.18f), D2D1_FIGURE_BEGIN_FILLED);
+                sink->AddBezier(D2D1::BezierSegment(
+                    D2D1::Point2F(0.85f, 0.28f),
+                    D2D1::Point2F(0.82f, 0.48f),
+                    D2D1::Point2F(0.58f, 0.55f)
+                ));
+                sink->AddLine(D2D1::Point2F(0.58f, 0.42f));
+                sink->AddBezier(D2D1::BezierSegment(
+                    D2D1::Point2F(0.72f, 0.38f),
+                    D2D1::Point2F(0.72f, 0.28f),
+                    D2D1::Point2F(0.58f, 0.25f)
+                ));
+                sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+                sink->Close();
+                sink->Release();
+            }
+        }
+    }
+    if (!s_play_triangle_geometry) {
+        if (SUCCEEDED(factory->CreatePathGeometry(&s_play_triangle_geometry)) && s_play_triangle_geometry) {
+            ID2D1GeometrySink* sink = nullptr;
+            if (SUCCEEDED(s_play_triangle_geometry->Open(&sink)) && sink) {
+                sink->BeginFigure(D2D1::Point2F(0.0f, 0.0f), D2D1_FIGURE_BEGIN_FILLED);
+                sink->AddLine(D2D1::Point2F(0.0f, 1.0f));
+                sink->AddLine(D2D1::Point2F(0.90f, 0.50f));
+                sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+                sink->Close();
+                sink->Release();
+            }
+        }
+    }
+}
+
 static void DrawMusicNote(ID2D1RenderTarget* rt, ID2D1Brush* brush, float x, float y, float size) {
     if (!rt || !brush) return;
 
@@ -293,54 +380,28 @@ static void DrawMusicNote(ID2D1RenderTarget* rt, ID2D1Brush* brush, float x, flo
     );
     rt->FillRectangle(&stem_rect, brush);
 
-    // Note flag using path geometry
-    if (s_d2d_factory) {
-        ID2D1PathGeometry* flag_geo = nullptr;
-        HRESULT hr = s_d2d_factory->CreatePathGeometry(&flag_geo);
-        if (SUCCEEDED(hr) && flag_geo) {
-            ID2D1GeometrySink* sink = nullptr;
-            hr = flag_geo->Open(&sink);
-            if (SUCCEEDED(hr) && sink) {
-                sink->BeginFigure(D2D1::Point2F(x + size * 0.58f, y + size * 0.18f), D2D1_FIGURE_BEGIN_FILLED);
-                sink->AddBezier(D2D1::BezierSegment(
-                    D2D1::Point2F(x + size * 0.85f, y + size * 0.28f),
-                    D2D1::Point2F(x + size * 0.82f, y + size * 0.48f),
-                    D2D1::Point2F(x + size * 0.58f, y + size * 0.55f)
-                ));
-                sink->AddLine(D2D1::Point2F(x + size * 0.58f, y + size * 0.42f));
-                sink->AddBezier(D2D1::BezierSegment(
-                    D2D1::Point2F(x + size * 0.72f, y + size * 0.38f),
-                    D2D1::Point2F(x + size * 0.72f, y + size * 0.28f),
-                    D2D1::Point2F(x + size * 0.58f, y + size * 0.25f)
-                ));
-                sink->EndFigure(D2D1_FIGURE_END_CLOSED);
-                sink->Close();
-                sink->Release();
-                rt->FillGeometry(flag_geo, brush);
-            }
-            flag_geo->Release();
-        }
+    // Note flag using cached path geometry (PERF-504)
+    if (s_note_flag_geometry) {
+        D2D1_MATRIX_3X2_F old_xform;
+        rt->GetTransform(&old_xform);
+        D2D1_MATRIX_3X2_F local_xform = D2D1::Matrix3x2F::Scale(size, size) * D2D1::Matrix3x2F::Translation(x, y) * old_xform;
+        rt->SetTransform(local_xform);
+        rt->FillGeometry(s_note_flag_geometry, brush);
+        rt->SetTransform(old_xform);
     }
 }
 
 static void DrawPlayIcon(ID2D1RenderTarget* rt, ID2D1Brush* brush, float x, float y, float size) {
-    if (!rt || !brush || !s_d2d_factory) return;
+    if (!rt || !brush) return;
 
-    ID2D1PathGeometry* triangle_geo = nullptr;
-    HRESULT hr = s_d2d_factory->CreatePathGeometry(&triangle_geo);
-    if (SUCCEEDED(hr) && triangle_geo) {
-        ID2D1GeometrySink* sink = nullptr;
-        hr = triangle_geo->Open(&sink);
-        if (SUCCEEDED(hr) && sink) {
-            sink->BeginFigure(D2D1::Point2F(x, y), D2D1_FIGURE_BEGIN_FILLED);
-            sink->AddLine(D2D1::Point2F(x, y + size));
-            sink->AddLine(D2D1::Point2F(x + size * 0.90f, y + size * 0.50f));
-            sink->EndFigure(D2D1_FIGURE_END_CLOSED);
-            sink->Close();
-            sink->Release();
-            rt->FillGeometry(triangle_geo, brush);
-        }
-        triangle_geo->Release();
+    // Play triangle using cached path geometry (PERF-504)
+    if (s_play_triangle_geometry) {
+        D2D1_MATRIX_3X2_F old_xform;
+        rt->GetTransform(&old_xform);
+        D2D1_MATRIX_3X2_F local_xform = D2D1::Matrix3x2F::Scale(size, size) * D2D1::Matrix3x2F::Translation(x, y) * old_xform;
+        rt->SetTransform(local_xform);
+        rt->FillGeometry(s_play_triangle_geometry, brush);
+        rt->SetTransform(old_xform);
     }
 }
 
@@ -358,6 +419,8 @@ static void DrawPauseIcon(ID2D1RenderTarget* rt, ID2D1Brush* brush, float x, flo
 
 static void RenderIslandSurface() {
     if (!s_surface || !s_d2d_factory) return;
+
+    EnsureStaticGeometries(s_d2d_factory);
 
     IDXGISurface* dxgi_surface = nullptr;
     POINT offset_point = {};
@@ -383,15 +446,9 @@ static void RenderIslandSurface() {
         float ox = (float)offset_point.x;
         float oy = (float)offset_point.y;
 
-        ID2D1SolidColorBrush* bg_brush = nullptr;
-        ID2D1SolidColorBrush* border_brush = nullptr;
-        ID2D1SolidColorBrush* white_brush = nullptr;
-        ID2D1SolidColorBrush* muted_brush = nullptr;
-
-        rt->CreateSolidColorBrush(D2D1::ColorF(0.1f, 0.1f, 0.1f, 0.75f), &bg_brush);
-        rt->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.15f), &border_brush);
-        rt->CreateSolidColorBrush(D2D1::ColorF(0.95f, 0.95f, 0.95f, 0.95f), &white_brush);
-        rt->CreateSolidColorBrush(D2D1::ColorF(0.70f, 0.70f, 0.74f, 0.85f), &muted_brush);
+        // Single reusable solid brush with SetColor() (PERF-504)
+        ID2D1SolidColorBrush* solid_brush = nullptr;
+        rt->CreateSolidColorBrush(D2D1::ColorF(0.1f, 0.1f, 0.1f, 0.75f), &solid_brush);
 
         // 1. Frosted acrylic rounded background container & subtle border
         D2D1_ROUNDED_RECT pill_rect = D2D1::RoundedRect(
@@ -399,16 +456,22 @@ static void RenderIslandSurface() {
             corner_radius, corner_radius
         );
 
-        if (bg_brush) rt->FillRoundedRectangle(&pill_rect, bg_brush);
-        if (border_brush) rt->DrawRoundedRectangle(&pill_rect, border_brush, 1.0f);
+        if (solid_brush) {
+            solid_brush->SetColor(D2D1::ColorF(0.1f, 0.1f, 0.1f, 0.75f));
+            rt->FillRoundedRectangle(&pill_rect, solid_brush);
+
+            solid_brush->SetColor(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.15f));
+            rt->DrawRoundedRectangle(&pill_rect, solid_brush, 1.0f);
+        }
 
         // 2. Music Icon on the left
         float icon_size = 14.0f * dpi_scale;
         float icon_pad_x = 10.0f * dpi_scale;
         float icon_x = ox + icon_pad_x;
         float icon_y = oy + (pill_h - icon_size) / 2.0f;
-        if (white_brush) {
-            DrawMusicNote(rt, white_brush, icon_x, icon_y, icon_size);
+        if (solid_brush) {
+            solid_brush->SetColor(D2D1::ColorF(0.95f, 0.95f, 0.95f, 0.95f));
+            DrawMusicNote(rt, solid_brush, icon_x, icon_y, icon_size);
         }
 
         // 3. Compact vs Expanded presentation
@@ -425,16 +488,17 @@ static void RenderIslandSurface() {
         float control_y = oy + (pill_h - control_size) / 2.0f;
 
         bool is_playing = (s_current_media_state.status == TEMediaPlaybackStatus::Playing);
-        if (white_brush) {
+        if (solid_brush) {
+            solid_brush->SetColor(D2D1::ColorF(0.95f, 0.95f, 0.95f, 0.95f));
             if (is_playing) {
-                DrawPauseIcon(rt, white_brush, control_x, control_y, control_size);
+                DrawPauseIcon(rt, solid_brush, control_x, control_y, control_size);
             } else {
-                DrawPlayIcon(rt, white_brush, control_x, control_y, control_size);
+                DrawPlayIcon(rt, solid_brush, control_x, control_y, control_size);
             }
         }
 
         // 4. Middle Typography (fades in smoothly as pill expands)
-        if (expand_ratio > 0.15f && s_text_format_title && s_text_format_artist) {
+        if (expand_ratio > 0.15f && s_text_format_title && s_text_format_artist && solid_brush) {
             float text_left = icon_x + icon_size + 8.0f * dpi_scale;
             float text_right = control_x - 8.0f * dpi_scale;
             if (text_right > text_left + 12.0f * dpi_scale) {
@@ -449,26 +513,15 @@ static void RenderIslandSurface() {
                 if (!artist_str || artist_str[0] == L'\0') artist_str = s_current_media_state.album;
                 if (!artist_str || artist_str[0] == L'\0') artist_str = L"Media Audio";
 
-                ID2D1SolidColorBrush* text_title_brush = nullptr;
-                ID2D1SolidColorBrush* text_artist_brush = nullptr;
-                rt->CreateSolidColorBrush(D2D1::ColorF(0.95f, 0.95f, 0.95f, 0.95f * expand_ratio), &text_title_brush);
-                rt->CreateSolidColorBrush(D2D1::ColorF(0.70f, 0.70f, 0.74f, 0.85f * expand_ratio), &text_artist_brush);
+                solid_brush->SetColor(D2D1::ColorF(0.95f, 0.95f, 0.95f, 0.95f * expand_ratio));
+                rt->DrawText(title_str, (UINT32)wcslen(title_str), s_text_format_title, &title_rect, solid_brush);
 
-                if (text_title_brush) {
-                    rt->DrawText(title_str, (UINT32)wcslen(title_str), s_text_format_title, &title_rect, text_title_brush);
-                    text_title_brush->Release();
-                }
-                if (text_artist_brush) {
-                    rt->DrawText(artist_str, (UINT32)wcslen(artist_str), s_text_format_artist, &artist_rect, text_artist_brush);
-                    text_artist_brush->Release();
-                }
+                solid_brush->SetColor(D2D1::ColorF(0.70f, 0.70f, 0.74f, 0.85f * expand_ratio));
+                rt->DrawText(artist_str, (UINT32)wcslen(artist_str), s_text_format_artist, &artist_rect, solid_brush);
             }
         }
 
-        SafeRelease(bg_brush);
-        SafeRelease(border_brush);
-        SafeRelease(white_brush);
-        SafeRelease(muted_brush);
+        SafeRelease(solid_brush);
 
         rt->EndDraw();
         rt->Release();
@@ -480,9 +533,7 @@ static void RenderIslandSurface() {
     s_rendered_width = s_current_width;
     s_rendered_opacity = s_current_opacity;
 
-    if (s_dcomp_device) {
-        s_dcomp_device->Commit();
-    }
+    /* PERF-201: Removed s_dcomp_device->Commit(). Frame loop executes single consolidated commit. */
 }
 
 // Public C ABI Implementations
@@ -557,6 +608,7 @@ void TE_DynamicIslandDisable(void) {
     s_headroom_y = 120.0f;
 
     float dpi_scale = (s_dpi > 0) ? ((float)s_dpi / 96.0f) : 1.0f;
+    CancelAnnouncementTimer();
     s_current_width = (float)s_config.compact_width * dpi_scale;
     s_target_width = s_current_width;
 
@@ -591,6 +643,12 @@ void TE_DynamicIslandDisable(void) {
 void TE_DynamicIslandShutdown(void) {
     TE_DynamicIslandDisable();
     TE_DynamicIslandDetachVisualTree();
+    CancelAnnouncementTimer();
+    if (s_announce_timer) {
+        WaitForThreadpoolTimerCallbacks(s_announce_timer, TRUE);
+        CloseThreadpoolTimer(s_announce_timer);
+        s_announce_timer = nullptr;
+    }
     s_initialized = FALSE;
 }
 
@@ -683,9 +741,7 @@ static BOOL InternalAttachVisuals() {
     if (FAILED(hr)) return FALSE;
 
     TE_DCompAttachIslandVisual(s_island_visual);
-    if (s_dcomp_device) {
-        s_dcomp_device->Commit();
-    }
+    /* PERF-201: Redundant commit removed; consolidated commit via TE_DCompCommit() at frame boundary. */
 
     s_state_dirty = true;
     return TRUE;
@@ -715,6 +771,9 @@ void TE_DynamicIslandDetachVisualTree(void) {
     SafeRelease(s_translate_transform);
     SafeRelease(s_island_visual);
 
+    SafeRelease(s_note_flag_geometry);
+    SafeRelease(s_play_triangle_geometry);
+
     SafeRelease(s_ellipsis_title);
     SafeRelease(s_ellipsis_artist);
     SafeRelease(s_text_format_title);
@@ -740,17 +799,26 @@ void TE_DynamicIslandUpdateFrame(float dt_sec) {
         if (s_media_source->HasNewState()) {
             TEMediaStateSnapshot snap = {};
             if (s_media_source->GetCurrentSnapshot(&snap)) {
+                bool metadata_changed = (snap.track_change_id != s_last_track_change_id) ||
+                                        (snap.status != s_current_media_state.status) ||
+                                        (snap.has_media != s_current_media_state.has_media) ||
+                                        (wcscmp(snap.title, s_current_media_state.title) != 0) ||
+                                        (wcscmp(snap.artist, s_current_media_state.artist) != 0) ||
+                                        (wcscmp(snap.album, s_current_media_state.album) != 0);
+
                 if (snap.track_change_id != s_last_track_change_id) {
                     s_last_track_change_id = snap.track_change_id;
                     if (snap.has_media && snap.status == TEMediaPlaybackStatus::Playing) {
-                        s_announce_end_time_ms = GetTickCount64() + (uint64_t)s_config.announce_duration_ms;
+                        StartAnnouncementTimer();
                         if (s_wake_callback) {
                             s_wake_callback();
                         }
                     }
                 }
                 s_current_media_state = snap;
-                s_state_dirty = true;
+                if (metadata_changed) {
+                    s_state_dirty = true;
+                }
             }
         }
     }
@@ -772,7 +840,7 @@ void TE_DynamicIslandUpdateFrame(float dt_sec) {
 
     float dpi_scale = (s_dpi > 0) ? ((float)s_dpi / 96.0f) : 1.0f;
     uint64_t now = GetTickCount64();
-    bool is_announcing = (now < s_announce_end_time_ms);
+    bool is_announcing = s_is_announcing && (now < s_announce_end_time_ms);
 
     if (media_active && (s_is_hovered || is_announcing)) {
         s_target_width = (float)s_config.expanded_width * dpi_scale;
@@ -791,7 +859,7 @@ void TE_DynamicIslandUpdateFrame(float dt_sec) {
         if (s_island_effect) {
             s_island_effect->SetOpacity(s_current_opacity);
         }
-        s_state_dirty = true;
+        /* PERF-502: Compositor natively manages visual opacity on GPU; do not set s_state_dirty during opacity-only transitions */
     }
 
     // 4. Smooth Size Interpolation
@@ -874,8 +942,8 @@ float TE_DynamicIslandGetCurrentOpacity(void) {
 
 BOOL TE_DynamicIslandIsSettled(void) {
     if (!s_enabled) return TRUE;
-    uint64_t now = GetTickCount64();
-    if (now < s_announce_end_time_ms) return FALSE;
+    // PERF-503: Decouple visual settling from timer expiration.
+    // Static expanded announcement allows frame loop to sleep immediately.
     if (std::abs(s_current_width - s_target_width) >= 0.5f) return FALSE;
     if (std::abs(s_current_opacity - s_target_opacity) >= 0.005f) return FALSE;
     if (s_state_dirty) return FALSE;

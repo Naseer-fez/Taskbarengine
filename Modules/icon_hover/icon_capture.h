@@ -55,6 +55,19 @@ HRESULT TE_IconCaptureGetBitmap(const wchar_t* app_id, int icon_index, HBITMAP* 
 HRESULT TE_IconCaptureGetBitmapWithBounds(const wchar_t* app_id, int icon_index, const RECT* screen_bounds, HBITMAP* out_bitmap);
 
 /**
+ * Retrieve a cached icon bitmap with explicit HWND and PID association (SYS-018 & PERF-403).
+ *
+ * @param app_id        Application identifier string.
+ * @param icon_index    System image list index.
+ * @param screen_bounds Screen coordinates of the icon button for fallback snapshot.
+ * @param hwnd          Associated native window handle (optional, for fine-grained invalidation).
+ * @param pid           Associated process ID (optional, for fine-grained invalidation).
+ * @param out_bitmap    Pointer to receive HBITMAP.
+ * @return TE_S_OK on success, or error HRESULT.
+ */
+HRESULT TE_IconCaptureGetBitmapEx(const wchar_t* app_id, int icon_index, const RECT* screen_bounds, HWND hwnd, DWORD pid, HBITMAP* out_bitmap);
+
+/**
  * Invalidate all cached icon bitmaps, forcing re-extraction on next request.
  * Called when taskbar icons change (e.g., on TE_EVENT_SHELL_HOOK).
  *
@@ -62,6 +75,26 @@ HRESULT TE_IconCaptureGetBitmapWithBounds(const wchar_t* app_id, int icon_index,
  * @note Performance: Completes in < 5 ms for typical icon counts (< 20).
  */
 void TE_IconCaptureInvalidate(void);
+
+/**
+ * Invalidate a specific application's cached icon bitmap by app_id.
+ */
+void TE_IconCaptureInvalidateApp(const wchar_t* app_id);
+
+/**
+ * Invalidate cached icon bitmap associated with a specific window handle.
+ */
+void TE_IconCaptureInvalidateHwnd(HWND hwnd);
+
+/**
+ * Invalidate cached icon bitmap associated with a specific process ID.
+ */
+void TE_IconCaptureInvalidatePid(DWORD pid);
+
+/**
+ * Query current number of entries in the bounded LRU bitmap cache.
+ */
+uint32_t TE_IconCaptureGetCacheCount(void);
 
 #ifdef __cplusplus
 }

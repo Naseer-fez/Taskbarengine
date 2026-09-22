@@ -13,6 +13,7 @@ static TE_PluginEntry g_plugins[TE_MAX_PLUGINS];
 static int g_plugin_count = 0;
 static uint32_t g_current_plugin_id = 0;
 static TE_PluginEntry* g_current_plugin_entry = NULL;
+static SRWLOCK g_plugin_lock = SRWLOCK_INIT;
 
 static HRESULT TE_PluginSubscribeWrapper(uint32_t event_type, void (*callback)(uint32_t, const void*, void*), void* user_data) {
     return TE_EventDispatchSubscribe(event_type, (TE_EventCallback)callback, user_data, g_current_plugin_id);
@@ -48,27 +49,36 @@ static void TE_PluginRequestRedrawWrapper(void) {
 }
 
 HRESULT TE_PluginLoaderInit(void) {
+    InitializeSRWLock(&g_plugin_lock);
+    AcquireSRWLockExclusive(&g_plugin_lock);
     g_plugin_count = 0;
     g_current_plugin_id = 0;
     g_current_plugin_entry = NULL;
     memset(g_plugins, 0, sizeof(g_plugins));
+    ReleaseSRWLockExclusive(&g_plugin_lock);
     return TE_S_OK;
 }
 
 void TE_PluginLoaderShutdown(void) {
     TE_PluginLoaderShutdownAll();
+    AcquireSRWLockExclusive(&g_plugin_lock);
     g_plugin_count = 0;
     g_current_plugin_id = 0;
     g_current_plugin_entry = NULL;
+    ReleaseSRWLockExclusive(&g_plugin_lock);
 }
 
 HRESULT TE_PluginLoaderScanAndLoad(const wchar_t* modules_dir) {
+    AcquireSRWLockExclusive(&g_plugin_lock);
     WIN32_FIND_DATAW find_data;
     wchar_t search_path[MAX_PATH];
     swprintf(search_path, MAX_PATH, L"%s\\*", modules_dir);
     
     HANDLE hFind = FindFirstFileW(search_path, &find_data);
-    if (hFind == INVALID_HANDLE_VALUE) return TE_S_OK;
+    if (hFind == INVALID_HANDLE_VALUE) {
+        ReleaseSRWLockExclusive(&g_plugin_lock);
+        return TE_S_OK;
+    }
     
     do {
         if (find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
@@ -126,6 +136,7 @@ HRESULT TE_PluginLoaderScanAndLoad(const wchar_t* modules_dir) {
         g_plugins[j + 1] = temp;
     }
     
+    ReleaseSRWLockExclusive(&g_plugin_lock);
     return TE_S_OK;
 }
 
@@ -138,6 +149,7 @@ static HRESULT PluginInitFunc(void) {
 }
 
 HRESULT TE_PluginLoaderInitializeAll(HWND taskbar_hwnd, uint32_t dpi, const struct cJSON* config_root) {
+    AcquireSRWLockExclusive(&g_plugin_lock);
     for (int i = 0; i < g_plugin_count; i++) {
         g_ctx.struct_size = sizeof(PluginContext);
         g_ctx.api_version = TE_API_VERSION;
@@ -165,6 +177,7 @@ HRESULT TE_PluginLoaderInitializeAll(HWND taskbar_hwnd, uint32_t dpi, const stru
             g_plugins[i].initialized = TRUE;
         }
     }
+    ReleaseSRWLockExclusive(&g_plugin_lock);
     return TE_S_OK;
 }
 
@@ -176,6 +189,7 @@ static HRESULT PluginEnableFunc(void) {
 }
 
 HRESULT TE_PluginLoaderEnableAll(void) {
+    AcquireSRWLockExclusive(&g_plugin_lock);
     for (int i = 0; i < g_plugin_count; i++) {
         if (g_plugins[i].initialized && !g_plugins[i].enabled) {
             g_current_plugin_id = g_plugins[i].plugin_id;
@@ -186,6 +200,7 @@ HRESULT TE_PluginLoaderEnableAll(void) {
             }
         }
     }
+    ReleaseSRWLockExclusive(&g_plugin_lock);
     return TE_S_OK;
 }
 
@@ -197,6 +212,7 @@ static HRESULT PluginDisableFunc(void) {
 }
 
 void TE_PluginLoaderDisableAll(void) {
+    AcquireSRWLockExclusive(&g_plugin_lock);
     for (int i = g_plugin_count - 1; i >= 0; i--) {
         if (g_plugins[i].enabled) {
             g_current_plugin_id = g_plugins[i].plugin_id;
@@ -205,9 +221,11 @@ void TE_PluginLoaderDisableAll(void) {
             g_plugins[i].enabled = FALSE;
         }
     }
+    ReleaseSRWLockExclusive(&g_plugin_lock);
 }
 
 void TE_PluginLoaderShutdownAll(void) {
+    AcquireSRWLockExclusive(&g_plugin_lock);
     for (int i = 0; i < g_plugin_count; i++) {
         TE_EventDispatchRemoveByPlugin(g_plugins[i].plugin_id);
         if (g_plugins[i].initialized) {
@@ -221,6 +239,7 @@ void TE_PluginLoaderShutdownAll(void) {
             g_plugins[i].module_handle = NULL;
         }
     }
+    ReleaseSRWLockExclusive(&g_plugin_lock);
 }
 
 int TE_PluginLoaderGetCount(void) {
@@ -245,10 +264,20 @@ TE_PluginEntry* TE_PluginLoaderFindByName(const char* name) {
 }
 
 HRESULT TE_PluginLoaderEnablePluginByName(const char* name) {
+    AcquireSRWLockExclusive(&g_plugin_lock);
     TE_PluginEntry* entry = TE_PluginLoaderFindByName(name);
-    if (!entry) return TE_E_INVALIDARG;
-    if (!entry->initialized) return TE_E_FAIL;
-    if (entry->enabled) return TE_S_OK;
+    if (!entry) {
+        ReleaseSRWLockExclusive(&g_plugin_lock);
+        return TE_E_INVALIDARG;
+    }
+    if (!entry->initialized) {
+        ReleaseSRWLockExclusive(&g_plugin_lock);
+        return TE_E_FAIL;
+    }
+    if (entry->enabled) {
+        ReleaseSRWLockExclusive(&g_plugin_lock);
+        return TE_S_OK;
+    }
     
     g_current_plugin_id = entry->plugin_id;
     g_current_plugin_entry = entry;
@@ -256,16 +285,38 @@ HRESULT TE_PluginLoaderEnablePluginByName(const char* name) {
     if (SUCCEEDED(res)) {
         entry->enabled = TRUE;
     }
+    ReleaseSRWLockExclusive(&g_plugin_lock);
     return res;
 }
 
 void TE_PluginLoaderDisablePluginByName(const char* name) {
+    AcquireSRWLockExclusive(&g_plugin_lock);
     TE_PluginEntry* entry = TE_PluginLoaderFindByName(name);
-    if (!entry) return;
-    if (!entry->enabled) return;
+    if (!entry || !entry->enabled) {
+        ReleaseSRWLockExclusive(&g_plugin_lock);
+        return;
+    }
     
     g_current_plugin_id = entry->plugin_id;
     g_current_plugin_entry = entry;
     TE_FaultIsolatedCall(&entry->fault_count, (char*)entry->metadata->name, "Disable", PluginDisableFunc);
     entry->enabled = FALSE;
+    ReleaseSRWLockExclusive(&g_plugin_lock);
 }
+
+void TE_PluginLoaderLockShared(void) {
+    AcquireSRWLockShared(&g_plugin_lock);
+}
+
+void TE_PluginLoaderUnlockShared(void) {
+    ReleaseSRWLockShared(&g_plugin_lock);
+}
+
+void TE_PluginLoaderLockExclusive(void) {
+    AcquireSRWLockExclusive(&g_plugin_lock);
+}
+
+void TE_PluginLoaderUnlockExclusive(void) {
+    ReleaseSRWLockExclusive(&g_plugin_lock);
+}
+
