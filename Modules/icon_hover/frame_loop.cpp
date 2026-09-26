@@ -656,6 +656,7 @@ static VOID CALLBACK FrameTimerCallback(PVOID lpParam, BOOLEAN timer_or_wait_fir
     if (any_monitor_dirty || island_dirty) {
         /* Single composition commit presents all targets across all displays */
         TE_DCompCommit();
+        DwmFlush();
     }
 
     /* Check if settle animation is complete across all monitors and dynamic island */
@@ -724,14 +725,27 @@ static DWORD WINAPI FrameLoopWorkerThread(LPVOID lpParam)
                     break;
                 }
 
+                LARGE_INTEGER qpc_start, qpc_end;
+                QueryPerformanceCounter(&qpc_start);
+
                 FrameTimerCallback(NULL, TRUE);
+
+                QueryPerformanceCounter(&qpc_end);
 
                 if (!s_loop_active) {
                     CancelWaitableTimer(s_waitable_timer);
                     break;
                 }
 
-                due_time.QuadPart = -interval_100ns;
+                if (s_qpc_freq.QuadPart == 0) {
+                    QueryPerformanceFrequency(&s_qpc_freq);
+                }
+
+                LONGLONG elapsed_100ns = (LONGLONG)((qpc_end.QuadPart - qpc_start.QuadPart) * 10000000 / s_qpc_freq.QuadPart);
+                LONGLONG remaining_100ns = interval_100ns - elapsed_100ns;
+                if (remaining_100ns <= 0) remaining_100ns = 1;
+
+                due_time.QuadPart = -remaining_100ns;
                 SetWaitableTimer(s_waitable_timer, &due_time, 0, NULL, NULL, FALSE);
             }
         }

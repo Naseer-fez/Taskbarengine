@@ -41,4 +41,7 @@ App/res/settings_merged.manifest
 !.agents/skills/
 
 TaskbarEngine-v*
-DTE_*.jsonc
+temp_portable_build/
+ReleaseStaging/
+TaskbarEngine-Portable.zip
+TaskbarEngine-Portable.zip.sha256

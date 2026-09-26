@@ -991,10 +991,13 @@ void TE_DCompEnsureTopmost(HWND taskbar_hwnd)
 HRESULT TE_DCompLoadStartImage(const wchar_t* image_path)
 {
     if (!image_path || !*image_path) return TE_E_INVALIDARG;
-
-    CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
-
     wchar_t resolved_path[MAX_PATH] = {};
+
+    HRESULT hr_com = CoInitializeEx(NULL, COINIT_MULTITHREADED);
+    if (hr_com == S_FALSE) {
+        CoUninitialize();
+    }
+
     if (GetFileAttributesW(image_path) != INVALID_FILE_ATTRIBUTES) {
         wcscpy_s(resolved_path, MAX_PATH, image_path);
     } else {

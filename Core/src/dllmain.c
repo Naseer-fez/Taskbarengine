@@ -48,9 +48,8 @@ static volatile LONG g_is_detaching = 0;
 static HANDLE g_hDelayedInitThread = NULL;
 
 static DWORD WINAPI TE_DelayedStartupThread(LPVOID lpParam) {
-    HINSTANCE hinstDLL = (HINSTANCE)lpParam;
-    HMODULE hModule = NULL;
-    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, (LPCWSTR)TE_DelayedStartupThread, &hModule);
+    HMODULE hModule = (HMODULE)lpParam;
+    HINSTANCE hinstDLL = (HINSTANCE)hModule;
 
     HWND taskbar_hwnd = NULL;
     for (int i = 0; i < 600 && !InterlockedCompareExchange(&g_is_detaching, 0, 0); i++) {
@@ -95,7 +94,13 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
                 TE_TaskbarSubclassInstall(taskbar_hwnd);
                 PostMessage(taskbar_hwnd, WM_TE_INIT, 0, 0);
             } else {
-                g_hDelayedInitThread = CreateThread(NULL, 0, TE_DelayedStartupThread, (LPVOID)hinstDLL, 0, NULL);
+                HMODULE hModule = NULL;
+                if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, (LPCWSTR)TE_DelayedStartupThread, &hModule)) {
+                    g_hDelayedInitThread = CreateThread(NULL, 0, TE_DelayedStartupThread, (LPVOID)hModule, 0, NULL);
+                    if (!g_hDelayedInitThread) {
+                        FreeLibrary(hModule);
+                    }
+                }
             }
             break;
         }
@@ -125,6 +130,7 @@ LRESULT CALLBACK TE_GetMsgHookProc(int nCode, WPARAM wParam, LPARAM lParam)
         if (msg->message == WM_MOUSEMOVE) {
             HWND taskbar = TE_TaskbarFindRoot(msg->hwnd);
             if (taskbar) {
+                TE_TaskbarEnsureTimer(taskbar);
                 TE_TaskbarMouseData mouse_data;
                 mouse_data.cursor_pos = msg->pt;
                 mouse_data.is_in_taskbar = TRUE;

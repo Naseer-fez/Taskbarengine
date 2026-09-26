@@ -65,13 +65,56 @@ TEST_CASE("Phase 2 - IPC Independent OVERLAPPED & Connection Handling (SYS-012)"
     REQUIRE(read_ol.hEvent != write_ol.hEvent);
     REQUIRE(connect_ol.hEvent != write_ol.hEvent);
 
-    // Invariant: ERROR_PIPE_CONNECTED must be treated as synchronous success without calling GetOverlappedResult
-    DWORD simulated_err = ERROR_PIPE_CONNECTED;
-    BOOL connected = FALSE;
-    if (simulated_err == ERROR_PIPE_CONNECTED) {
-        connected = TRUE;
+    // Invariant: non-blocking named pipe state validation with independent hEvent (SYS-012, DEF-05)
+    LPCWSTR test_pipe_name = L"\\\\.\\pipe\\TaskbarEngine_Test_SYS012_Harden";
+    HANDLE hPipe = CreateNamedPipeW(
+        test_pipe_name,
+        PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
+        PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
+        1,
+        1024,
+        1024,
+        0,
+        NULL
+    );
+    REQUIRE(hPipe != INVALID_HANDLE_VALUE);
+
+    BOOL conn_res = ConnectNamedPipe(hPipe, &connect_ol);
+    DWORD conn_err = GetLastError();
+    REQUIRE(conn_res == FALSE);
+    REQUIRE((conn_err == ERROR_IO_PENDING || conn_err == ERROR_PIPE_CONNECTED));
+    if (conn_err == ERROR_IO_PENDING) {
+        REQUIRE(!HasOverlappedIoCompleted(&connect_ol));
     }
-    REQUIRE(connected == TRUE);
+
+    CancelIoEx(hPipe, &connect_ol);
+    CloseHandle(hPipe);
+
+    // Verify ERROR_PIPE_CONNECTED when client connects before ConnectNamedPipe
+    HANDLE hPipe2 = CreateNamedPipeW(
+        test_pipe_name,
+        PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
+        PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
+        1,
+        1024,
+        1024,
+        0,
+        NULL
+    );
+    REQUIRE(hPipe2 != INVALID_HANDLE_VALUE);
+
+    HANDLE hClient = CreateFileW(test_pipe_name, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+    REQUIRE(hClient != INVALID_HANDLE_VALUE);
+
+    ResetEvent(connect_ol.hEvent);
+    BOOL conn_res2 = ConnectNamedPipe(hPipe2, &connect_ol);
+    DWORD conn_err2 = GetLastError();
+    REQUIRE(conn_res2 == FALSE);
+    REQUIRE(conn_err2 == ERROR_PIPE_CONNECTED);
+
+    CloseHandle(hClient);
+    DisconnectNamedPipe(hPipe2);
+    CloseHandle(hPipe2);
 
     CloseHandle(connect_ol.hEvent);
     CloseHandle(read_ol.hEvent);

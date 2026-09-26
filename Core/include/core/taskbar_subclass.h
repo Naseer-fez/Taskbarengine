@@ -55,6 +55,7 @@ typedef struct TE_TrackedTaskbar {
     BOOL was_in_taskbar;
     BOOL was_dragging;
     POINT last_pt;
+    BOOL timer_active;
 } TE_TrackedTaskbar;
 
 /**
@@ -90,6 +91,13 @@ BOOL TE_TaskbarIsTracked(HWND hwnd);
  * @return Root tracked taskbar HWND, or NULL if not belonging to a taskbar.
  */
 HWND TE_TaskbarFindRoot(HWND hwnd);
+
+/**
+ * Ensure the 32ms mouse tracking timer is active for the specified taskbar.
+ * Called on mouse movement over taskbar windows to start tracking on-demand.
+ * @param hwnd Root taskbar HWND.
+ */
+void TE_TaskbarEnsureTimer(HWND hwnd);
 
 /**
  * Remove subclass and untrack all secondary (and optionally primary) taskbars.

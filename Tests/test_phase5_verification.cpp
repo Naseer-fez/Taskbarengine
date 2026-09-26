@@ -297,8 +297,7 @@ TEST_CASE("Phase 5 - Consolidated DirectComposition Commit Invariant (PERF-201)"
 
         // Verify TE_DCompCommit returns gracefully when no DComp device is attached in test mock
         HRESULT hr = TE_DCompCommit();
-        // Either S_OK if initialized or E_FAIL if no device; must not hang or crash
-        REQUIRE((hr == TE_S_OK || hr == TE_E_FAIL));
+        REQUIRE(hr == TE_E_FAIL);
 
         TE_DynamicIslandDisable();
         TE_DynamicIslandShutdown();
