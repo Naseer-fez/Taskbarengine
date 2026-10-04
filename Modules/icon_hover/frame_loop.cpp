@@ -46,6 +46,7 @@ struct TE_MouseSnapshot {
 
 struct TE_MonitorDoubleBuffer {
     TE_MouseSnapshot mouse_snapshots[2];
+    std::atomic<uint32_t> seq{0};
     std::atomic<int> active_idx{0};
     std::atomic<float> pending_impulses[TE_HOVER_MAX_ICONS];
 };
@@ -191,8 +192,16 @@ static bool ProcessMonitorTick(
 
     /* PERF-101: Read double-buffered mouse snapshot locklessly */
     if (monitor_idx >= 0 && monitor_idx < TE_MAX_MONITORS) {
-        int read_idx = s_monitor_buffers[monitor_idx].active_idx.load(std::memory_order_acquire);
-        const TE_MouseSnapshot& snap = s_monitor_buffers[monitor_idx].mouse_snapshots[read_idx];
+        TE_MouseSnapshot snap = {0};
+        uint32_t seq1 = 0, seq2 = 0;
+        do {
+            seq1 = s_monitor_buffers[monitor_idx].seq.load(std::memory_order_acquire);
+            if (seq1 & 1) continue; // Writer is active
+            int read_idx = s_monitor_buffers[monitor_idx].active_idx.load(std::memory_order_acquire);
+            snap = s_monitor_buffers[monitor_idx].mouse_snapshots[read_idx];
+            seq2 = s_monitor_buffers[monitor_idx].seq.load(std::memory_order_acquire);
+        } while (seq1 != seq2);
+        
         if (snap.last_mousemove_qpc > mon->mouse.last_mousemove_qpc) {
             mon->mouse.cursor_x = snap.cursor_x;
             mon->mouse.cursor_y = snap.cursor_y;
@@ -236,7 +245,7 @@ static bool ProcessMonitorTick(
 
 
     /* PERF-105: Latch geometry generation changes atomically across frame boundaries */
-    uint64_t current_geom_gen = mon->geometry.generation;
+    uint64_t current_geom_gen = InterlockedOr64((volatile LONG64*)&mon->geometry.generation, 0);
     for (int i = 0; i < icon_count; i++) {
         if (mon->anim[i].geometry_generation != current_geom_gen) {
             mon->anim[i].geometry_generation = current_geom_gen;
@@ -556,7 +565,7 @@ static VOID CALLBACK FrameTimerCallback(PVOID lpParam, BOOLEAN timer_or_wait_fir
     /* SYS-009: Explicitly initialize COM as MTA upon entry if uninitialized */
     struct ComMtaScopeGuard {
         HRESULT hr;
-        ComMtaScopeGuard() { hr = CoInitializeEx(NULL, COINIT_MULTITHREADED); }
+        ComMtaScopeGuard() { hr = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED); }
         ~ComMtaScopeGuard() { if (SUCCEEDED(hr)) CoUninitialize(); }
     } com_guard;
 
@@ -655,8 +664,11 @@ static VOID CALLBACK FrameTimerCallback(PVOID lpParam, BOOLEAN timer_or_wait_fir
 
     if (any_monitor_dirty || island_dirty) {
         /* Single composition commit presents all targets across all displays */
-        TE_DCompCommit();
-        DwmFlush();
+        HRESULT hr = TE_DCompCommit();
+        if (FAILED(hr)) {
+            all_monitors_settled = true;
+            island_settled = true;
+        }
     }
 
     /* Check if settle animation is complete across all monitors and dynamic island */
@@ -955,6 +967,7 @@ void TE_FrameLoopOnMouseMoveEx(float cursor_x, float cursor_y, int is_dragging, 
             /* PERF-101: Atomically swap double-buffered snapshot */
             int cur_b = s_monitor_buffers[i].active_idx.load(std::memory_order_relaxed);
             int next_b = 1 - cur_b;
+            s_monitor_buffers[i].seq.fetch_add(1, std::memory_order_release);
             s_monitor_buffers[i].mouse_snapshots[next_b].cursor_x = state->monitors[i].mouse.cursor_x;
             s_monitor_buffers[i].mouse_snapshots[next_b].cursor_y = state->monitors[i].mouse.cursor_y;
             s_monitor_buffers[i].mouse_snapshots[next_b].is_in_taskbar = state->monitors[i].mouse.is_in_taskbar;
@@ -963,6 +976,7 @@ void TE_FrameLoopOnMouseMoveEx(float cursor_x, float cursor_y, int is_dragging, 
             s_monitor_buffers[i].mouse_snapshots[next_b].settle_progress = state->monitors[i].mouse.settle_progress;
             s_monitor_buffers[i].mouse_snapshots[next_b].last_mousemove_qpc = state->monitors[i].mouse.last_mousemove_qpc;
             s_monitor_buffers[i].active_idx.store(next_b, std::memory_order_release);
+            s_monitor_buffers[i].seq.fetch_add(1, std::memory_order_release);
         }
     }
 
@@ -986,6 +1000,7 @@ void TE_FrameLoopOnMouseMoveEx(float cursor_x, float cursor_y, int is_dragging, 
     if (state->monitor_count == 0) {
         int cur_b = s_monitor_buffers[0].active_idx.load(std::memory_order_relaxed);
         int next_b = 1 - cur_b;
+        s_monitor_buffers[0].seq.fetch_add(1, std::memory_order_release);
         s_monitor_buffers[0].mouse_snapshots[next_b].cursor_x = state->mouse.cursor_x;
         s_monitor_buffers[0].mouse_snapshots[next_b].cursor_y = state->mouse.cursor_y;
         s_monitor_buffers[0].mouse_snapshots[next_b].is_in_taskbar = state->mouse.is_in_taskbar;
@@ -994,6 +1009,7 @@ void TE_FrameLoopOnMouseMoveEx(float cursor_x, float cursor_y, int is_dragging, 
         s_monitor_buffers[0].mouse_snapshots[next_b].settle_progress = state->mouse.settle_progress;
         s_monitor_buffers[0].mouse_snapshots[next_b].last_mousemove_qpc = state->mouse.last_mousemove_qpc;
         s_monitor_buffers[0].active_idx.store(next_b, std::memory_order_release);
+        s_monitor_buffers[0].seq.fetch_add(1, std::memory_order_release);
     }
 
     ReleaseSRWLockExclusive(&state->state_lock);
@@ -1035,6 +1051,7 @@ void TE_FrameLoopOnMouseLeave(void)
             /* PERF-101: Atomically swap double-buffered snapshot */
             int cur_b = s_monitor_buffers[i].active_idx.load(std::memory_order_relaxed);
             int next_b = 1 - cur_b;
+            s_monitor_buffers[i].seq.fetch_add(1, std::memory_order_release);
             s_monitor_buffers[i].mouse_snapshots[next_b].cursor_x = state->monitors[i].mouse.cursor_x;
             s_monitor_buffers[i].mouse_snapshots[next_b].cursor_y = state->monitors[i].mouse.cursor_y;
             s_monitor_buffers[i].mouse_snapshots[next_b].is_in_taskbar = 0;
@@ -1043,6 +1060,7 @@ void TE_FrameLoopOnMouseLeave(void)
             s_monitor_buffers[i].mouse_snapshots[next_b].settle_progress = 0.0f;
             s_monitor_buffers[i].mouse_snapshots[next_b].last_mousemove_qpc = now_qpc;
             s_monitor_buffers[i].active_idx.store(next_b, std::memory_order_release);
+            s_monitor_buffers[i].seq.fetch_add(1, std::memory_order_release);
         }
     }
 
@@ -1055,6 +1073,7 @@ void TE_FrameLoopOnMouseLeave(void)
     if (state->monitor_count == 0) {
         int cur_b = s_monitor_buffers[0].active_idx.load(std::memory_order_relaxed);
         int next_b = 1 - cur_b;
+        s_monitor_buffers[0].seq.fetch_add(1, std::memory_order_release);
         s_monitor_buffers[0].mouse_snapshots[next_b].cursor_x = state->mouse.cursor_x;
         s_monitor_buffers[0].mouse_snapshots[next_b].cursor_y = state->mouse.cursor_y;
         s_monitor_buffers[0].mouse_snapshots[next_b].is_in_taskbar = 0;
@@ -1063,6 +1082,7 @@ void TE_FrameLoopOnMouseLeave(void)
         s_monitor_buffers[0].mouse_snapshots[next_b].settle_progress = 0.0f;
         s_monitor_buffers[0].mouse_snapshots[next_b].last_mousemove_qpc = now_qpc;
         s_monitor_buffers[0].active_idx.store(next_b, std::memory_order_release);
+        s_monitor_buffers[0].seq.fetch_add(1, std::memory_order_release);
     }
 
     ReleaseSRWLockExclusive(&state->state_lock);

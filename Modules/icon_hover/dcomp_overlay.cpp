@@ -993,7 +993,7 @@ HRESULT TE_DCompLoadStartImage(const wchar_t* image_path)
     if (!image_path || !*image_path) return TE_E_INVALIDARG;
     wchar_t resolved_path[MAX_PATH] = {};
 
-    HRESULT hr_com = CoInitializeEx(NULL, COINIT_MULTITHREADED);
+    HRESULT hr_com = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
     if (hr_com == S_FALSE) {
         CoUninitialize();
     }

@@ -241,6 +241,22 @@ LRESULT CALLBACK TE_TaskbarSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             TE_TaskbarTrackAll();
             return 0;
             
+        case WM_TE_TASKBAR_MOUSEMOVE: {
+            HWND target_hwnd = (HWND)wParam;
+            HWND root = TE_TaskbarFindRoot(target_hwnd);
+            if (root) {
+                TE_TaskbarEnsureTimer(root);
+                TE_TaskbarMouseData mouse_data;
+                mouse_data.cursor_pos.x = (short)LOWORD(lParam);
+                mouse_data.cursor_pos.y = (short)HIWORD(lParam);
+                mouse_data.is_in_taskbar = TRUE;
+                mouse_data.is_dragging = ((GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0);
+                mouse_data.taskbar_hwnd = root;
+                TE_EventDispatchFire(TE_EVENT_TASKBAR_MOUSE, &mouse_data);
+            }
+            return 0;
+        }
+        
         case WM_TE_IPC_COMMAND:
             if ((int)wParam == TE_CMD_SHUTDOWN) {
                 KillTimer(hwnd, 1001);

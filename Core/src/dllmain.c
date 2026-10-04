@@ -45,33 +45,7 @@ static void TE_WriteStartupError(HINSTANCE hInst, const char* msg) {
 }
 
 static volatile LONG g_is_detaching = 0;
-static HANDLE g_hDelayedInitThread = NULL;
-
-static DWORD WINAPI TE_DelayedStartupThread(LPVOID lpParam) {
-    HMODULE hModule = (HMODULE)lpParam;
-    HINSTANCE hinstDLL = (HINSTANCE)hModule;
-
-    HWND taskbar_hwnd = NULL;
-    for (int i = 0; i < 600 && !InterlockedCompareExchange(&g_is_detaching, 0, 0); i++) {
-        taskbar_hwnd = FindWindowW(L"Shell_TrayWnd", NULL);
-        if (taskbar_hwnd) {
-            break;
-        }
-        Sleep(50);
-    }
-    if (taskbar_hwnd && !InterlockedCompareExchange(&g_is_detaching, 0, 0)) {
-        g_taskbarHwnd = taskbar_hwnd;
-        TE_TaskbarSubclassInstall(taskbar_hwnd);
-        PostMessage(taskbar_hwnd, WM_TE_INIT, 0, 0);
-    } else if (!taskbar_hwnd && !InterlockedCompareExchange(&g_is_detaching, 0, 0)) {
-        TE_WriteStartupError(hinstDLL, "CRITICAL ERROR: Shell_TrayWnd not found in Explorer process within timeout. Cannot initialize Core Manager.");
-    }
-
-    if (hModule) {
-        FreeLibraryAndExitThread(hModule, 0);
-    }
-    return 0;
-}
+static volatile LONG g_is_initialized = 0;
 
 BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
 {
@@ -85,23 +59,7 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
             
             DisableThreadLibraryCalls(hinstDLL);
             g_hinstDLL = hinstDLL;
-            
-            HWND taskbar_hwnd = FindWindowW(L"Shell_TrayWnd", NULL);
-            if (taskbar_hwnd) {
-                g_taskbarHwnd = taskbar_hwnd;
-                /* Install the full Phase 2 subclass proc instead of the minimal one.
-                 * WM_TE_INIT will trigger TE_CoreManagerInit() on the UI thread. */
-                TE_TaskbarSubclassInstall(taskbar_hwnd);
-                PostMessage(taskbar_hwnd, WM_TE_INIT, 0, 0);
-            } else {
-                HMODULE hModule = NULL;
-                if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, (LPCWSTR)TE_DelayedStartupThread, &hModule)) {
-                    g_hDelayedInitThread = CreateThread(NULL, 0, TE_DelayedStartupThread, (LPVOID)hModule, 0, NULL);
-                    if (!g_hDelayedInitThread) {
-                        FreeLibrary(hModule);
-                    }
-                }
-            }
+            // Initialization deferred to TE_GetMsgHookProc to avoid Loader Lock deadlocks
             break;
         }
         case DLL_PROCESS_DETACH:
@@ -111,10 +69,6 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
              * Module shutdown and thread termination must be triggered asynchronously
              * from the UI message loop prior to uninjection. */
             InterlockedExchange(&g_is_detaching, 1);
-            if (g_hDelayedInitThread) {
-                CloseHandle(g_hDelayedInitThread);
-                g_hDelayedInitThread = NULL;
-            }
             g_taskbarHwnd = NULL;
             break;
         }
@@ -127,17 +81,20 @@ LRESULT CALLBACK TE_GetMsgHookProc(int nCode, WPARAM wParam, LPARAM lParam)
     /* WH_GETMESSAGE hook proc: called on Explorer's message loop */
     if (nCode >= 0 && lParam) {
         const MSG* msg = (const MSG*)lParam;
-        if (msg->message == WM_MOUSEMOVE) {
-            HWND taskbar = TE_TaskbarFindRoot(msg->hwnd);
-            if (taskbar) {
-                TE_TaskbarEnsureTimer(taskbar);
-                TE_TaskbarMouseData mouse_data;
-                mouse_data.cursor_pos = msg->pt;
-                mouse_data.is_in_taskbar = TRUE;
-                mouse_data.is_dragging = ((msg->wParam & MK_LBUTTON) != 0) || ((GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0);
-                mouse_data.taskbar_hwnd = taskbar;
-                TE_EventDispatchFire(TE_EVENT_TASKBAR_MOUSE, &mouse_data);
+        
+        if (InterlockedCompareExchange(&g_is_initialized, 1, 0) == 0) {
+            HWND taskbar_hwnd = FindWindowW(L"Shell_TrayWnd", NULL);
+            if (taskbar_hwnd) {
+                g_taskbarHwnd = taskbar_hwnd;
+                TE_TaskbarSubclassInstall(taskbar_hwnd);
+                PostMessage(taskbar_hwnd, WM_TE_INIT, 0, 0);
+            } else {
+                InterlockedExchange(&g_is_initialized, 0);
             }
+        }
+
+        if (msg->message == WM_MOUSEMOVE && g_taskbarHwnd) {
+            PostMessageW(g_taskbarHwnd, WM_TE_TASKBAR_MOUSEMOVE, (WPARAM)msg->hwnd, MAKELPARAM(msg->pt.x, msg->pt.y));
         }
     }
     return CallNextHookEx(NULL, nCode, wParam, lParam);

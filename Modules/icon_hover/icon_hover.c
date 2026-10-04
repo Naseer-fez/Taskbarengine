@@ -357,7 +357,7 @@ static void RebuildGeometryForMonitor(int m) {
     mon->geometry.baselineY = mon->geometry.taskbarRect.bottom;
     uint32_t dpi = mon->current_dpi ? mon->current_dpi : 96;
     mon->geometry.headroom_y = (TE_HOVER_HEADROOM_BASE_PX * dpi) / 96;
-    mon->geometry.generation++;
+    InterlockedIncrement64((volatile LONG64*)&mon->geometry.generation);
     mon->geometry.valid = 1;
 
     if (m == 0) {
@@ -390,7 +390,7 @@ static void RebuildGeometry(void) {
         QueryTaskbarHeight();
         g_hover_state.geometry.baselineY = g_hover_state.geometry.taskbarRect.bottom;
         g_hover_state.geometry.headroom_y = (TE_HOVER_HEADROOM_BASE_PX * g_hover_state.current_dpi) / 96;
-        g_hover_state.geometry.generation++;
+        InterlockedIncrement64((volatile LONG64*)&g_hover_state.geometry.generation);
         g_hover_state.geometry.valid = 1;
     }
 }
@@ -537,7 +537,7 @@ static void FinishRebuildIconDataForMonitor(int m, const TE_IconElementCache* ne
     }
 
     /* Atomically bump generation so next frame tick picks up new geometry (PERF-402) */
-    InterlockedIncrement((volatile LONG*)&mon->geometry.generation);
+    InterlockedIncrement64((volatile LONG64*)&mon->geometry.generation);
 
     /* Mirror monitor 0 to global legacy state */
     if (m == 0) {

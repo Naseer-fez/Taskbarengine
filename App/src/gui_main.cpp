@@ -20,6 +20,7 @@
 #include <winrt/Microsoft.UI.Xaml.Markup.h>
 #include <winrt/Microsoft.UI.Xaml.XamlTypeInfo.h>
 #include <winrt/Windows.UI.Xaml.Interop.h>
+#include <winrt/Microsoft.UI.Dispatching.h>
 
 using namespace winrt;
 using namespace winrt::Microsoft::UI::Xaml;
@@ -27,6 +28,7 @@ using namespace winrt::Microsoft::UI::Xaml::Controls;
 
 #include <fstream>
 #include <tlhelp32.h>
+#include <thread>
 
 static void LogGui(const std::string& msg);
 
@@ -481,28 +483,39 @@ struct App : ApplicationT<App, winrt::Microsoft::UI::Xaml::Markup::IXamlMetadata
         updateEngineStatusUI();
 
         startStopBtn.Click([updateEngineStatusUI](IInspectable const&, RoutedEventArgs const&) {
-            if (IsEngineRunning()) {
-                StopEngineProcess();
-            } else {
-                StartEngineProcess();
-            }
-            Sleep(250);
-            updateEngineStatusUI();
+            auto dispatcher = winrt::Microsoft::UI::Dispatching::DispatcherQueue::GetForCurrentThread();
+            std::thread([dispatcher, updateEngineStatusUI]() {
+                if (IsEngineRunning()) {
+                    StopEngineProcess();
+                } else {
+                    StartEngineProcess();
+                }
+                Sleep(250);
+                dispatcher.TryEnqueue([updateEngineStatusUI]() { updateEngineStatusUI(); });
+            }).detach();
         });
 
         restartBtn.Click([updateEngineStatusUI](IInspectable const&, RoutedEventArgs const&) {
-            StopEngineProcess();
-            Sleep(400);
-            StartEngineProcess();
-            Sleep(250);
-            updateEngineStatusUI();
+            auto dispatcher = winrt::Microsoft::UI::Dispatching::DispatcherQueue::GetForCurrentThread();
+            std::thread([dispatcher, updateEngineStatusUI]() {
+                StopEngineProcess();
+                Sleep(400);
+                StartEngineProcess();
+                Sleep(250);
+                dispatcher.TryEnqueue([updateEngineStatusUI]() { updateEngineStatusUI(); });
+            }).detach();
         });
 
         restartExplorerBtn.Click([statusIndicator](IInspectable const&, RoutedEventArgs const&) {
             statusIndicator.Text(L"Restarting Explorer...");
-            RestartExplorerProcess();
-            Sleep(500);
-            statusIndicator.Text(L"○ Engine: Stopped (Explorer Restarted)");
+            auto dispatcher = winrt::Microsoft::UI::Dispatching::DispatcherQueue::GetForCurrentThread();
+            std::thread([dispatcher, statusIndicator]() {
+                RestartExplorerProcess();
+                Sleep(500);
+                dispatcher.TryEnqueue([statusIndicator]() { 
+                    statusIndicator.Text(L"○ Engine: Stopped (Explorer Restarted)");
+                });
+            }).detach();
         });
 
         auto engineTimer = std::make_shared<DispatcherTimer>();

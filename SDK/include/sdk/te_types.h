@@ -63,6 +63,7 @@ extern "C" {
  * Custom window message for UI thread timer ticks.
  */
 #define WM_TE_TIMER_TICK (WM_APP + 102)
+#define WM_TE_TASKBAR_MOUSEMOVE (WM_APP + 103)
 
 /**
  * Subclass identifier used when subclassing Shell_TrayWnd via SetWindowSubclass.
