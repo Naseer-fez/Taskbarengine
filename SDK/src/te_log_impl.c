@@ -39,7 +39,7 @@ static const char* GetLevelString(TE_LogLevel level) {
         case TE_LOG_INFO:    return "INFO ";
         case TE_LOG_WARNING: return "WARN ";
         case TE_LOG_ERROR:   return "ERROR";
-        default:             return "UNKNN";
+        default:             return "UNKNW";
     }
 }
 
@@ -132,7 +132,7 @@ static DWORD WINAPI FlushThreadProc(LPVOID lpParam) {
 
     while (TRUE) {
         DWORD wait_result = WaitForMultipleObjects(2, handles, FALSE, 100);
-        if (wait_result == WAIT_OBJECT_0) {
+        if (wait_result == WAIT_OBJECT_0 || wait_result == WAIT_FAILED) {
             // Shutdown signaled
             break;
         } else if (wait_result == WAIT_OBJECT_0 + 1) {
