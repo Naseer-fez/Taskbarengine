@@ -1,8 +1,9 @@
 #pragma once
 
 #include <windows.h>
+#include <sdk/te_ipc.h>
 
-#define TE_IPC_PIPE_NAME L"\\\\.\\pipe\\TaskbarEngineIPC"
+#define TE_IPC_PIPE_NAME TE_PIPE_NAME
 
 enum TE_IPC_MessageType {
     TE_IPC_MSG_UPDATE_CONFIG = 1,

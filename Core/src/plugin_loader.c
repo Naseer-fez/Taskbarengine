@@ -68,63 +68,97 @@ void TE_PluginLoaderShutdown(void) {
     ReleaseSRWLockExclusive(&g_plugin_lock);
 }
 
+static void TryLoadPluginDll(const wchar_t* dll_path) {
+    if (g_plugin_count >= TE_MAX_PLUGINS) return;
+    for (int i = 0; i < g_plugin_count; i++) {
+        if (_wcsicmp(g_plugins[i].dll_path, dll_path) == 0) return;
+    }
+    HMODULE hMod = LoadLibraryW(dll_path);
+    if (hMod) {
+        BOOL loaded = FALSE;
+        GetPluginInterfaceFunc get_interface = (GetPluginInterfaceFunc)(void*)GetProcAddress(hMod, "GetPluginInterface");
+        if (get_interface) {
+            const PluginInterface* iface = get_interface();
+            if (iface) {
+                const PluginMetadata* meta = iface->GetMetadata();
+                if (meta && meta->api_version <= TE_API_VERSION) {
+                    BOOL duplicate = FALSE;
+                    for (int i = 0; i < g_plugin_count; i++) {
+                        if (g_plugins[i].metadata && g_plugins[i].metadata->name &&
+                            strcmp(g_plugins[i].metadata->name, meta->name) == 0) {
+                            duplicate = TRUE;
+                            break;
+                        }
+                    }
+                    if (!duplicate) {
+                        g_plugins[g_plugin_count].module_handle = hMod;
+                        g_plugins[g_plugin_count].interface_ptr = iface;
+                        g_plugins[g_plugin_count].metadata = meta;
+                        g_plugins[g_plugin_count].plugin_id = (uint32_t)g_plugin_count + 1;
+                        wcsncpy_s(g_plugins[g_plugin_count].dll_path, MAX_PATH, dll_path, _TRUNCATE);
+                        g_plugin_count++;
+                        loaded = TRUE;
+                    }
+                }
+            }
+        }
+        if (!loaded) {
+            FreeLibrary(hMod);
+        }
+    }
+}
+
 HRESULT TE_PluginLoaderScanAndLoad(const wchar_t* modules_dir) {
+    if (!modules_dir || modules_dir[0] == L'\0') return TE_E_INVALIDARG;
+
     AcquireSRWLockExclusive(&g_plugin_lock);
+
+    /* 1. Scan flat DLLs in modules_dir */
+    wchar_t flat_search[MAX_PATH];
+    swprintf(flat_search, MAX_PATH, L"%s\\*.dll", modules_dir);
+    WIN32_FIND_DATAW flat_data;
+    HANDLE hFlatFind = FindFirstFileW(flat_search, &flat_data);
+    if (hFlatFind != INVALID_HANDLE_VALUE) {
+        do {
+            if (!(flat_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+                if (_wcsicmp(flat_data.cFileName, L"EngineDLL.dll") == 0) continue;
+                wchar_t dll_path[MAX_PATH];
+                swprintf(dll_path, MAX_PATH, L"%s\\%s", modules_dir, flat_data.cFileName);
+                TryLoadPluginDll(dll_path);
+            }
+        } while (FindNextFileW(hFlatFind, &flat_data));
+        FindClose(hFlatFind);
+    }
+
+    /* 2. Scan subdirectories in modules_dir */
     WIN32_FIND_DATAW find_data;
     wchar_t search_path[MAX_PATH];
     swprintf(search_path, MAX_PATH, L"%s\\*", modules_dir);
     
     HANDLE hFind = FindFirstFileW(search_path, &find_data);
-    if (hFind == INVALID_HANDLE_VALUE) {
-        ReleaseSRWLockExclusive(&g_plugin_lock);
-        return TE_S_OK;
-    }
-    
-    do {
-        if (find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-            if (wcscmp(find_data.cFileName, L".") == 0 || wcscmp(find_data.cFileName, L"..") == 0) continue;
-            
-            wchar_t dll_search[MAX_PATH];
-            swprintf(dll_search, MAX_PATH, L"%s\\%s\\*.dll", modules_dir, find_data.cFileName);
-            
-            WIN32_FIND_DATAW dll_data;
-            HANDLE hDllFind = FindFirstFileW(dll_search, &dll_data);
-            if (hDllFind != INVALID_HANDLE_VALUE) {
-                do {
-                    if (g_plugin_count >= TE_MAX_PLUGINS) break;
-                    
-                    wchar_t dll_path[MAX_PATH];
-                    swprintf(dll_path, MAX_PATH, L"%s\\%s\\%s", modules_dir, find_data.cFileName, dll_data.cFileName);
-                    
-                    HMODULE hMod = LoadLibraryW(dll_path);
-                    if (hMod) {
-                        BOOL loaded = FALSE;
-                        GetPluginInterfaceFunc get_interface = (GetPluginInterfaceFunc)(void*)GetProcAddress(hMod, "GetPluginInterface");
-                        if (get_interface) {
-                            const PluginInterface* iface = get_interface();
-                            if (iface) {
-                                const PluginMetadata* meta = iface->GetMetadata();
-                                if (meta && meta->api_version <= TE_API_VERSION) {
-                                    g_plugins[g_plugin_count].module_handle = hMod;
-                                    g_plugins[g_plugin_count].interface_ptr = iface;
-                                    g_plugins[g_plugin_count].metadata = meta;
-                                    g_plugins[g_plugin_count].plugin_id = (uint32_t)g_plugin_count + 1;
-                                    wcsncpy_s(g_plugins[g_plugin_count].dll_path, MAX_PATH, dll_path, _TRUNCATE);
-                                    g_plugin_count++;
-                                    loaded = TRUE;
-                                }
-                            }
-                        }
-                        if (!loaded) {
-                            FreeLibrary(hMod);
-                        }
-                    }
-                } while (FindNextFileW(hDllFind, &dll_data));
-                FindClose(hDllFind);
+    if (hFind != INVALID_HANDLE_VALUE) {
+        do {
+            if (find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+                if (wcscmp(find_data.cFileName, L".") == 0 || wcscmp(find_data.cFileName, L"..") == 0) continue;
+                
+                wchar_t dll_search[MAX_PATH];
+                swprintf(dll_search, MAX_PATH, L"%s\\%s\\*.dll", modules_dir, find_data.cFileName);
+                
+                WIN32_FIND_DATAW dll_data;
+                HANDLE hDllFind = FindFirstFileW(dll_search, &dll_data);
+                if (hDllFind != INVALID_HANDLE_VALUE) {
+                    do {
+                        if (_wcsicmp(dll_data.cFileName, L"EngineDLL.dll") == 0) continue;
+                        wchar_t dll_path[MAX_PATH];
+                        swprintf(dll_path, MAX_PATH, L"%s\\%s\\%s", modules_dir, find_data.cFileName, dll_data.cFileName);
+                        TryLoadPluginDll(dll_path);
+                    } while (FindNextFileW(hDllFind, &dll_data));
+                    FindClose(hDllFind);
+                }
             }
-        }
-    } while (FindNextFileW(hFind, &find_data));
-    FindClose(hFind);
+        } while (FindNextFileW(hFind, &find_data));
+        FindClose(hFind);
+    }
     
     for (int i = 1; i < g_plugin_count; i++) {
         TE_PluginEntry temp = g_plugins[i];

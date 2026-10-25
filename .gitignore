@@ -45,3 +45,5 @@ temp_portable_build/
 ReleaseStaging/
 TaskbarEngine-Portable.zip
 TaskbarEngine-Portable.zip.sha256
+
+scratch/

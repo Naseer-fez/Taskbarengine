@@ -13,21 +13,23 @@ typedef struct TE_Subscription {
 
 static TE_Subscription g_subscriptions[TE_MAX_SUBSCRIPTIONS];
 static uint32_t g_subscription_count = 0;
-static CRITICAL_SECTION g_event_cs;
+static SRWLOCK g_event_lock = SRWLOCK_INIT;
 
 HRESULT TE_EventDispatchInit(void)
 {
-    InitializeCriticalSection(&g_event_cs);
+    AcquireSRWLockExclusive(&g_event_lock);
     memset(g_subscriptions, 0, sizeof(g_subscriptions));
     g_subscription_count = 0;
+    ReleaseSRWLockExclusive(&g_event_lock);
     return TE_S_OK;
 }
 
 void TE_EventDispatchShutdown(void)
 {
+    AcquireSRWLockExclusive(&g_event_lock);
     memset(g_subscriptions, 0, sizeof(g_subscriptions));
     g_subscription_count = 0;
-    DeleteCriticalSection(&g_event_cs);
+    ReleaseSRWLockExclusive(&g_event_lock);
 }
 
 HRESULT TE_EventDispatchSubscribe(uint32_t event_type, TE_EventCallback callback,
@@ -36,7 +38,7 @@ HRESULT TE_EventDispatchSubscribe(uint32_t event_type, TE_EventCallback callback
     if (!callback) return TE_E_INVALIDARG;
     
     HRESULT hr = TE_E_FAIL;
-    EnterCriticalSection(&g_event_cs);
+    AcquireSRWLockExclusive(&g_event_lock);
     
     if (g_subscription_count < TE_MAX_SUBSCRIPTIONS) {
         for (uint32_t i = 0; i < TE_MAX_SUBSCRIPTIONS; ++i) {
@@ -53,7 +55,7 @@ HRESULT TE_EventDispatchSubscribe(uint32_t event_type, TE_EventCallback callback
         }
     }
     
-    LeaveCriticalSection(&g_event_cs);
+    ReleaseSRWLockExclusive(&g_event_lock);
     return hr;
 }
 
@@ -62,7 +64,7 @@ HRESULT TE_EventDispatchUnsubscribe(uint32_t event_type, TE_EventCallback callba
     if (!callback) return TE_E_INVALIDARG;
 
     HRESULT hr = TE_E_FAIL;
-    EnterCriticalSection(&g_event_cs);
+    AcquireSRWLockExclusive(&g_event_lock);
 
     for (uint32_t i = 0; i < TE_MAX_SUBSCRIPTIONS; ++i) {
         if (g_subscriptions[i].active && 
@@ -76,13 +78,17 @@ HRESULT TE_EventDispatchUnsubscribe(uint32_t event_type, TE_EventCallback callba
         }
     }
     
-    LeaveCriticalSection(&g_event_cs);
+    ReleaseSRWLockExclusive(&g_event_lock);
     return hr;
 }
 
 void TE_EventDispatchFire(uint32_t event_type, const void* event_data)
 {
-    EnterCriticalSection(&g_event_cs);
+    AcquireSRWLockShared(&g_event_lock);
+    if (g_subscription_count == 0) {
+        ReleaseSRWLockShared(&g_event_lock);
+        return;
+    }
     
     /* Make a copy of active callbacks to avoid deadlocks or issues if a callback subscribes/unsubscribes */
     TE_Subscription local_subs[TE_MAX_SUBSCRIPTIONS];
@@ -94,7 +100,7 @@ void TE_EventDispatchFire(uint32_t event_type, const void* event_data)
         }
     }
     
-    LeaveCriticalSection(&g_event_cs);
+    ReleaseSRWLockShared(&g_event_lock);
     
     for (uint32_t i = 0; i < local_count; ++i) {
 #ifdef _MSC_VER
@@ -111,7 +117,7 @@ void TE_EventDispatchFire(uint32_t event_type, const void* event_data)
 
 void TE_EventDispatchRemoveByPlugin(uint32_t plugin_id)
 {
-    EnterCriticalSection(&g_event_cs);
+    AcquireSRWLockExclusive(&g_event_lock);
     
     for (uint32_t i = 0; i < TE_MAX_SUBSCRIPTIONS; ++i) {
         if (g_subscriptions[i].active && g_subscriptions[i].plugin_id == plugin_id) {
@@ -120,14 +126,14 @@ void TE_EventDispatchRemoveByPlugin(uint32_t plugin_id)
         }
     }
     
-    LeaveCriticalSection(&g_event_cs);
+    ReleaseSRWLockExclusive(&g_event_lock);
 }
 
 uint32_t TE_EventDispatchGetCount(void)
 {
     uint32_t count = 0;
-    EnterCriticalSection(&g_event_cs);
+    AcquireSRWLockShared(&g_event_lock);
     count = g_subscription_count;
-    LeaveCriticalSection(&g_event_cs);
+    ReleaseSRWLockShared(&g_event_lock);
     return count;
 }

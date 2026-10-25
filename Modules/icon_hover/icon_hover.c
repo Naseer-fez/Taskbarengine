@@ -347,7 +347,21 @@ static void RebuildGeometryForMonitor(int m) {
         GetWindowRect(bridge, &bridgeRect);
         mon->geometry.bridgeOffsetY = bridgeRect.top - mon->geometry.taskbarRect.top;
     } else {
-        mon->geometry.bridgeOffsetY = 0;
+        /* Windows 10: Shell_TrayWnd -> ReBarWindow32 -> MSTaskSwWClass -> MSTaskListWClass */
+        HWND rebar = FindWindowExW(tb, NULL, L"ReBarWindow32", NULL);
+        HWND taskSw = rebar ? FindWindowExW(rebar, NULL, L"MSTaskSwWClass", NULL) : NULL;
+        HWND taskList = taskSw ? FindWindowExW(taskSw, NULL, L"MSTaskListWClass", NULL) : NULL;
+        if (taskList) {
+            RECT taskListRect;
+            GetWindowRect(taskList, &taskListRect);
+            mon->geometry.bridgeOffsetY = taskListRect.top - mon->geometry.taskbarRect.top;
+        } else if (rebar) {
+            RECT rebarRect;
+            GetWindowRect(rebar, &rebarRect);
+            mon->geometry.bridgeOffsetY = rebarRect.top - mon->geometry.taskbarRect.top;
+        } else {
+            mon->geometry.bridgeOffsetY = 0;
+        }
     }
 
     if (m == 0) {

@@ -195,7 +195,9 @@ TEST_CASE("Phase 4 - Stationary Mouse Hover Settling to 0.0% CPU (PERF-104)", "[
     REQUIRE(TE_FrameLoopIsActive() == 1);
 
     // Keep cursor motionless at (200, 1060) and allow interpolation to reach resting equilibrium
-    std::this_thread::sleep_for(std::chrono::milliseconds(250));
+    for (int w = 0; w < 50 && TE_FrameLoopIsActive() != 0; w++) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
 
     // Timer must automatically sleep when stationary hover reaches equilibrium
     REQUIRE(TE_FrameLoopIsActive() == 0);
@@ -211,7 +213,9 @@ TEST_CASE("Phase 4 - Stationary Mouse Hover Settling to 0.0% CPU (PERF-104)", "[
     TE_FrameLoopOnMouseLeave();
     REQUIRE(TE_FrameLoopIsActive() == 1);
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(250));
+    for (int w = 0; w < 50 && TE_FrameLoopIsActive() != 0; w++) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
     REQUIRE(TE_FrameLoopIsActive() == 0);
 
     g_hover_state = saved_state;
@@ -246,7 +250,7 @@ TEST_CASE("Phase 4 - Geometry Generation Desync Frame Drops (PERF-105)", "[phase
     REQUIRE(TE_FrameLoopIsActive() == 1);
 
     // Simulate taskbar resize / DPI change: bump geometry generation to 5
-    InterlockedExchange((volatile LONG*)&g_hover_state.monitors[0].geometry.generation, 5);
+    InterlockedExchange64((volatile LONG64*)&g_hover_state.monitors[0].geometry.generation, 5);
 
     // Wait a frame tick for the generation latch to apply
     std::this_thread::sleep_for(std::chrono::milliseconds(50));

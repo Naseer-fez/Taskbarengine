@@ -143,7 +143,7 @@ HWND TE_DCompCreateOverlayWindow(HWND taskbar_hwnd, int x, int y, int width, int
     }
 
     HWND overlay = CreateWindowExW(
-        WS_EX_NOREDIRECTIONBITMAP | WS_EX_TRANSPARENT | WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+        WS_EX_NOREDIRECTIONBITMAP | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
         OVERLAY_CLASS_NAME,
         NULL,
         WS_POPUP | WS_VISIBLE,
@@ -159,7 +159,6 @@ HWND TE_DCompCreateOverlayWindow(HWND taskbar_hwnd, int x, int y, int width, int
         return NULL;
     }
 
-    SetLayeredWindowAttributes(overlay, 0, 255, LWA_ALPHA);
     s_overlay_hwnd_ref = overlay;
 
     char msg[128];
@@ -173,7 +172,7 @@ void TE_DCompMoveOverlayWindow(HWND overlay_hwnd, int x, int y, int width, int h
 {
     if (overlay_hwnd && IsWindow(overlay_hwnd)) {
         SetWindowPos(overlay_hwnd, HWND_TOPMOST, x, y, width, height,
-                     SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_SHOWWINDOW);
+                     SWP_NOACTIVATE | SWP_SHOWWINDOW);
     }
 }
 
@@ -207,12 +206,19 @@ HRESULT TE_DCompInitDevice(HWND overlay_hwnd)
         return TE_E_FAIL;
     }
 
-    /* Create D3D11 device with BGRA support for D2D interop */
+    /* Create D3D11 device with BGRA support for D2D interop, with WARP fallback */
     UINT createDeviceFlags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
     hr = D3D11CreateDevice(
         nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, createDeviceFlags,
         nullptr, 0, D3D11_SDK_VERSION, &s_d3d_device, nullptr, nullptr
     );
+    if (FAILED(hr)) {
+        TE_LogWrite(TE_LOG_WARNING, LOG_TAG, "Hardware D3D11 device creation failed; falling back to WARP");
+        hr = D3D11CreateDevice(
+            nullptr, D3D_DRIVER_TYPE_WARP, nullptr, createDeviceFlags,
+            nullptr, 0, D3D11_SDK_VERSION, &s_d3d_device, nullptr, nullptr
+        );
+    }
     if (FAILED(hr)) {
         TE_LogWrite(TE_LOG_ERROR, LOG_TAG, "Failed to create D3D11 device");
         return TE_E_FAIL;

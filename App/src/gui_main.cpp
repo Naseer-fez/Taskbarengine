@@ -41,7 +41,8 @@ static bool IsEngineRunning()
         PROCESSENTRY32W pe = { sizeof(pe) };
         if (Process32FirstW(hSnap, &pe)) {
             do {
-                if (_wcsicmp(pe.szExeFile, L"TaskbarEngine.exe") == 0) {
+                if (_wcsicmp(pe.szExeFile, L"TaskbarEngine.exe") == 0 ||
+                    _wcsicmp(pe.szExeFile, L"TaskbarEngineHost.exe") == 0) {
                     CloseHandle(hSnap);
                     return true;
                 }
@@ -143,7 +144,8 @@ static bool StopEngineProcess()
         PROCESSENTRY32W pe = { sizeof(pe) };
         if (Process32FirstW(hSnap, &pe)) {
             do {
-                if (_wcsicmp(pe.szExeFile, L"TaskbarEngine.exe") == 0) {
+                if (_wcsicmp(pe.szExeFile, L"TaskbarEngine.exe") == 0 ||
+                    _wcsicmp(pe.szExeFile, L"TaskbarEngineHost.exe") == 0) {
                     HANDLE hProc = OpenProcess(SYNCHRONIZE | PROCESS_TERMINATE, FALSE, pe.th32ProcessID);
                     if (hProc) {
                         if (WaitForSingleObject(hProc, 500) != WAIT_OBJECT_0) {

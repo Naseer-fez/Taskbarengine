@@ -553,6 +553,9 @@ BOOL TE_DynamicIslandInit(const TE_DynamicIslandConfig* config) {
         s_config.collapse_duration_ms = 250;
         s_config.show_idle_pill = FALSE;
     }
+    s_last_track_change_id = 0;
+    std::memset(&s_current_media_state, 0, sizeof(s_current_media_state));
+    s_state_dirty = false;
     s_initialized = TRUE;
     return TRUE;
 }
@@ -649,6 +652,9 @@ void TE_DynamicIslandShutdown(void) {
         CloseThreadpoolTimer(s_announce_timer);
         s_announce_timer = nullptr;
     }
+    s_last_track_change_id = 0;
+    std::memset(&s_current_media_state, 0, sizeof(s_current_media_state));
+    s_state_dirty = false;
     s_initialized = FALSE;
 }
 

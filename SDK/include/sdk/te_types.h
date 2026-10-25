@@ -65,6 +65,16 @@ extern "C" {
 #define WM_TE_TIMER_TICK (WM_APP + 102)
 #define WM_TE_TASKBAR_MOUSEMOVE (WM_APP + 103)
 
+#ifdef _WIN64
+#define TE_PACK_POINT(x, y) ((LPARAM)(((uint64_t)(uint32_t)(x)) | (((uint64_t)(uint32_t)(y)) << 32)))
+#define TE_UNPACK_POINT_X(lp) ((LONG)(int32_t)((uint64_t)(lp) & 0xFFFFFFFFULL))
+#define TE_UNPACK_POINT_Y(lp) ((LONG)(int32_t)(((uint64_t)(lp) >> 32) & 0xFFFFFFFFULL))
+#else
+#define TE_PACK_POINT(x, y) MAKELPARAM((x), (y))
+#define TE_UNPACK_POINT_X(lp) ((LONG)(short)LOWORD(lp))
+#define TE_UNPACK_POINT_Y(lp) ((LONG)(short)HIWORD(lp))
+#endif
+
 /**
  * Subclass identifier used when subclassing Shell_TrayWnd via SetWindowSubclass.
  * Represents ASCII 'TBEN' (0x5442454E).

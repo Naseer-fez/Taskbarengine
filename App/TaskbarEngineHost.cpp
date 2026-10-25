@@ -15,7 +15,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 void LoadConfigAndNotify(HWND hwnd);
 void SetupTrayIcon(HWND hwnd);
 void RemoveTrayIcon(HWND hwnd);
-bool SendIPCMessage(const TE_IPC_Message& msg, TE_IPC_Message* reply = nullptr);
+bool SendIPCCommand(TE_IpcMsgType type, const void* payload = nullptr, uint32_t payload_len = 0);
 void InjectPayload();
 void UninjectPayload();
 
@@ -25,9 +25,42 @@ void UninjectPayload();
 #define ID_TRAY_RELOAD 1002
 
 NOTIFYICONDATAW nid = {};
+static UINT g_uMsgTaskbarCreated = 0;
+static HMODULE g_hDll = NULL;
 
-int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE /*hPrevInstance*/, PWSTR /*pCmdLine*/, int /*nCmdShow*/) {
-    const wchar_t CLASS_NAME[] = L"TaskbarEngineHostClass";
+int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE /*hPrevInstance*/, PWSTR pCmdLine, int /*nCmdShow*/) {
+    if (pCmdLine && (wcsstr(pCmdLine, L"-exit") || wcsstr(pCmdLine, L"--exit") || wcsstr(pCmdLine, L"/exit"))) {
+        HANDLE hExit = OpenEventW(EVENT_MODIFY_STATE, FALSE, L"TaskbarEngine_Exit_Event");
+        if (hExit) {
+            SetEvent(hExit);
+            CloseHandle(hExit);
+        }
+        return 0;
+    }
+
+    /* Attach to the interactive user desktop if started from background */
+    HDESK hDesk = OpenInputDesktop(0, FALSE, GENERIC_ALL);
+    if (!hDesk) {
+        hDesk = OpenDesktopW(L"Default", 0, FALSE, GENERIC_ALL);
+    }
+    if (hDesk) {
+        SetThreadDesktop(hDesk);
+        CloseDesktop(hDesk);
+    }
+
+    HANDLE hMutex = CreateMutexW(NULL, TRUE, L"TaskbarEngine_Host_SingleInstance_Mutex");
+    if (GetLastError() == ERROR_ALREADY_EXISTS) {
+        if (hMutex) CloseHandle(hMutex);
+        return 0;
+    }
+
+    HANDLE hExitEvent = CreateEventW(NULL, FALSE, FALSE, L"TaskbarEngine_Exit_Event");
+
+    g_uMsgTaskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
+    ChangeWindowMessageFilter(g_uMsgTaskbarCreated, MSGFLT_ADD);
+    ChangeWindowMessageFilter(WM_TRAYICON, MSGFLT_ADD);
+
+    const wchar_t CLASS_NAME[] = L"TaskbarEngineHost";
 
     WNDCLASSW wc = {};
     wc.lpfnWndProc = WindowProc;
@@ -37,30 +70,56 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE /*hPrevInstance*/, PWSTR /*pC
     RegisterClassW(&wc);
 
     HWND hwnd = CreateWindowExW(
-        0, CLASS_NAME, L"TaskbarEngine Host", WS_OVERLAPPEDWINDOW,
+        0, CLASS_NAME, L"TaskbarEngine", WS_OVERLAPPEDWINDOW,
         CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
         NULL, NULL, hInstance, NULL
     );
 
     if (hwnd == NULL) {
+        if (hExitEvent) CloseHandle(hExitEvent);
+        if (hMutex) CloseHandle(hMutex);
         return 0;
     }
 
-    SetupTrayIcon(hwnd);
+    ChangeWindowMessageFilterEx(hwnd, g_uMsgTaskbarCreated, MSGFLT_ALLOW, NULL);
+    ChangeWindowMessageFilterEx(hwnd, WM_TRAYICON, MSGFLT_ALLOW, NULL);
 
-    // Initial config load
-    LoadConfigAndNotify(hwnd);
+    SetupTrayIcon(hwnd);
 
     // Inject Payload
     InjectPayload();
 
+    // Small delay before notifying config
+    Sleep(200);
+
+    // Initial config load
+    LoadConfigAndNotify(hwnd);
+
     MSG msg = {};
-    while (GetMessage(&msg, NULL, 0, 0) > 0) {
-        TranslateMessage(&msg);
-        DispatchMessage(&msg);
+    bool running = true;
+    while (running) {
+        DWORD wait_res = MsgWaitForMultipleObjectsEx(1, &hExitEvent, INFINITE, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+        if (wait_res == WAIT_OBJECT_0) {
+            PostMessageW(hwnd, WM_CLOSE, 0, 0);
+        }
+        while (PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE)) {
+            if (msg.message == WM_QUIT) {
+                running = false;
+                break;
+            }
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
     }
 
-    return 0;
+    if (hExitEvent) {
+        CloseHandle(hExitEvent);
+    }
+    if (hMutex) {
+        CloseHandle(hMutex);
+    }
+
+    return (int)msg.wParam;
 }
 
 void SetupTrayIcon(HWND hwnd) {
@@ -91,67 +150,52 @@ void ShowContextMenu(HWND hwnd, POINT pt) {
 }
 
 void LoadConfigAndNotify(HWND /*hwnd*/) {
-    // Read JSON
-    std::ifstream file("Config/taskbar_config.json");
-    if (!file.is_open()) {
-        file.open("../Config/taskbar_config.json");
-    }
-    if (!file.is_open()) {
-        file.open("../../Config/taskbar_config.json");
-    }
-    if (!file.is_open()) return;
-
-    std::stringstream buffer;
-    buffer << file.rdbuf();
-    std::string jsonStr = buffer.str();
-
-    cJSON* root = cJSON_Parse(jsonStr.c_str());
-    if (!root) return;
-
-    TE_IPC_Config config = {1.5f, 2.0f, 1024.0f, 64.0f, true};
-
-    cJSON* max_scale = cJSON_GetObjectItemCaseSensitive(root, "max_scale");
-    if (cJSON_IsNumber(max_scale)) config.max_scale = (float)max_scale->valuedouble;
-
-    cJSON* spread_width = cJSON_GetObjectItemCaseSensitive(root, "spread_width");
-    if (cJSON_IsNumber(spread_width)) config.spread_width = (float)spread_width->valuedouble;
-
-    cJSON* spring_stiffness = cJSON_GetObjectItemCaseSensitive(root, "spring_stiffness");
-    if (cJSON_IsNumber(spring_stiffness)) config.spring_stiffness = (float)spring_stiffness->valuedouble;
-
-    cJSON* spring_damping = cJSON_GetObjectItemCaseSensitive(root, "spring_damping");
-    if (cJSON_IsNumber(spring_damping)) config.spring_damping = (float)spring_damping->valuedouble;
-
-    cJSON* enable_secondary_monitors = cJSON_GetObjectItemCaseSensitive(root, "enable_secondary_monitors");
-    if (cJSON_IsBool(enable_secondary_monitors)) config.enable_secondary_monitors = cJSON_IsTrue(enable_secondary_monitors);
-
-    cJSON_Delete(root);
-
-    TE_IPC_Message msg = {};
-    msg.type = TE_IPC_MSG_UPDATE_CONFIG;
-    msg.data.config = config;
-
-    SendIPCMessage(msg);
+    SendIPCCommand(TE_IPC_MSG_RELOAD_CONFIG);
 }
 
-bool SendIPCMessage(const TE_IPC_Message& msg, TE_IPC_Message* reply) {
-    HANDLE hPipe = CreateFileW(
-        TE_IPC_PIPE_NAME,
-        GENERIC_READ | GENERIC_WRITE,
-        0, NULL, OPEN_EXISTING, 0, NULL
-    );
+bool SendIPCCommand(TE_IpcMsgType type, const void* payload, uint32_t payload_len) {
+    HANDLE hPipe = INVALID_HANDLE_VALUE;
+    const wchar_t* pipe_names[] = { TE_PIPE_NAME, TE_PIPE_NAME_LEGACY, L"\\\\.\\pipe\\TaskbarEngineIPC" };
 
+    for (int retry = 0; retry < 5; retry++) {
+        for (int p = 0; p < 3; p++) {
+            hPipe = CreateFileW(pipe_names[p], GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+            if (hPipe != INVALID_HANDLE_VALUE) break;
+            if (GetLastError() == ERROR_PIPE_BUSY) {
+                WaitNamedPipeW(pipe_names[p], 200);
+                hPipe = CreateFileW(pipe_names[p], GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+                if (hPipe != INVALID_HANDLE_VALUE) break;
+            }
+        }
+        if (hPipe != INVALID_HANDLE_VALUE) break;
+        Sleep(50);
+    }
     if (hPipe == INVALID_HANDLE_VALUE) {
         return false;
     }
 
-    DWORD bytesWritten = 0;
-    WriteFile(hPipe, &msg, sizeof(msg), &bytesWritten, NULL);
-
-    if (reply) {
-        DWORD bytesRead = 0;
-        ReadFile(hPipe, reply, sizeof(TE_IPC_Message), &bytesRead, NULL);
+    TE_IpcHeader header;
+    if (FAILED(TE_IpcBuildHeader(&header, type, payload_len))) {
+        CloseHandle(hPipe);
+        return false;
     }
+
+    DWORD bytesWritten = 0;
+    if (!WriteFile(hPipe, &header, sizeof(header), &bytesWritten, NULL)) {
+        CloseHandle(hPipe);
+        return false;
+    }
+
+    if (payload_len > 0 && payload != nullptr) {
+        WriteFile(hPipe, payload, payload_len, &bytesWritten, NULL);
+    }
+
+    FlushFileBuffers(hPipe);
+
+    /* Read server acknowledgment to ensure synchronized transaction */
+    TE_IpcHeader resp;
+    DWORD bytesRead = 0;
+    ReadFile(hPipe, &resp, sizeof(resp), &bytesRead, NULL);
 
     CloseHandle(hPipe);
     return true;
@@ -161,16 +205,43 @@ HHOOK g_hHook = NULL;
 void InjectPayload() {
     OutputDebugStringW(L"[TaskbarEngine] InjectPayload called.\n");
     
-    HWND taskbar_hwnd = FindWindowW(L"Shell_TrayWnd", NULL);
-    if (!taskbar_hwnd) return;
+    UninjectPayload();
+
+    HWND taskbar_hwnd = NULL;
+    for (int retry = 0; retry < 10; retry++) {
+        taskbar_hwnd = FindWindowW(L"Shell_TrayWnd", NULL);
+        if (taskbar_hwnd) break;
+        Sleep(200);
+    }
+
+    if (!taskbar_hwnd) {
+        OutputDebugStringW(L"[TaskbarEngine] Failed to locate Shell_TrayWnd.\n");
+        return;
+    }
+
     DWORD explorer_thread_id = GetWindowThreadProcessId(taskbar_hwnd, NULL);
+    if (explorer_thread_id == 0) {
+        OutputDebugStringW(L"[TaskbarEngine] Invalid thread ID for Shell_TrayWnd.\n");
+        return;
+    }
 
     wchar_t path[MAX_PATH];
-    GetModuleFileNameW(NULL, path, MAX_PATH);
-    std::wstring dllPath = path;
-    size_t pos = dllPath.find_last_of(L"\\/");
-    if (pos != std::wstring::npos) {
-        dllPath = dllPath.substr(0, pos) + L"\\EngineDLL.dll";
+    if (!GetModuleFileNameW(NULL, path, MAX_PATH)) return;
+    std::wstring basePath = path;
+    size_t pos = basePath.find_last_of(L"\\/");
+    std::wstring dirPath = (pos != std::wstring::npos) ? basePath.substr(0, pos) : L"";
+
+    std::wstring dllPath = dirPath + L"\\EngineDLL.dll";
+    if (GetFileAttributesW(dllPath.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        std::wstring corePath = dirPath + L"\\Core\\EngineDLL.dll";
+        if (GetFileAttributesW(corePath.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            dllPath = corePath;
+        } else {
+            std::wstring relCorePath = dirPath + L"\\..\\Core\\EngineDLL.dll";
+            if (GetFileAttributesW(relCorePath.c_str()) != INVALID_FILE_ATTRIBUTES) {
+                dllPath = relCorePath;
+            }
+        }
     }
     
     HMODULE hDll = LoadLibraryW(dllPath.c_str());
@@ -182,10 +253,19 @@ void InjectPayload() {
         if (hook_proc) {
             g_hHook = SetWindowsHookExW(WH_GETMESSAGE, hook_proc, hDll, explorer_thread_id);
             if (g_hHook) {
+                g_hDll = hDll;
                 PostMessageW(taskbar_hwnd, WM_NULL, 0, 0);
                 OutputDebugStringW(L"[TaskbarEngine] Hook successfully installed.\n");
+            } else {
+                FreeLibrary(hDll);
+                OutputDebugStringW(L"[TaskbarEngine] SetWindowsHookExW failed.\n");
             }
+        } else {
+            FreeLibrary(hDll);
+            OutputDebugStringW(L"[TaskbarEngine] Could not locate TE_GetMsgHookProc.\n");
         }
+    } else {
+        OutputDebugStringW(L"[TaskbarEngine] Could not load EngineDLL.dll.\n");
     }
 }
 
@@ -194,9 +274,19 @@ void UninjectPayload() {
         UnhookWindowsHookEx(g_hHook);
         g_hHook = NULL;
     }
+    if (g_hDll) {
+        FreeLibrary(g_hDll);
+        g_hDll = NULL;
+    }
 }
 
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+    if (uMsg == g_uMsgTaskbarCreated && g_uMsgTaskbarCreated != 0) {
+        SetupTrayIcon(hwnd);
+        InjectPayload();
+        return 0;
+    }
+
     switch (uMsg) {
         case WM_TRAYICON:
             if (LOWORD(lParam) == WM_RBUTTONUP) {
@@ -215,6 +305,8 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
             return 0;
 
         case WM_CLOSE:
+            SendIPCCommand(TE_IPC_MSG_SHUTDOWN);
+            Sleep(200);
             RemoveTrayIcon(hwnd);
             UninjectPayload();
             DestroyWindow(hwnd);

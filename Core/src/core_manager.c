@@ -64,37 +64,65 @@ HRESULT TE_CoreManagerInit(HWND taskbar_hwnd) {
         }
 
         if (!user_config_found) {
-            wchar_t candidate[MAX_PATH];
-            swprintf(candidate, MAX_PATH, L"%s\\..\\Config\\default_config.jsonc", dll_path);
-            if (GetFileAttributesW(candidate) != INVALID_FILE_ATTRIBUTES) {
-                wcsncpy_s(g_core.config_path, MAX_PATH, candidate, _TRUNCATE);
-                swprintf(g_core.config_dir, MAX_PATH, L"%s\\..\\Config", dll_path);
-            } else {
-                swprintf(candidate, MAX_PATH, L"%s\\Config\\default_config.jsonc", dll_path);
+            const wchar_t* config_candidates[] = {
+                L"%s\\Config\\config.jsonc",
+                L"%s\\Config\\default_config.jsonc",
+                L"%s\\config.jsonc",
+                L"%s\\default_config.jsonc",
+                L"%s\\..\\Config\\config.jsonc",
+                L"%s\\..\\Config\\default_config.jsonc",
+                L"%s\\..\\config.jsonc",
+                L"%s\\..\\default_config.jsonc",
+                L"%s\\..\\..\\Config\\config.jsonc",
+                L"%s\\..\\..\\Config\\default_config.jsonc"
+            };
+            BOOL config_found = FALSE;
+            for (size_t i = 0; i < sizeof(config_candidates)/sizeof(config_candidates[0]); i++) {
+                wchar_t candidate[MAX_PATH];
+                swprintf(candidate, MAX_PATH, config_candidates[i], dll_path);
                 if (GetFileAttributesW(candidate) != INVALID_FILE_ATTRIBUTES) {
                     wcsncpy_s(g_core.config_path, MAX_PATH, candidate, _TRUNCATE);
-                    swprintf(g_core.config_dir, MAX_PATH, L"%s\\Config", dll_path);
-                } else {
-                    swprintf(candidate, MAX_PATH, L"%s\\..\\..\\Config\\default_config.jsonc", dll_path);
-                    wcsncpy_s(g_core.config_path, MAX_PATH, candidate, _TRUNCATE);
-                    swprintf(g_core.config_dir, MAX_PATH, L"%s\\..\\..\\Config", dll_path);
+                    wcsncpy_s(g_core.config_dir, MAX_PATH, candidate, _TRUNCATE);
+                    PathRemoveFileSpecW(g_core.config_dir);
+                    config_found = TRUE;
+                    break;
                 }
+            }
+            if (!config_found) {
+                swprintf(g_core.config_path, MAX_PATH, L"%s\\Config\\default_config.jsonc", dll_path);
+                swprintf(g_core.config_dir, MAX_PATH, L"%s\\Config", dll_path);
             }
         }
 
-        swprintf(g_core.log_dir, MAX_PATH, L"%s\\..\\Logs", dll_path);
-        
-        wchar_t candidate_mod[MAX_PATH];
-        swprintf(candidate_mod, MAX_PATH, L"%s\\..\\Modules", dll_path);
-        if (GetFileAttributesW(candidate_mod) != INVALID_FILE_ATTRIBUTES) {
-            wcsncpy_s(g_core.modules_dir, MAX_PATH, candidate_mod, _TRUNCATE);
-        } else {
-            swprintf(candidate_mod, MAX_PATH, L"%s\\Modules", dll_path);
-            if (GetFileAttributesW(candidate_mod) != INVALID_FILE_ATTRIBUTES) {
-                wcsncpy_s(g_core.modules_dir, MAX_PATH, candidate_mod, _TRUNCATE);
-            } else {
-                swprintf(g_core.modules_dir, MAX_PATH, L"%s\\..\\..\\Modules", dll_path);
+        swprintf(g_core.log_dir, MAX_PATH, L"%s\\Logs", dll_path);
+        DWORD log_attrs = GetFileAttributesW(g_core.log_dir);
+        if (log_attrs == INVALID_FILE_ATTRIBUTES) {
+            wchar_t parent_logs[MAX_PATH];
+            swprintf(parent_logs, MAX_PATH, L"%s\\..\\Logs", dll_path);
+            if (GetFileAttributesW(parent_logs) != INVALID_FILE_ATTRIBUTES) {
+                wcsncpy_s(g_core.log_dir, MAX_PATH, parent_logs, _TRUNCATE);
             }
+        }
+        
+        const wchar_t* mod_candidates[] = {
+            L"%s\\Modules",
+            L"%s\\..\\Modules",
+            L"%s\\..\\..\\Modules",
+            L"%s"
+        };
+        BOOL mod_found = FALSE;
+        for (size_t i = 0; i < sizeof(mod_candidates)/sizeof(mod_candidates[0]); i++) {
+            wchar_t candidate_mod[MAX_PATH];
+            swprintf(candidate_mod, MAX_PATH, mod_candidates[i], dll_path);
+            DWORD attrs = GetFileAttributesW(candidate_mod);
+            if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY)) {
+                wcsncpy_s(g_core.modules_dir, MAX_PATH, candidate_mod, _TRUNCATE);
+                mod_found = TRUE;
+                break;
+            }
+        }
+        if (!mod_found) {
+            swprintf(g_core.modules_dir, MAX_PATH, L"%s\\Modules", dll_path);
         }
         wchar_t canon[MAX_PATH];
         if (GetFullPathNameW(g_core.config_path, MAX_PATH, canon, NULL)) {
@@ -194,6 +222,7 @@ void TE_CoreManagerShutdownExcept(HWND except_hwnd) {
     TE_LogFlush();
     TE_LogShutdown();
     memset(&g_core, 0, sizeof(g_core));
+    TE_EngineResetInit();
 }
 
 void TE_CoreManagerShutdown(void) {

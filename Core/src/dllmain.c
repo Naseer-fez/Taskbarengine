@@ -53,13 +53,12 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
     switch (fdwReason) {
         case DLL_PROCESS_ATTACH:
         {
+            DisableThreadLibraryCalls(hinstDLL);
+            g_hinstDLL = hinstDLL;
+
             if (!TE_IsExplorerProcess()) {
                 return TRUE;
             }
-            
-            DisableThreadLibraryCalls(hinstDLL);
-            g_hinstDLL = hinstDLL;
-            // Initialization deferred to TE_GetMsgHookProc to avoid Loader Lock deadlocks
             break;
         }
         case DLL_PROCESS_DETACH:
@@ -94,7 +93,17 @@ LRESULT CALLBACK TE_GetMsgHookProc(int nCode, WPARAM wParam, LPARAM lParam)
         }
 
         if (msg->message == WM_MOUSEMOVE && g_taskbarHwnd) {
-            PostMessageW(g_taskbarHwnd, WM_TE_TASKBAR_MOUSEMOVE, (WPARAM)msg->hwnd, MAKELPARAM(msg->pt.x, msg->pt.y));
+            static POINT s_last_hook_pt = { -999999, -999999 };
+            if (msg->pt.x != s_last_hook_pt.x || msg->pt.y != s_last_hook_pt.y) {
+                HWND target_root = TE_TaskbarFindRoot(msg->hwnd);
+                if (!target_root && (msg->hwnd == g_taskbarHwnd || IsChild(g_taskbarHwnd, msg->hwnd))) {
+                    target_root = g_taskbarHwnd;
+                }
+                if (target_root) {
+                    s_last_hook_pt = msg->pt;
+                    PostMessageW(target_root, WM_TE_TASKBAR_MOUSEMOVE, (WPARAM)msg->hwnd, TE_PACK_POINT(msg->pt.x, msg->pt.y));
+                }
+            }
         }
     }
     return CallNextHookEx(NULL, nCode, wParam, lParam);
@@ -109,4 +118,10 @@ LRESULT CALLBACK TE_CBTHookProc(int nCode, WPARAM wParam, LPARAM lParam)
 HINSTANCE TE_EngineGetInstance(void)
 {
     return g_hinstDLL;
+}
+
+void TE_EngineResetInit(void)
+{
+    InterlockedExchange(&g_is_initialized, 2);
+    g_taskbarHwnd = NULL;
 }

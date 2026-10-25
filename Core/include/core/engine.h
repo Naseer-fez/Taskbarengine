@@ -30,6 +30,9 @@ HINSTANCE TE_EngineGetInstance(void);
 /** Check if the current process is explorer.exe. */
 BOOL TE_IsExplorerProcess(void);
 
+/** Reset engine initialization state so hook can re-initialize after shutdown. */
+void TE_EngineResetInit(void);
+
 #ifdef __cplusplus
 }
 #endif

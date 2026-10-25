@@ -242,13 +242,16 @@ LRESULT CALLBACK TE_TaskbarSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             return 0;
             
         case WM_TE_TASKBAR_MOUSEMOVE: {
+            if (!TE_CoreManagerIsInitialized()) return 0;
             HWND target_hwnd = (HWND)wParam;
             HWND root = TE_TaskbarFindRoot(target_hwnd);
+            if (!root) root = TE_TaskbarFindRoot(hwnd);
+            if (!root) root = hwnd;
             if (root) {
                 TE_TaskbarEnsureTimer(root);
                 TE_TaskbarMouseData mouse_data;
-                mouse_data.cursor_pos.x = (short)LOWORD(lParam);
-                mouse_data.cursor_pos.y = (short)HIWORD(lParam);
+                mouse_data.cursor_pos.x = TE_UNPACK_POINT_X(lParam);
+                mouse_data.cursor_pos.y = TE_UNPACK_POINT_Y(lParam);
                 mouse_data.is_in_taskbar = TRUE;
                 mouse_data.is_dragging = ((GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0);
                 mouse_data.taskbar_hwnd = root;
@@ -267,6 +270,7 @@ LRESULT CALLBACK TE_TaskbarSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             return 0;
             
         case WM_DPICHANGED: {
+            if (!TE_CoreManagerIsInitialized()) break;
             TE_DpiChangedData data;
             data.old_dpi = TE_CoreManagerGetDpi();
             data.new_dpi = HIWORD(wParam);
@@ -277,6 +281,7 @@ LRESULT CALLBACK TE_TaskbarSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
         }
         
         case WM_DISPLAYCHANGE: {
+            if (!TE_CoreManagerIsInitialized()) break;
             HWND primary_tb = TE_CoreManagerGetTaskbarHwnd();
             if (hwnd != primary_tb) {
                 break;

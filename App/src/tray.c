@@ -40,7 +40,10 @@ HRESULT TE_TrayCreate(HWND hwnd_owner, UINT callback_msg)
     g_nid.dwInfoFlags = NIIF_INFO;
 
     if (!Shell_NotifyIconW(NIM_ADD, &g_nid)) {
-        return TE_E_FAIL;
+        g_nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+        if (!Shell_NotifyIconW(NIM_ADD, &g_nid)) {
+            return TE_E_FAIL;
+        }
     }
 
     g_nid.uVersion = NOTIFYICON_VERSION_4;

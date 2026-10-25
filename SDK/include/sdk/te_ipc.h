@@ -32,7 +32,8 @@ typedef struct TE_IpcHeader {
     uint32_t payload_length;
 } TE_IpcHeader;
 
-#define TE_PIPE_NAME L"\\\\.\\pipe\\TaskbarEngine"
+#define TE_PIPE_NAME L"\\\\.\\pipe\\TaskbarEngine_IPC"
+#define TE_PIPE_NAME_LEGACY L"\\\\.\\pipe\\TaskbarEngine"
 
 HRESULT TE_IpcBuildHeader(TE_IpcHeader* out_header, TE_IpcMsgType type, uint32_t payload_length);
 HRESULT TE_IpcValidateHeader(const TE_IpcHeader* header);

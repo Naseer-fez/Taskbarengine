@@ -565,7 +565,7 @@ static VOID CALLBACK FrameTimerCallback(PVOID lpParam, BOOLEAN timer_or_wait_fir
     /* SYS-009: Explicitly initialize COM as MTA upon entry if uninitialized */
     struct ComMtaScopeGuard {
         HRESULT hr;
-        ComMtaScopeGuard() { hr = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED); }
+        ComMtaScopeGuard() { hr = CoInitializeEx(NULL, COINIT_MULTITHREADED); }
         ~ComMtaScopeGuard() { if (SUCCEEDED(hr)) CoUninitialize(); }
     } com_guard;
 
@@ -664,11 +664,7 @@ static VOID CALLBACK FrameTimerCallback(PVOID lpParam, BOOLEAN timer_or_wait_fir
 
     if (any_monitor_dirty || island_dirty) {
         /* Single composition commit presents all targets across all displays */
-        HRESULT hr = TE_DCompCommit();
-        if (FAILED(hr)) {
-            all_monitors_settled = true;
-            island_settled = true;
-        }
+        TE_DCompCommit();
     }
 
     /* Check if settle animation is complete across all monitors and dynamic island */
