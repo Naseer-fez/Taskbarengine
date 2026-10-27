@@ -55,6 +55,9 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE /*hPrevInstance*/, PWSTR pCmd
     }
 
     HANDLE hExitEvent = CreateEventW(NULL, FALSE, FALSE, L"TaskbarEngine_Exit_Event");
+    if (hExitEvent) {
+        ResetEvent(hExitEvent);
+    }
 
     g_uMsgTaskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
     ChangeWindowMessageFilter(g_uMsgTaskbarCreated, MSGFLT_ADD);
@@ -100,7 +103,11 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE /*hPrevInstance*/, PWSTR pCmd
     while (running) {
         DWORD wait_res = MsgWaitForMultipleObjectsEx(1, &hExitEvent, INFINITE, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
         if (wait_res == WAIT_OBJECT_0) {
-            PostMessageW(hwnd, WM_CLOSE, 0, 0);
+            SendMessageW(hwnd, WM_CLOSE, 0, 0);
+            running = false;
+            break;
+        } else if (wait_res == WAIT_FAILED) {
+            break;
         }
         while (PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE)) {
             if (msg.message == WM_QUIT) {
@@ -112,6 +119,9 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE /*hPrevInstance*/, PWSTR pCmd
         }
     }
 
+    RemoveTrayIcon(hwnd);
+    UninjectPayload();
+
     if (hExitEvent) {
         CloseHandle(hExitEvent);
     }
@@ -119,7 +129,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE /*hPrevInstance*/, PWSTR pCmd
         CloseHandle(hMutex);
     }
 
-    return (int)msg.wParam;
+    return 0;
 }
 
 void SetupTrayIcon(HWND hwnd) {
@@ -131,11 +141,27 @@ void SetupTrayIcon(HWND hwnd) {
     nid.hIcon = LoadIcon(NULL, IDI_APPLICATION); // Placeholder for a sleek custom icon
     wcscpy_s(nid.szTip, 128, L"TaskbarEngine (Running)");
 
-    Shell_NotifyIconW(NIM_ADD, &nid);
+    HANDLE hThread = CreateThread(NULL, 0, [](LPVOID) -> DWORD {
+        NOTIFYICONDATAW local_nid = nid;
+        Shell_NotifyIconW(NIM_ADD, &local_nid);
+        return 0;
+    }, NULL, 0, NULL);
+    if (hThread) {
+        WaitForSingleObject(hThread, 1500);
+        CloseHandle(hThread);
+    }
 }
 
 void RemoveTrayIcon(HWND /*hwnd*/) {
-    Shell_NotifyIconW(NIM_DELETE, &nid);
+    HANDLE hThread = CreateThread(NULL, 0, [](LPVOID) -> DWORD {
+        NOTIFYICONDATAW local_nid = nid;
+        Shell_NotifyIconW(NIM_DELETE, &local_nid);
+        return 0;
+    }, NULL, 0, NULL);
+    if (hThread) {
+        WaitForSingleObject(hThread, 1500);
+        CloseHandle(hThread);
+    }
 }
 
 void ShowContextMenu(HWND hwnd, POINT pt) {
@@ -159,11 +185,11 @@ bool SendIPCCommand(TE_IpcMsgType type, const void* payload, uint32_t payload_le
 
     for (int retry = 0; retry < 5; retry++) {
         for (int p = 0; p < 3; p++) {
-            hPipe = CreateFileW(pipe_names[p], GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+            hPipe = CreateFileW(pipe_names[p], GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, NULL);
             if (hPipe != INVALID_HANDLE_VALUE) break;
             if (GetLastError() == ERROR_PIPE_BUSY) {
                 WaitNamedPipeW(pipe_names[p], 200);
-                hPipe = CreateFileW(pipe_names[p], GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+                hPipe = CreateFileW(pipe_names[p], GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, NULL);
                 if (hPipe != INVALID_HANDLE_VALUE) break;
             }
         }
@@ -180,23 +206,73 @@ bool SendIPCCommand(TE_IpcMsgType type, const void* payload, uint32_t payload_le
         return false;
     }
 
-    DWORD bytesWritten = 0;
-    if (!WriteFile(hPipe, &header, sizeof(header), &bytesWritten, NULL)) {
+    OVERLAPPED ol = {};
+    ol.hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
+    if (!ol.hEvent) {
         CloseHandle(hPipe);
         return false;
     }
 
+    DWORD bytesWritten = 0;
+    if (!WriteFile(hPipe, &header, sizeof(header), &bytesWritten, &ol)) {
+        if (GetLastError() == ERROR_IO_PENDING) {
+            DWORD wait_res = WaitForSingleObject(ol.hEvent, 3000);
+            if (wait_res != WAIT_OBJECT_0 || !GetOverlappedResult(hPipe, &ol, &bytesWritten, FALSE)) {
+                CancelIoEx(hPipe, &ol);
+                DWORD dummy = 0;
+                GetOverlappedResult(hPipe, &ol, &dummy, TRUE);
+                CloseHandle(ol.hEvent);
+                CloseHandle(hPipe);
+                return false;
+            }
+        } else {
+            CloseHandle(ol.hEvent);
+            CloseHandle(hPipe);
+            return false;
+        }
+    }
+
     if (payload_len > 0 && payload != nullptr) {
-        WriteFile(hPipe, payload, payload_len, &bytesWritten, NULL);
+        ResetEvent(ol.hEvent);
+        ol.Offset = 0; ol.OffsetHigh = 0;
+        if (!WriteFile(hPipe, payload, payload_len, &bytesWritten, &ol)) {
+            if (GetLastError() == ERROR_IO_PENDING) {
+                DWORD wait_res = WaitForSingleObject(ol.hEvent, 3000);
+                if (wait_res != WAIT_OBJECT_0 || !GetOverlappedResult(hPipe, &ol, &bytesWritten, FALSE)) {
+                    CancelIoEx(hPipe, &ol);
+                    DWORD dummy = 0;
+                    GetOverlappedResult(hPipe, &ol, &dummy, TRUE);
+                    CloseHandle(ol.hEvent);
+                    CloseHandle(hPipe);
+                    return false;
+                }
+            } else {
+                CloseHandle(ol.hEvent);
+                CloseHandle(hPipe);
+                return false;
+            }
+        }
     }
 
     FlushFileBuffers(hPipe);
 
     /* Read server acknowledgment to ensure synchronized transaction */
+    ResetEvent(ol.hEvent);
+    ol.Offset = 0; ol.OffsetHigh = 0;
     TE_IpcHeader resp;
     DWORD bytesRead = 0;
-    ReadFile(hPipe, &resp, sizeof(resp), &bytesRead, NULL);
+    if (!ReadFile(hPipe, &resp, sizeof(resp), &bytesRead, &ol)) {
+        if (GetLastError() == ERROR_IO_PENDING) {
+            DWORD wait_res = WaitForSingleObject(ol.hEvent, 3000);
+            if (wait_res != WAIT_OBJECT_0 || !GetOverlappedResult(hPipe, &ol, &bytesRead, FALSE)) {
+                CancelIoEx(hPipe, &ol);
+                DWORD dummy = 0;
+                GetOverlappedResult(hPipe, &ol, &dummy, TRUE);
+            }
+        }
+    }
 
+    CloseHandle(ol.hEvent);
     CloseHandle(hPipe);
     return true;
 }
