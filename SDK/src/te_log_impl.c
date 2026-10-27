@@ -188,7 +188,7 @@ void TE_LogShutdown(void) {
         SetEvent(g_shutdown_event);
     }
     if (g_flush_thread) {
-        WaitForSingleObject(g_flush_thread, INFINITE);
+        WaitForSingleObject(g_flush_thread, 3000);
         CloseHandle(g_flush_thread);
         g_flush_thread = NULL;
     }
