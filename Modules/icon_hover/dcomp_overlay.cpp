@@ -99,8 +99,9 @@ static UINT s_start_pixel_stride = 0;
 
 static HWND s_overlay_hwnd_ref = NULL;
 
-/** Window class registration flag. */
+/** Window class registration flag and owner instance. */
 static BOOL s_class_registered = FALSE;
+static HINSTANCE s_class_hinstance = NULL;
 
 /** Overlay window procedure — transparent to all mouse input. */
 static LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
@@ -125,6 +126,17 @@ HWND TE_DCompCreateOverlayWindow(HWND taskbar_hwnd, int x, int y, int width, int
 
     /* Register overlay window class once */
     if (!s_class_registered) {
+        /* In case a previous instance of icon_hover.dll left OVERLAY_CLASS_NAME registered,
+           cleanly destroy any stale overlay windows and unregister the stale class first
+           so RegisterClassExW associates OVERLAY_CLASS_NAME with our current OverlayWndProc. */
+        HWND stale_wnd = FindWindowExW(NULL, NULL, OVERLAY_CLASS_NAME, NULL);
+        while (stale_wnd) {
+            DestroyWindow(stale_wnd);
+            stale_wnd = FindWindowExW(NULL, NULL, OVERLAY_CLASS_NAME, NULL);
+        }
+        UnregisterClassW(OVERLAY_CLASS_NAME, hinstance);
+        UnregisterClassW(OVERLAY_CLASS_NAME, GetModuleHandleW(NULL));
+
         WNDCLASSEXW wc = {};
         wc.cbSize = sizeof(WNDCLASSEXW);
         wc.lpfnWndProc = OverlayWndProc;
@@ -133,13 +145,18 @@ HWND TE_DCompCreateOverlayWindow(HWND taskbar_hwnd, int x, int y, int width, int
         wc.style = CS_HREDRAW | CS_VREDRAW;
 
         if (!RegisterClassExW(&wc)) {
-            /* Class may already be registered from a previous enable/disable cycle */
-            if (GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
+            if (GetLastError() == ERROR_CLASS_ALREADY_EXISTS) {
+                UnregisterClassW(OVERLAY_CLASS_NAME, hinstance);
+                if (!RegisterClassExW(&wc)) {
+                    TE_LogWrite(TE_LOG_WARNING, LOG_TAG, "Re-registration of overlay class failed, proceeding");
+                }
+            } else {
                 TE_LogWrite(TE_LOG_ERROR, LOG_TAG, "Failed to register overlay window class");
                 return NULL;
             }
         }
         s_class_registered = TRUE;
+        s_class_hinstance = hinstance;
     }
 
     HWND overlay = CreateWindowExW(
@@ -190,6 +207,14 @@ void TE_DCompDestroyOverlayWindow(HWND overlay_hwnd)
         }
         DestroyWindow(overlay_hwnd);
         TE_LogWrite(TE_LOG_INFO, LOG_TAG, "Overlay window destroyed");
+
+        /* If no more overlay windows exist, cleanly unregister the window class */
+        if (!FindWindowExW(NULL, NULL, OVERLAY_CLASS_NAME, NULL)) {
+            HINSTANCE hInstToUnreg = s_class_hinstance ? s_class_hinstance : GetModuleHandleW(NULL);
+            UnregisterClassW(OVERLAY_CLASS_NAME, hInstToUnreg);
+            s_class_registered = FALSE;
+            s_class_hinstance = NULL;
+        }
     }
 }
 
@@ -423,6 +448,14 @@ void TE_DCompDestroyDevice(void)
     if (s_dcomp_device) { s_dcomp_device->Release(); s_dcomp_device = nullptr; }
     if (s_d3d_device) { s_d3d_device->Release(); s_d3d_device = nullptr; }
     if (s_d2d_factory) { s_d2d_factory->Release(); s_d2d_factory = nullptr; }
+
+    /* Cleanly unregister overlay class if no overlay windows remain */
+    if (!FindWindowExW(NULL, NULL, OVERLAY_CLASS_NAME, NULL)) {
+        HINSTANCE hInstToUnreg = s_class_hinstance ? s_class_hinstance : GetModuleHandleW(NULL);
+        UnregisterClassW(OVERLAY_CLASS_NAME, hInstToUnreg);
+        s_class_registered = FALSE;
+        s_class_hinstance = NULL;
+    }
 
     TE_LogWrite(TE_LOG_INFO, LOG_TAG, "DComp device destroyed");
 }
@@ -935,6 +968,8 @@ HRESULT TE_DCompHandleDeviceLoss(void)
     if (cached_path[0] != L'\0' && custom_start) {
         TE_DCompLoadStartImage(cached_path);
     }
+
+    TE_IconHoverTriggerAsyncDiscovery();
 
     TE_LogWrite(TE_LOG_INFO, LOG_TAG, "DirectComposition device loss recovery succeeded");
     return TE_S_OK;
