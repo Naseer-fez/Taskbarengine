@@ -92,6 +92,7 @@ static char* GenerateSettingsJson(void) {
 }
 
 static HRESULT TE_IpcServerReadExact(HANDLE pipe, void* buffer, DWORD bytes, LPOVERLAPPED ol) {
+    if (!pipe || pipe == INVALID_HANDLE_VALUE || (!buffer && bytes > 0) || !ol) return E_INVALIDARG;
     DWORD total = 0;
     HANDLE wait_handles[2] = { ol->hEvent, g_ipc.hStopEvent };
     while (total < bytes) {
@@ -123,6 +124,7 @@ static HRESULT TE_IpcServerReadExact(HANDLE pipe, void* buffer, DWORD bytes, LPO
 }
 
 static HRESULT TE_IpcServerWriteExact(HANDLE pipe, const void* buffer, DWORD bytes, LPOVERLAPPED ol) {
+    if (!pipe || pipe == INVALID_HANDLE_VALUE || (!buffer && bytes > 0) || !ol) return E_INVALIDARG;
     DWORD total = 0;
     HANDLE wait_handles[2] = { ol->hEvent, g_ipc.hStopEvent };
     while (total < bytes) {
@@ -176,7 +178,7 @@ static DWORD WINAPI TE_IpcServerThread(LPVOID lpParam) {
 
     HANDLE handles[2] = { connect_ol.hEvent, g_ipc.hStopEvent };
 
-    while (g_ipc.is_running) {
+    while (g_ipc.is_running && g_ipc.hPipe && g_ipc.hPipe != INVALID_HANDLE_VALUE) {
         BOOL connected = FALSE;
         ResetEvent(connect_ol.hEvent);
         connect_ol.Offset = 0;
@@ -228,18 +230,19 @@ static DWORD WINAPI TE_IpcServerThread(LPVOID lpParam) {
                             TE_IpcBuildHeader(&resp_hdr, TE_IPC_MSG_STATUS, 0);
                             TE_IpcServerWriteExact(g_ipc.hPipe, &resp_hdr, sizeof(resp_hdr), &write_ol);
                         } else if (header.type == TE_IPC_MSG_SHUTDOWN) {
-                            /* Set is_running to FALSE so TE_IpcServerStop() will not block waiting on this thread */
-                            g_ipc.is_running = FALSE;
-                            if (g_ipc.taskbar_hwnd && IsWindow(g_ipc.taskbar_hwnd)) {
-                                DWORD_PTR dwResult = 0;
-                                SendMessageTimeoutW(g_ipc.taskbar_hwnd, WM_TE_IPC_COMMAND, TE_CMD_SHUTDOWN, 0,
-                                                    SMTO_ABORTIFHUNG | SMTO_BLOCK, 4000, &dwResult);
-                            }
+                            /* Respond with acknowledgment packet and flush pipe buffers before initiating teardown */
                             TE_IpcHeader resp_hdr;
                             TE_IpcBuildHeader(&resp_hdr, TE_IPC_MSG_STATUS, 0);
                             TE_IpcServerWriteExact(g_ipc.hPipe, &resp_hdr, sizeof(resp_hdr), &write_ol);
                             FlushFileBuffers(g_ipc.hPipe);
                             DisconnectNamedPipe(g_ipc.hPipe);
+
+                            g_ipc.is_running = FALSE;
+                            if (g_ipc.taskbar_hwnd && IsWindow(g_ipc.taskbar_hwnd)) {
+                                DWORD_PTR dwResult = 0;
+                                SendMessageTimeoutW(g_ipc.taskbar_hwnd, WM_TE_IPC_COMMAND, TE_CMD_SHUTDOWN, 0,
+                                                    SMTO_ABORTIFHUNG | SMTO_NORMAL, 3000, &dwResult);
+                            }
                             break;
                         } else if (header.type == TE_IPC_MSG_ENABLE_PLUGIN || header.type == TE_IPC_MSG_DISABLE_PLUGIN) {
                             if (IsWindow(g_ipc.taskbar_hwnd)) {
@@ -294,18 +297,6 @@ static DWORD WINAPI TE_IpcServerThread(LPVOID lpParam) {
     CloseHandle(connect_ol.hEvent);
     CloseHandle(read_ol.hEvent);
     CloseHandle(write_ol.hEvent);
-    if (g_ipc.hPipe && g_ipc.hPipe != INVALID_HANDLE_VALUE) {
-        CloseHandle(g_ipc.hPipe);
-        g_ipc.hPipe = NULL;
-    }
-    if (g_ipc.hStopEvent) {
-        CloseHandle(g_ipc.hStopEvent);
-        g_ipc.hStopEvent = NULL;
-    }
-    if (g_ipc.hThread) {
-        CloseHandle(g_ipc.hThread);
-        g_ipc.hThread = NULL;
-    }
     return 0;
 }
 
@@ -365,7 +356,7 @@ HRESULT TE_IpcServerStart(HWND taskbar_hwnd) {
 }
 
 void TE_IpcServerStop(void) {
-    if (!g_ipc.is_running) return;
+    if (!g_ipc.is_running && !g_ipc.hThread && !g_ipc.hPipe && !g_ipc.hStopEvent) return;
     
     g_ipc.is_running = FALSE;
     if (g_ipc.hStopEvent) {
@@ -375,8 +366,10 @@ void TE_IpcServerStop(void) {
         CancelIoEx(g_ipc.hPipe, NULL);
     }
     
-    if (g_ipc.hThread && GetCurrentThreadId() != GetThreadId(g_ipc.hThread)) {
-        WaitForSingleObject(g_ipc.hThread, 3000);
+    if (g_ipc.hThread) {
+        if (GetCurrentThreadId() != GetThreadId(g_ipc.hThread)) {
+            WaitForSingleObject(g_ipc.hThread, 3000);
+        }
         CloseHandle(g_ipc.hThread);
         g_ipc.hThread = NULL;
     }
