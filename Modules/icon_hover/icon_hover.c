@@ -574,8 +574,8 @@ static DWORD WINAPI UiaDiscoveryWorkerThread(LPVOID lpParam) {
         if (!events[0] || !events[1]) break;
 
         DWORD wr = WaitForMultipleObjects(2, events, FALSE, INFINITE);
-        if (wr == WAIT_OBJECT_0) {
-            break; /* Stop event signaled */
+        if (wr == WAIT_OBJECT_0 || wr == WAIT_FAILED) {
+            break; /* Stop event signaled or wait failed */
         }
         if (wr == WAIT_OBJECT_0 + 1) {
             if (!g_hover_state.enabled || WaitForSingleObject(s_discovery_stop_event, 0) == WAIT_OBJECT_0) {
@@ -1307,6 +1307,8 @@ static HRESULT Disable(void) {
 
     if (g_hover_state.monitors[0].taskbar_hwnd) {
         RemoveWindowSubclass(g_hover_state.monitors[0].taskbar_hwnd, IconHoverSubclassProc, SUBCLASS_HOVER_ID);
+    } else if (g_hover_state.ctx && g_hover_state.ctx->taskbar_hwnd) {
+        RemoveWindowSubclass(g_hover_state.ctx->taskbar_hwnd, IconHoverSubclassProc, SUBCLASS_HOVER_ID);
     }
 
     /* Destroy secondary overlay windows and targets */
@@ -1356,6 +1358,12 @@ static HRESULT Disable(void) {
         if (p) free(p);
     }
 
+    /* Cancel pending shell hook debounce timer */
+    if (s_shell_hook_rebuild_timer) {
+        KillTimer(NULL, s_shell_hook_rebuild_timer);
+        s_shell_hook_rebuild_timer = 0;
+    }
+
     /* Release icon cache */
     TE_IconCaptureShutdown();
 
@@ -1371,6 +1379,29 @@ static HRESULT Update(float delta_time) {
 
 static HRESULT Shutdown(void) {
     HoverLog(TE_LOG_INFO, "Shutdown called");
+    if (s_shell_hook_rebuild_timer) {
+        KillTimer(NULL, s_shell_hook_rebuild_timer);
+        s_shell_hook_rebuild_timer = 0;
+    }
+    AcquireSRWLockExclusive(&s_discovery_lock);
+    if (s_discovery_stop_event) {
+        SetEvent(s_discovery_stop_event);
+    }
+    if (s_discovery_thread) {
+        WaitForSingleObject(s_discovery_thread, 3000);
+        CloseHandle(s_discovery_thread);
+        s_discovery_thread = NULL;
+    }
+    if (s_discovery_trigger_event) {
+        CloseHandle(s_discovery_trigger_event);
+        s_discovery_trigger_event = NULL;
+    }
+    if (s_discovery_stop_event) {
+        CloseHandle(s_discovery_stop_event);
+        s_discovery_stop_event = NULL;
+    }
+    ReleaseSRWLockExclusive(&s_discovery_lock);
+
     TE_DynamicIslandShutdown();
     TE_FrameLoopShutdown();
     g_hover_state.ctx = NULL;
