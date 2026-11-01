@@ -8,6 +8,20 @@
 static NOTIFYICONDATAW g_nid = {0};
 static BOOL g_tray_created = FALSE;
 
+static DWORD WINAPI TrayAddWorker(LPVOID param)
+{
+    NOTIFYICONDATAW* pnid = (NOTIFYICONDATAW*)param;
+    if (pnid) {
+        if (!Shell_NotifyIconW(NIM_ADD, pnid)) {
+            pnid->uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+            Shell_NotifyIconW(NIM_ADD, pnid);
+        }
+        pnid->uVersion = NOTIFYICON_VERSION_4;
+        Shell_NotifyIconW(NIM_SETVERSION, pnid);
+    }
+    return 0;
+}
+
 HRESULT TE_TrayCreate(HWND hwnd_owner, UINT callback_msg)
 {
     if (g_tray_created) {
@@ -39,24 +53,33 @@ HRESULT TE_TrayCreate(HWND hwnd_owner, UINT callback_msg)
     StringCchCopyW(g_nid.szInfoTitle, ARRAYSIZE(g_nid.szInfoTitle), L"TaskbarEngine");
     g_nid.dwInfoFlags = NIIF_INFO;
 
-    if (!Shell_NotifyIconW(NIM_ADD, &g_nid)) {
-        g_nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
-        if (!Shell_NotifyIconW(NIM_ADD, &g_nid)) {
-            return TE_E_FAIL;
-        }
+    HANDLE hThread = CreateThread(NULL, 0, TrayAddWorker, &g_nid, 0, NULL);
+    if (hThread) {
+        WaitForSingleObject(hThread, 1500);
+        CloseHandle(hThread);
     }
-
-    g_nid.uVersion = NOTIFYICON_VERSION_4;
-    Shell_NotifyIconW(NIM_SETVERSION, &g_nid);
 
     g_tray_created = TRUE;
     return TE_S_OK;
 }
 
+static DWORD WINAPI TrayDestroyWorker(LPVOID param)
+{
+    NOTIFYICONDATAW* pnid = (NOTIFYICONDATAW*)param;
+    if (pnid) {
+        Shell_NotifyIconW(NIM_DELETE, pnid);
+    }
+    return 0;
+}
+
 void TE_TrayDestroy(void)
 {
     if (g_tray_created) {
-        Shell_NotifyIconW(NIM_DELETE, &g_nid);
+        HANDLE hThread = CreateThread(NULL, 0, TrayDestroyWorker, &g_nid, 0, NULL);
+        if (hThread) {
+            WaitForSingleObject(hThread, 1500);
+            CloseHandle(hThread);
+        }
         g_tray_created = FALSE;
     }
 }
