@@ -204,6 +204,9 @@ int WINAPI wWinMain(HINSTANCE hinstance, HINSTANCE hprev_instance, PWSTR cmd_lin
     }
 
     HANDLE hExitEvent = CreateEventW(NULL, FALSE, FALSE, L"TaskbarEngine_Exit_Event");
+    if (hExitEvent) {
+        ResetEvent(hExitEvent);
+    }
 
     /* Attach to the interactive user desktop if started from background */
     HDESK hDesk = OpenInputDesktop(0, FALSE, GENERIC_ALL);
@@ -277,7 +280,12 @@ int WINAPI wWinMain(HINSTANCE hinstance, HINSTANCE hprev_instance, PWSTR cmd_lin
         DWORD wait_res = MsgWaitForMultipleObjectsEx(1, &hExitEvent, INFINITE, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
         if (wait_res == WAIT_OBJECT_0) {
             LogHost("Exit event signaled; closing");
-            PostMessageW(g_main_hwnd, WM_CLOSE, 0, 0);
+            SendMessageW(g_main_hwnd, WM_CLOSE, 0, 0);
+            running = FALSE;
+            break;
+        } else if (wait_res == WAIT_FAILED) {
+            LogHost("MsgWaitForMultipleObjectsEx WAIT_FAILED; exiting");
+            break;
         }
         while (PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE)) {
             if (msg.message == WM_QUIT) {
@@ -289,6 +297,19 @@ int WINAPI wWinMain(HINSTANCE hinstance, HINSTANCE hprev_instance, PWSTR cmd_lin
         }
     }
     LogHost("Exited message loop");
+
+    if (g_main_hwnd && IsWindow(g_main_hwnd)) {
+        DestroyWindow(g_main_hwnd);
+    }
+    if (g_hook) {
+        UnhookWindowsHookEx(g_hook);
+        g_hook = NULL;
+    }
+    TE_TrayDestroy();
+    if (g_dll_handle) {
+        FreeLibrary(g_dll_handle);
+        g_dll_handle = NULL;
+    }
 
     if (hExitEvent) {
         CloseHandle(hExitEvent);
