@@ -81,6 +81,13 @@ LRESULT CALLBACK TE_GetMsgHookProc(int nCode, WPARAM wParam, LPARAM lParam)
     if (nCode >= 0 && lParam) {
         const MSG* msg = (const MSG*)lParam;
         
+        if (msg->message == WM_NULL) {
+            /* If previously shut down (state 2) or taskbar window is no longer valid, allow re-initialization */
+            if (g_is_initialized == 2 || !g_taskbarHwnd || !IsWindow(g_taskbarHwnd)) {
+                InterlockedExchange(&g_is_initialized, 0);
+            }
+        }
+
         if (InterlockedCompareExchange(&g_is_initialized, 1, 0) == 0) {
             HWND taskbar_hwnd = FindWindowW(L"Shell_TrayWnd", NULL);
             if (taskbar_hwnd) {
@@ -92,7 +99,7 @@ LRESULT CALLBACK TE_GetMsgHookProc(int nCode, WPARAM wParam, LPARAM lParam)
             }
         }
 
-        if (msg->message == WM_MOUSEMOVE && g_taskbarHwnd) {
+        if (msg->message == WM_MOUSEMOVE && g_taskbarHwnd && (wParam == PM_REMOVE)) {
             static POINT s_last_hook_pt = { -999999, -999999 };
             if (msg->pt.x != s_last_hook_pt.x || msg->pt.y != s_last_hook_pt.y) {
                 HWND target_root = TE_TaskbarFindRoot(msg->hwnd);
@@ -101,6 +108,10 @@ LRESULT CALLBACK TE_GetMsgHookProc(int nCode, WPARAM wParam, LPARAM lParam)
                 }
                 if (target_root) {
                     s_last_hook_pt = msg->pt;
+                    if (GetWindowThreadProcessId(target_root, NULL) == GetCurrentThreadId()) {
+                        MSG dummy;
+                        PeekMessageW(&dummy, target_root, WM_TE_TASKBAR_MOUSEMOVE, WM_TE_TASKBAR_MOUSEMOVE, PM_REMOVE);
+                    }
                     PostMessageW(target_root, WM_TE_TASKBAR_MOUSEMOVE, (WPARAM)msg->hwnd, TE_PACK_POINT(msg->pt.x, msg->pt.y));
                 }
             }
