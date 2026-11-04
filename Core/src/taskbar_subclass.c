@@ -6,6 +6,7 @@
 #include "core/event_dispatch.h"
 #include "core/shell_hook.h"
 #include "core/power_device.h"
+#include "core/plugin_loader.h"
 #include <sdk/te_events.h>
 #include <sdk/te_log.h>
 
@@ -263,10 +264,18 @@ LRESULT CALLBACK TE_TaskbarSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
         case WM_TE_IPC_COMMAND:
             if ((int)wParam == TE_CMD_SHUTDOWN) {
                 KillTimer(hwnd, 1001);
-                TE_CoreManagerHandleCommand((int)wParam, (void*)lParam);
+                /* Synchronously disable all plugins so their subclasses and hooks are removed from the window */
+                TE_PluginLoaderDisableAll();
+                /* Post finalization message so active subclass callbacks (such as IconHoverSubclassProc)
+                 * can cleanly return to DefSubclassProc and unroll their call frames BEFORE FreeLibrary is invoked */
+                PostMessageW(hwnd, WM_TE_SHUTDOWN_FINALIZE, 0, 0);
                 return 0;
             }
             TE_CoreManagerHandleCommand((int)wParam, (void*)lParam);
+            return 0;
+
+        case WM_TE_SHUTDOWN_FINALIZE:
+            TE_CoreManagerHandleCommand(TE_CMD_SHUTDOWN, NULL);
             return 0;
             
         case WM_DPICHANGED: {
