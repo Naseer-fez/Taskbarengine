@@ -699,8 +699,8 @@ static DWORD WINAPI FrameLoopWorkerThread(LPVOID lpParam)
 
     while (true) {
         DWORD res = WaitForMultipleObjects(2, idle_events, FALSE, INFINITE);
-        if (res == WAIT_OBJECT_0) {
-            break; // Shutdown signaled
+        if (res == WAIT_OBJECT_0 || res == WAIT_FAILED) {
+            break; // Shutdown signaled or wait failed
         }
 
         ResetEvent(s_stop_event);
@@ -719,7 +719,7 @@ static DWORD WINAPI FrameLoopWorkerThread(LPVOID lpParam)
 
         while (s_loop_active) {
             DWORD active_res = WaitForMultipleObjects(3, active_events, FALSE, INFINITE);
-            if (active_res == WAIT_OBJECT_0) {
+            if (active_res == WAIT_OBJECT_0 || active_res == WAIT_FAILED) {
                 CancelWaitableTimer(s_waitable_timer);
                 goto thread_exit;
             }
@@ -877,7 +877,7 @@ void TE_FrameLoopShutdown(void)
         SetEvent(s_shutdown_event);
     }
     if (s_thread) {
-        WaitForSingleObject(s_thread, 1000);
+        WaitForSingleObject(s_thread, 3000);
         CloseHandle(s_thread);
         s_thread = NULL;
     }
