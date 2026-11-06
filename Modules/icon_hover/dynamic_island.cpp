@@ -639,6 +639,9 @@ void TE_DynamicIslandDisable(void) {
     SafeRelease(s_text_format_artist);
     SafeRelease(s_dwrite_factory);
 
+    SafeRelease(s_note_flag_geometry);
+    SafeRelease(s_play_triangle_geometry);
+
     s_surface_width = 0;
     s_surface_height = 0;
 }
@@ -652,6 +655,8 @@ void TE_DynamicIslandShutdown(void) {
         CloseThreadpoolTimer(s_announce_timer);
         s_announce_timer = nullptr;
     }
+    SafeRelease(s_note_flag_geometry);
+    SafeRelease(s_play_triangle_geometry);
     s_last_track_change_id = 0;
     std::memset(&s_current_media_state, 0, sizeof(s_current_media_state));
     s_state_dirty = false;
