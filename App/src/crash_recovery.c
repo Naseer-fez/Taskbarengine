@@ -26,7 +26,7 @@ static unsigned int __stdcall MonitorThread(void* arg) {
             if (hThread) {
                 while (!g_stop_monitor) {
                     DWORD res = WaitForSingleObject(hThread, 500);
-                    if (res == WAIT_OBJECT_0) {
+                    if (res == WAIT_OBJECT_0 || res == WAIT_FAILED) {
                         break;
                     }
                 }
@@ -77,7 +77,7 @@ void TE_CrashRecoveryStart(HWND main_hwnd, HMODULE dll_handle) {
 void TE_CrashRecoveryStop(void) {
     if (g_monitor_thread) {
         g_stop_monitor = TRUE;
-        WaitForSingleObject(g_monitor_thread, INFINITE);
+        WaitForSingleObject(g_monitor_thread, 3000);
         CloseHandle(g_monitor_thread);
         g_monitor_thread = NULL;
     }
