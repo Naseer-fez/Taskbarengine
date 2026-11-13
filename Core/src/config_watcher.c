@@ -65,7 +65,8 @@ static DWORD WINAPI WatcherThread(LPVOID param) {
                 }
             }
             // Change detected - debounce for 150ms
-            if (WaitForSingleObject(g_stop_event, 150) == WAIT_OBJECT_0) {
+            DWORD wait_stop = WaitForSingleObject(g_stop_event, 150);
+            if (wait_stop == WAIT_OBJECT_0 || wait_stop == WAIT_FAILED) {
                 CancelIoEx(g_hDir, &ol);
                 DWORD dummy = 0;
                 GetOverlappedResult(g_hDir, &ol, &dummy, TRUE);
