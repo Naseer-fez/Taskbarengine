@@ -64,6 +64,7 @@ extern "C" {
  */
 #define WM_TE_TIMER_TICK (WM_APP + 102)
 #define WM_TE_TASKBAR_MOUSEMOVE (WM_APP + 103)
+#define WM_TE_SHUTDOWN_FINALIZE (WM_APP + 104)
 
 #ifdef _WIN64
 #define TE_PACK_POINT(x, y) ((LPARAM)(((uint64_t)(uint32_t)(x)) | (((uint64_t)(uint32_t)(y)) << 32)))
