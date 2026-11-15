@@ -13,8 +13,8 @@
 			"icon_spacing":	0
 		},
 		"icon_hover":	{
-			"enabled":	true,
-			"max_scale":	2.3,
+			"enabled":	false,
+			"max_scale":	1.8,
 			"radius":	150,
 			"curve":	"cosine",
 			"speed_ms":	500,
