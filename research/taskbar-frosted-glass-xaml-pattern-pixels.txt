@@ -1,0 +1,5 @@
+﻿TaskbarBounds=0,1020,1920,60
+BeforeShutdownFrames=14 TaskbarChangedSamples=5336 AboveTaskbarChangedSamples=5135
+BeforeShutdownWindowAtTaskbarCenter=Shell_TrayWnd hwnd=220288
+AfterRestoreFrames=14 TaskbarChangedSamples=5293 AboveTaskbarChangedSamples=0
+AfterRestoreWindowAtTaskbarCenter=Shell_TrayWnd hwnd=220288
