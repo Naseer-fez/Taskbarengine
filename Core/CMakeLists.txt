@@ -27,6 +27,7 @@ target_link_libraries(EngineDLL PRIVATE
     te_sdk
     comctl32
     shlwapi
+    advapi32
 )
 
 # Export the CBT hook procedure

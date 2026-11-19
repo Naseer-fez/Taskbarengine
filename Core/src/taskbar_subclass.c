@@ -153,16 +153,8 @@ uint32_t TE_TaskbarTrackAll(void) {
         DWORD pid = 0;
         GetWindowThreadProcessId(primary, &pid);
         if (pid == cur_pid || cur_pid == 0) {
-            BOOL was_present = FALSE;
-            for (uint32_t i = 0; i < s_tracked_count; i++) {
-                if (s_tracked_taskbars[i].hwnd == primary) {
-                    was_present = TRUE;
-                    break;
-                }
-            }
-            AddTrackedInternal(primary, TRUE);
-            if (!was_present) {
-                TE_TaskbarSubclassInstall(primary);
+            if (SUCCEEDED(TE_TaskbarSubclassInstall(primary))) {
+                AddTrackedInternal(primary, TRUE);
             }
         }
     }
@@ -174,15 +166,8 @@ uint32_t TE_TaskbarTrackAll(void) {
         DWORD pid = 0;
         GetWindowThreadProcessId(sec, &pid);
         if (pid == cur_pid || cur_pid == 0) {
-            BOOL was_present = FALSE;
-            for (uint32_t i = 0; i < s_tracked_count; i++) {
-                if (s_tracked_taskbars[i].hwnd == sec) {
-                    was_present = TRUE;
-                    break;
-                }
-            }
-            if (AddTrackedInternal(sec, FALSE) && !was_present) {
-                TE_TaskbarSubclassInstall(sec);
+            if (SUCCEEDED(TE_TaskbarSubclassInstall(sec))) {
+                AddTrackedInternal(sec, FALSE);
             }
         }
     }
@@ -258,6 +243,19 @@ LRESULT CALLBACK TE_TaskbarSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                 mouse_data.taskbar_hwnd = root;
                 TE_EventDispatchFire(TE_EVENT_TASKBAR_MOUSE, &mouse_data);
             }
+            return 0;
+        }
+
+        case WM_TE_TASKBAR_CLICK:
+        case WM_TE_TASKBAR_RCLICK: {
+            if (!TE_CoreManagerIsInitialized()) return 0;
+            TE_TaskbarClickData click_data;
+            click_data.cursor_pos.x = TE_UNPACK_POINT_X(lParam);
+            click_data.cursor_pos.y = TE_UNPACK_POINT_Y(lParam);
+            click_data.target_hwnd = (HWND)wParam;
+            click_data.taskbar_hwnd = hwnd;
+            click_data.button = msg == WM_TE_TASKBAR_RCLICK ? 1u : 0u;
+            TE_EventDispatchFire(TE_EVENT_TASKBAR_CLICK, &click_data);
             return 0;
         }
         
@@ -477,8 +475,9 @@ LRESULT CALLBACK TE_TaskbarSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
 
 HRESULT TE_TaskbarSubclassInstall(HWND taskbar_hwnd) {
     if (!taskbar_hwnd) return TE_E_INVALIDARG;
-    SetWindowSubclass(taskbar_hwnd, TE_TaskbarSubclassProc, TE_SUBCLASS_ID, 0);
-    return TE_S_OK;
+    return SetWindowSubclass(taskbar_hwnd, TE_TaskbarSubclassProc, TE_SUBCLASS_ID, 0)
+        ? TE_S_OK
+        : TE_E_FAIL;
 }
 
 void TE_TaskbarSubclassRemove(HWND taskbar_hwnd) {

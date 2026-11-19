@@ -10,6 +10,7 @@ extern "C" {
 
 /** Plugin method with no arguments. */
 typedef HRESULT (*TE_PluginMethodVoid)(void);
+typedef HRESULT (*TE_PluginMethodWithContext)(void* context);
 
 /** Plugin method receiving a PluginContext pointer. */
 typedef HRESULT (*TE_PluginMethodCtx)(const void* ctx);
@@ -28,6 +29,10 @@ typedef HRESULT (*TE_PluginMethodCtx)(const void* ctx);
  */
 HRESULT TE_FaultIsolatedCall(int* fault_count, const char* plugin_name,
                               const char* method_name, TE_PluginMethodVoid method);
+HRESULT TE_FaultIsolatedCallWithContext(int* fault_count, const char* plugin_name,
+                                        const char* method_name,
+                                        TE_PluginMethodWithContext method,
+                                        void* context);
 
 /**
  * Exception filter for SEH. Logs the exception and returns EXCEPTION_EXECUTE_HANDLER.

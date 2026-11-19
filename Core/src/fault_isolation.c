@@ -13,15 +13,31 @@ LONG TE_FaultFilter(EXCEPTION_POINTERS* ep, const char* plugin_name)
     return EXCEPTION_EXECUTE_HANDLER;
 }
 
+static HRESULT TE_InvokeNoContext(void* context)
+{
+    TE_PluginMethodVoid method = *(TE_PluginMethodVoid*)context;
+    return method();
+}
+
 HRESULT TE_FaultIsolatedCall(int* fault_count, const char* plugin_name,
                               const char* method_name, TE_PluginMethodVoid method)
 {
     if (!method) return TE_E_INVALIDARG;
-    
+    return TE_FaultIsolatedCallWithContext(fault_count, plugin_name, method_name,
+                                          TE_InvokeNoContext, &method);
+}
+
+HRESULT TE_FaultIsolatedCallWithContext(int* fault_count, const char* plugin_name,
+                                        const char* method_name,
+                                        TE_PluginMethodWithContext method,
+                                        void* context)
+{
+    if (!method) return TE_E_INVALIDARG;
+
     HRESULT hr = TE_S_OK;
 #ifdef _MSC_VER
     __try {
-        hr = method();
+        hr = method(context);
     } __except(TE_FaultFilter(GetExceptionInformation(), plugin_name)) {
         if (fault_count) {
             (*fault_count)++;
@@ -40,7 +56,7 @@ HRESULT TE_FaultIsolatedCall(int* fault_count, const char* plugin_name,
     (void)plugin_name;
     (void)method_name;
     (void)fault_count;
-    hr = method();
+    hr = method(context);
 #endif
     return hr;
 }

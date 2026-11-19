@@ -2,8 +2,11 @@
 #include <sdk/te_ipc.h>
 #include <sdk/te_log.h>
 #include "core/core_manager.h"
+#include "core/fault_isolation.h"
 #include <sddl.h>
+#include <strsafe.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 static struct {
     HANDLE hPipe;
@@ -16,6 +19,20 @@ static struct {
 #include <cJSON.h>
 #include "core/plugin_loader.h"
 
+typedef struct TE_PluginSettingsProbe {
+    const PluginInterface* interface_ptr;
+    const PluginMetadata* metadata;
+    const PluginSettings* settings;
+} TE_PluginSettingsProbe;
+
+static HRESULT TE_ReadPluginSettings(void* context) {
+    TE_PluginSettingsProbe* probe = (TE_PluginSettingsProbe*)context;
+    if (!probe->interface_ptr->GetMetadata || !probe->interface_ptr->GetSettings) return TE_E_FAIL;
+    probe->metadata = probe->interface_ptr->GetMetadata();
+    probe->settings = probe->interface_ptr->GetSettings();
+    return (probe->metadata && probe->settings) ? TE_S_OK : TE_E_FAIL;
+}
+
 static char* GenerateSettingsJson(void) {
     cJSON* root = cJSON_CreateObject();
     cJSON* plugins_arr = cJSON_AddArrayToObject(root, "plugins");
@@ -26,8 +43,13 @@ static char* GenerateSettingsJson(void) {
         TE_PluginEntry* entry = TE_PluginLoaderGetEntry(i);
         if (!entry || !entry->interface_ptr) continue;
         
-        const PluginMetadata* meta = entry->interface_ptr->GetMetadata();
-        const PluginSettings* settings = entry->interface_ptr->GetSettings();
+        TE_PluginSettingsProbe probe = { entry->interface_ptr, NULL, NULL };
+        const char* plugin_name = entry->metadata && entry->metadata->name ? entry->metadata->name : "unknown";
+        HRESULT probe_hr = TE_FaultIsolatedCallWithContext(&entry->fault_count, plugin_name,
+                                                          "GetSettings", TE_ReadPluginSettings, &probe);
+        if (FAILED(probe_hr)) continue;
+        const PluginMetadata* meta = probe.metadata;
+        const PluginSettings* settings = probe.settings;
         if (!meta || !settings || settings->count == 0) continue;
         
         cJSON* plugin_obj = cJSON_CreateObject();
@@ -307,17 +329,42 @@ HRESULT TE_IpcServerStart(HWND taskbar_hwnd) {
     g_ipc.hStopEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
     if (!g_ipc.hStopEvent) return TE_E_FAIL;
     
-    SECURITY_ATTRIBUTES sa = {0};
-    sa.nLength = sizeof(sa);
-    /* Allow Generic All to Authenticated Users and Owner, with Low-Integrity write-up */
-    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
-            L"D:(A;;GA;;;AU)(A;;GA;;;OW)S:(ML;;NW;;;LW)", SDDL_REVISION_1, &sa.lpSecurityDescriptor, NULL)) {
-        if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
-                L"D:(A;;GA;;;AU)(A;;GA;;;OW)", SDDL_REVISION_1, &sa.lpSecurityDescriptor, NULL)) {
-            ConvertStringSecurityDescriptorToSecurityDescriptorW(
-                L"D:(A;;GA;;;OW)", SDDL_REVISION_1, &sa.lpSecurityDescriptor, NULL);
-        }
+    HANDLE token = NULL;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) {
+        CloseHandle(g_ipc.hStopEvent);
+        g_ipc.hStopEvent = NULL;
+        return TE_E_FAIL;
     }
+    DWORD token_user_size = 0;
+    GetTokenInformation(token, TokenUser, NULL, 0, &token_user_size);
+    TOKEN_USER* token_user = token_user_size ? (TOKEN_USER*)malloc(token_user_size) : NULL;
+    if (!token_user || !GetTokenInformation(token, TokenUser, token_user, token_user_size, &token_user_size)) {
+        free(token_user);
+        CloseHandle(token);
+        CloseHandle(g_ipc.hStopEvent);
+        g_ipc.hStopEvent = NULL;
+        return TE_E_FAIL;
+    }
+
+    LPWSTR user_sid = NULL;
+    PSECURITY_DESCRIPTOR security_descriptor = NULL;
+    SECURITY_ATTRIBUTES sa = {0};
+    WCHAR sddl[256];
+    BOOL security_ready = ConvertSidToStringSidW(token_user->User.Sid, &user_sid) &&
+        SUCCEEDED(StringCchPrintfW(sddl, ARRAYSIZE(sddl), L"D:(A;;GA;;;%s)", user_sid)) &&
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl, SDDL_REVISION_1, &security_descriptor, NULL);
+    free(token_user);
+    CloseHandle(token);
+    if (user_sid) LocalFree(user_sid);
+    if (!security_ready) {
+        if (security_descriptor) LocalFree(security_descriptor);
+        CloseHandle(g_ipc.hStopEvent);
+        g_ipc.hStopEvent = NULL;
+        return TE_E_FAIL;
+    }
+    sa.nLength = sizeof(sa);
+    sa.lpSecurityDescriptor = security_descriptor;
     
     g_ipc.hPipe = CreateNamedPipeW(
         TE_PIPE_NAME,
@@ -330,9 +377,7 @@ HRESULT TE_IpcServerStart(HWND taskbar_hwnd) {
         sa.lpSecurityDescriptor ? &sa : NULL
     );
     
-    if (sa.lpSecurityDescriptor) {
-        LocalFree(sa.lpSecurityDescriptor);
-    }
+    LocalFree(security_descriptor);
     
     if (g_ipc.hPipe == INVALID_HANDLE_VALUE) {
         CloseHandle(g_ipc.hStopEvent);

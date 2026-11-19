@@ -1,4 +1,5 @@
 #include "core/core_manager.h"
+#include <cJSON.h>
 #include <windows.h>
 #include <shlwapi.h>
 #include <stdio.h>
@@ -29,6 +30,7 @@ static struct {
     wchar_t modules_dir[MAX_PATH];
     wchar_t config_dir[MAX_PATH];
     uint32_t dpi;
+    BOOL log_initialized;
 } g_core;
 
 typedef UINT (WINAPI *GetDpiForWindow_t)(HWND);
@@ -36,6 +38,19 @@ typedef UINT (WINAPI *GetDpiForWindow_t)(HWND);
 
 HRESULT TE_CoreManagerInit(HWND taskbar_hwnd) {
     if (g_core.initialized) return TE_S_OK;
+    HRESULT loader_hr = TE_PluginLoaderInit();
+    if (FAILED(loader_hr)) {
+        TE_LogWrite(TE_LOG_ERROR, "CoreManager", "A previous plugin worker is still active; deferring engine reinitialization");
+        return loader_hr;
+    }
+    if (g_core.config_root) {
+        TE_JsoncFree(g_core.config_root);
+        g_core.config_root = NULL;
+    }
+    if (g_core.log_initialized) {
+        TE_LogShutdown();
+        g_core.log_initialized = FALSE;
+    }
     memset(&g_core, 0, sizeof(g_core));
     g_core.taskbar_hwnd = taskbar_hwnd;
     
@@ -140,7 +155,7 @@ HRESULT TE_CoreManagerInit(HWND taskbar_hwnd) {
     }
     
     CreateDirectoryW(g_core.log_dir, NULL);
-    TE_LogInit(g_core.log_dir, TE_LOG_INFO);
+    g_core.log_initialized = SUCCEEDED(TE_LogInit(g_core.log_dir, TE_LOG_INFO));
     TE_LogWrite(TE_LOG_INFO, "CoreManager", "Core Manager initializing");
     
     char log_buf[512];
@@ -154,12 +169,16 @@ HRESULT TE_CoreManagerInit(HWND taskbar_hwnd) {
     TE_EventDispatchInit();
     
     cJSON* root = NULL;
-    TE_ConfigLoad(g_core.config_path, &root);
+    HRESULT config_hr = TE_ConfigLoad(g_core.config_path, &root);
     g_core.config_root = root;
+    if (FAILED(config_hr) || !root) {
+        TE_LogWrite(TE_LOG_ERROR, "CoreManager", "Configuration could not be loaded; plugin defaults will be used");
+    }
     
-    TE_PluginLoaderInit();
-    TE_PluginLoaderScanAndLoad(g_core.modules_dir);
-    TE_PluginLoaderInitializeAll(g_core.taskbar_hwnd, g_core.dpi, g_core.config_root);
+    HRESULT scan_hr = TE_PluginLoaderScanAndLoad(g_core.modules_dir);
+    if (FAILED(scan_hr)) TE_LogWrite(TE_LOG_ERROR, "CoreManager", "Plugin directory scan failed");
+    HRESULT init_hr = TE_PluginLoaderInitializeAll(g_core.taskbar_hwnd, g_core.dpi, g_core.config_root);
+    if (FAILED(init_hr)) TE_LogWrite(TE_LOG_ERROR, "CoreManager", "One or more plugins failed to initialize");
     for (int i = 0; i < TE_PluginLoaderGetCount(); i++) {
         TE_PluginEntry* entry = TE_PluginLoaderGetEntry(i);
         if (entry && entry->metadata && entry->metadata->name) {
@@ -170,7 +189,13 @@ HRESULT TE_CoreManagerInit(HWND taskbar_hwnd) {
             }
             BOOL enabled = TE_ConfigGetBool(sec, "enabled", default_enabled);
             if (enabled) {
-                TE_PluginLoaderEnablePluginByName(entry->metadata->name);
+                HRESULT enable_hr = TE_PluginLoaderEnablePluginByName(entry->metadata->name);
+                if (FAILED(enable_hr)) {
+                    char message[256];
+                    snprintf(message, sizeof(message), "Plugin '%s' failed to enable (0x%08lX)",
+                             entry->metadata->name, (unsigned long)enable_hr);
+                    TE_LogWrite(TE_LOG_ERROR, "CoreManager", message);
+                }
             }
         }
     }
@@ -197,8 +222,7 @@ void TE_CoreManagerShutdownExcept(HWND except_hwnd) {
     TE_VDesktopShutdown();
     TE_TaskbarUntrackAllExcept(except_hwnd);
     TE_PluginLoaderDisableAll();
-    TE_PluginLoaderShutdownAll();
-    TE_PluginLoaderShutdown();
+    HRESULT plugin_shutdown_hr = TE_PluginLoaderShutdown();
     TE_EventDispatchShutdown();
 
     if (g_core.taskbar_hwnd && g_core.taskbar_hwnd != except_hwnd) {
@@ -214,13 +238,22 @@ void TE_CoreManagerShutdownExcept(HWND except_hwnd) {
         }
     }
 
+    if (FAILED(plugin_shutdown_hr)) {
+        TE_LogWrite(TE_LOG_WARNING, "CoreManager", "Plugin shutdown is incomplete; retaining config, logger, and loaded plugin DLLs until workers exit");
+        g_core.initialized = FALSE;
+        TE_EngineResetInit();
+        return;
+    }
+
     if (g_core.config_root) {
         TE_JsoncFree(g_core.config_root);
         g_core.config_root = NULL;
     }
     TE_LogWrite(TE_LOG_INFO, "CoreManager", "Core Manager shut down");
     TE_LogFlush();
-    TE_LogShutdown();
+    if (g_core.log_initialized) {
+        TE_LogShutdown();
+    }
     memset(&g_core, 0, sizeof(g_core));
     TE_EngineResetInit();
 }
@@ -237,6 +270,11 @@ HRESULT TE_CoreManagerReloadConfig(void) {
         return TE_E_FAIL;
     }
     
+    const cJSON* old_widgets = g_core.config_root ? cJSON_GetObjectItemCaseSensitive(g_core.config_root, "widgets") : NULL;
+    const cJSON* new_widgets = cJSON_GetObjectItemCaseSensitive(new_root, "widgets");
+    BOOL widgets_changed = (old_widgets == NULL) != (new_widgets == NULL) ||
+        (old_widgets && new_widgets && !cJSON_Compare(old_widgets, new_widgets, cJSON_True));
+
     const char* changed_names[TE_MAX_PLUGINS];
     int changed_count = 0;
     TE_ConfigDiffPlugins(g_core.config_root, new_root,
@@ -272,6 +310,13 @@ HRESULT TE_CoreManagerReloadConfig(void) {
         TE_ConfigChangedData data;
         data.plugin_name = saved_names[i];
         data.new_config = sec;
+        TE_EventDispatchFire(TE_EVENT_CONFIG_CHANGED, &data);
+    }
+
+    if (widgets_changed) {
+        TE_ConfigChangedData data;
+        data.plugin_name = "widgets";
+        data.new_config = cJSON_GetObjectItemCaseSensitive(g_core.config_root, "widgets");
         TE_EventDispatchFire(TE_EVENT_CONFIG_CHANGED, &data);
     }
     

@@ -23,6 +23,7 @@ typedef enum TE_EventType {
     TE_EVENT_POWER,             /**< Power event (suspend/resume); payload: TE_PowerData */
     TE_EVENT_DEVICE,            /**< Device change (monitor plug/unplug); payload: TE_DeviceData */
     TE_EVENT_VDESKTOP,          /**< Virtual desktop switch; payload: NULL */
+    TE_EVENT_TASKBAR_CLICK,     /**< Left mouse-up over a taskbar child; payload: TE_TaskbarClickData */
     TE_EVENT_COUNT              /**< Sentinel: total number of event types */
 } TE_EventType;
 
@@ -54,6 +55,13 @@ typedef struct TE_TaskbarMouseData {
     BOOL is_dragging;
     HWND taskbar_hwnd;
 } TE_TaskbarMouseData;
+
+typedef struct TE_TaskbarClickData {
+    POINT cursor_pos;           /**< Screen coordinates from the Explorer mouse message. */
+    HWND target_hwnd;           /**< Child window that received the original mouse-up. */
+    HWND taskbar_hwnd;          /**< Shell_TrayWnd that owns the target child. */
+    uint32_t button;            /**< 0 for left, 1 for right. */
+} TE_TaskbarClickData;
 
 typedef struct TE_ShellHookData {
     int shell_msg;    /**< HSHELL_* message code */

@@ -21,13 +21,14 @@ typedef struct TE_PluginEntry {
     int fault_count;                        /**< SEH fault counter for 3-strike policy */
     BOOL initialized;                       /**< Whether Initialize() succeeded */
     wchar_t dll_path[MAX_PATH];             /**< Full path to the plugin DLL */
+    PluginContext context;                  /**< Stable, plugin-specific host context */
 } TE_PluginEntry;
 
 /** Initialize the plugin loader subsystem. */
 HRESULT TE_PluginLoaderInit(void);
 
 /** Shut down the plugin loader, freeing all DLLs. */
-void TE_PluginLoaderShutdown(void);
+HRESULT TE_PluginLoaderShutdown(void);
 
 /**
  * Scan a directory for plugin DLLs and load them.
@@ -54,7 +55,7 @@ HRESULT TE_PluginLoaderEnableAll(void);
 void TE_PluginLoaderDisableAll(void);
 
 /** Call Shutdown() on all initialized plugins and FreeLibrary all DLLs. */
-void TE_PluginLoaderShutdownAll(void);
+HRESULT TE_PluginLoaderShutdownAll(void);
 
 /** Get the number of loaded plugins. */
 int TE_PluginLoaderGetCount(void);

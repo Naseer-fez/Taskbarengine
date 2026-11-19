@@ -8,12 +8,35 @@
 #include "core/state_store.h"
 #include <sdk/te_log.h>
 #include <sdk/te_events.h>
+#include <cJSON.h>
 
 static TE_PluginEntry g_plugins[TE_MAX_PLUGINS];
 static int g_plugin_count = 0;
 static uint32_t g_current_plugin_id = 0;
 static TE_PluginEntry* g_current_plugin_entry = NULL;
 static SRWLOCK g_plugin_lock = SRWLOCK_INIT;
+
+typedef struct TE_InterfaceProbe {
+    GetPluginInterfaceFunc function;
+    const PluginInterface* result;
+} TE_InterfaceProbe;
+
+typedef struct TE_MetadataProbe {
+    const PluginInterface* interface_ptr;
+    const PluginMetadata* result;
+} TE_MetadataProbe;
+
+static HRESULT TE_CallInterfaceFactory(void* context) {
+    TE_InterfaceProbe* probe = (TE_InterfaceProbe*)context;
+    probe->result = probe->function();
+    return probe->result ? TE_S_OK : TE_E_FAIL;
+}
+
+static HRESULT TE_CallGetMetadata(void* context) {
+    TE_MetadataProbe* probe = (TE_MetadataProbe*)context;
+    probe->result = probe->interface_ptr->GetMetadata();
+    return probe->result ? TE_S_OK : TE_E_FAIL;
+}
 
 static HRESULT TE_PluginSubscribeWrapper(uint32_t event_type, void (*callback)(uint32_t, const void*, void*), void* user_data) {
     return TE_EventDispatchSubscribe(event_type, (TE_EventCallback)callback, user_data, g_current_plugin_id);
@@ -49,6 +72,9 @@ static void TE_PluginRequestRedrawWrapper(void) {
 }
 
 HRESULT TE_PluginLoaderInit(void) {
+    HRESULT shutdown_hr = TE_PluginLoaderShutdown();
+    if (FAILED(shutdown_hr)) return shutdown_hr;
+
     InitializeSRWLock(&g_plugin_lock);
     AcquireSRWLockExclusive(&g_plugin_lock);
     g_plugin_count = 0;
@@ -59,13 +85,15 @@ HRESULT TE_PluginLoaderInit(void) {
     return TE_S_OK;
 }
 
-void TE_PluginLoaderShutdown(void) {
-    TE_PluginLoaderShutdownAll();
+HRESULT TE_PluginLoaderShutdown(void) {
+    HRESULT hr = TE_PluginLoaderShutdownAll();
+    if (FAILED(hr)) return hr;
     AcquireSRWLockExclusive(&g_plugin_lock);
     g_plugin_count = 0;
     g_current_plugin_id = 0;
     g_current_plugin_entry = NULL;
     ReleaseSRWLockExclusive(&g_plugin_lock);
+    return TE_S_OK;
 }
 
 static void TryLoadPluginDll(const wchar_t* dll_path) {
@@ -78,10 +106,19 @@ static void TryLoadPluginDll(const wchar_t* dll_path) {
         BOOL loaded = FALSE;
         GetPluginInterfaceFunc get_interface = (GetPluginInterfaceFunc)(void*)GetProcAddress(hMod, "GetPluginInterface");
         if (get_interface) {
-            const PluginInterface* iface = get_interface();
+            int probe_faults = 0;
+            TE_InterfaceProbe interface_probe = { get_interface, NULL };
+            HRESULT probe_hr = TE_FaultIsolatedCallWithContext(&probe_faults, "plugin-candidate",
+                                                               "GetPluginInterface",
+                                                               TE_CallInterfaceFactory, &interface_probe);
+            const PluginInterface* iface = SUCCEEDED(probe_hr) ? interface_probe.result : NULL;
             if (iface) {
-                const PluginMetadata* meta = iface->GetMetadata();
-                if (meta && meta->api_version <= TE_API_VERSION) {
+                TE_MetadataProbe metadata_probe = { iface, NULL };
+                probe_hr = TE_FaultIsolatedCallWithContext(&probe_faults, "plugin-candidate",
+                                                           "GetMetadata",
+                                                           TE_CallGetMetadata, &metadata_probe);
+                const PluginMetadata* meta = SUCCEEDED(probe_hr) ? metadata_probe.result : NULL;
+                if (meta && meta->name && meta->name[0] != '\0' && meta->api_version <= TE_API_VERSION) {
                     BOOL duplicate = FALSE;
                     for (int i = 0; i < g_plugin_count; i++) {
                         if (g_plugins[i].metadata && g_plugins[i].metadata->name &&
@@ -96,6 +133,15 @@ static void TryLoadPluginDll(const wchar_t* dll_path) {
                         g_plugins[g_plugin_count].metadata = meta;
                         g_plugins[g_plugin_count].plugin_id = (uint32_t)g_plugin_count + 1;
                         wcsncpy_s(g_plugins[g_plugin_count].dll_path, MAX_PATH, dll_path, _TRUNCATE);
+                        {
+                            char message[MAX_PATH * 4 + 128];
+                            char path_utf8[MAX_PATH * 4] = { 0 };
+                            WideCharToMultiByte(CP_UTF8, 0, dll_path, -1, path_utf8,
+                                                (int)sizeof(path_utf8), NULL, NULL);
+                            snprintf(message, sizeof(message), "Loaded plugin '%s' (priority=%u, path=%s)",
+                                     meta->name, (unsigned)meta->priority, path_utf8);
+                            TE_LogWrite(TE_LOG_INFO, "PluginLoader", message);
+                        }
                         g_plugin_count++;
                         loaded = TRUE;
                     }
@@ -103,8 +149,22 @@ static void TryLoadPluginDll(const wchar_t* dll_path) {
             }
         }
         if (!loaded) {
+            char message[MAX_PATH * 4 + 128];
+            char path_utf8[MAX_PATH * 4] = { 0 };
+            WideCharToMultiByte(CP_UTF8, 0, dll_path, -1, path_utf8,
+                                (int)sizeof(path_utf8), NULL, NULL);
+            snprintf(message, sizeof(message), "Plugin DLL rejected (invalid interface or duplicate metadata): %s", path_utf8);
+            TE_LogWrite(TE_LOG_WARNING, "PluginLoader", message);
             FreeLibrary(hMod);
         }
+    } else {
+        char message[MAX_PATH + 96];
+        const wchar_t* name = wcsrchr(dll_path, L'\\');
+        name = name ? name + 1 : dll_path;
+        char narrow_name[MAX_PATH] = { 0 };
+        WideCharToMultiByte(CP_UTF8, 0, name, -1, narrow_name, MAX_PATH, NULL, NULL);
+        snprintf(message, sizeof(message), "Could not load plugin DLL '%s' (Win32 error %lu)", narrow_name, (unsigned long)GetLastError());
+        TE_LogWrite(TE_LOG_WARNING, "PluginLoader", message);
     }
 }
 
@@ -113,24 +173,7 @@ HRESULT TE_PluginLoaderScanAndLoad(const wchar_t* modules_dir) {
 
     AcquireSRWLockExclusive(&g_plugin_lock);
 
-    /* 1. Scan flat DLLs in modules_dir */
-    wchar_t flat_search[MAX_PATH];
-    swprintf(flat_search, MAX_PATH, L"%s\\*.dll", modules_dir);
-    WIN32_FIND_DATAW flat_data;
-    HANDLE hFlatFind = FindFirstFileW(flat_search, &flat_data);
-    if (hFlatFind != INVALID_HANDLE_VALUE) {
-        do {
-            if (!(flat_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
-                if (_wcsicmp(flat_data.cFileName, L"EngineDLL.dll") == 0) continue;
-                wchar_t dll_path[MAX_PATH];
-                swprintf(dll_path, MAX_PATH, L"%s\\%s", modules_dir, flat_data.cFileName);
-                TryLoadPluginDll(dll_path);
-            }
-        } while (FindNextFileW(hFlatFind, &flat_data));
-        FindClose(hFlatFind);
-    }
-
-    /* 2. Scan subdirectories in modules_dir */
+    /* Prefer packaged per-plugin directories over stale flat compatibility copies. */
     WIN32_FIND_DATAW find_data;
     wchar_t search_path[MAX_PATH];
     swprintf(search_path, MAX_PATH, L"%s\\*", modules_dir);
@@ -159,6 +202,23 @@ HRESULT TE_PluginLoaderScanAndLoad(const wchar_t* modules_dir) {
         } while (FindNextFileW(hFind, &find_data));
         FindClose(hFind);
     }
+
+    /* Flat DLLs are legacy fallback candidates; nested packages win duplicates. */
+    wchar_t flat_search[MAX_PATH];
+    swprintf(flat_search, MAX_PATH, L"%s\\*.dll", modules_dir);
+    WIN32_FIND_DATAW flat_data;
+    HANDLE hFlatFind = FindFirstFileW(flat_search, &flat_data);
+    if (hFlatFind != INVALID_HANDLE_VALUE) {
+        do {
+            if (!(flat_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+                if (_wcsicmp(flat_data.cFileName, L"EngineDLL.dll") == 0) continue;
+                wchar_t dll_path[MAX_PATH];
+                swprintf(dll_path, MAX_PATH, L"%s\\%s", modules_dir, flat_data.cFileName);
+                TryLoadPluginDll(dll_path);
+            }
+        } while (FindNextFileW(hFlatFind, &flat_data));
+        FindClose(hFlatFind);
+    }
     
     for (int i = 1; i < g_plugin_count; i++) {
         TE_PluginEntry temp = g_plugins[i];
@@ -174,10 +234,9 @@ HRESULT TE_PluginLoaderScanAndLoad(const wchar_t* modules_dir) {
     return TE_S_OK;
 }
 
-static PluginContext g_ctx;
 static HRESULT PluginInitFunc(void) {
     if (g_current_plugin_entry && g_current_plugin_entry->interface_ptr && g_current_plugin_entry->interface_ptr->Initialize) {
-        return g_current_plugin_entry->interface_ptr->Initialize(&g_ctx);
+        return g_current_plugin_entry->interface_ptr->Initialize(&g_current_plugin_entry->context);
     }
     return TE_S_OK;
 }
@@ -185,23 +244,29 @@ static HRESULT PluginInitFunc(void) {
 HRESULT TE_PluginLoaderInitializeAll(HWND taskbar_hwnd, uint32_t dpi, const struct cJSON* config_root) {
     AcquireSRWLockExclusive(&g_plugin_lock);
     for (int i = 0; i < g_plugin_count; i++) {
-        g_ctx.struct_size = sizeof(PluginContext);
-        g_ctx.api_version = TE_API_VERSION;
-        g_ctx.taskbar_hwnd = taskbar_hwnd;
-        g_ctx.monitor = MonitorFromWindow(taskbar_hwnd, MONITOR_DEFAULTTOPRIMARY);
-        g_ctx.dpi = dpi;
-        g_ctx.config = TE_ConfigGetPluginSection((cJSON*)config_root, (char*)g_plugins[i].metadata->name);
-        g_ctx.log = TE_LogWrite;
-        g_ctx.subscribe = TE_PluginSubscribeWrapper;
-        g_ctx.unsubscribe = TE_PluginUnsubscribeWrapper;
-        g_ctx.request_redraw = TE_PluginRequestRedrawWrapper;
-        g_ctx.publish_state = (PublishStateFunc)TE_StatePublish;
-        g_ctx.query_state = (QueryStateFunc)TE_StateQuery;
-        g_ctx.core_opaque = &g_plugins[i];
-        g_ctx.subscribe_message = TE_PluginSubscribeMessageWrapper;
-        g_ctx.unsubscribe_message = TE_PluginUnsubscribeMessageWrapper;
-        g_ctx.register_timer = TE_PluginRegisterTimerWrapper;
-        g_ctx.cancel_timer = TE_PluginCancelTimerWrapper;
+        PluginContext* ctx = &g_plugins[i].context;
+        memset(ctx, 0, sizeof(*ctx));
+        ctx->struct_size = sizeof(PluginContext);
+        ctx->api_version = TE_API_VERSION;
+        ctx->taskbar_hwnd = taskbar_hwnd;
+        ctx->monitor = MonitorFromWindow(taskbar_hwnd, MONITOR_DEFAULTTOPRIMARY);
+        ctx->dpi = dpi;
+        if (strcmp(g_plugins[i].metadata->name, "widget_host") == 0 && config_root) {
+            ctx->config = cJSON_GetObjectItemCaseSensitive((cJSON*)config_root, "widgets");
+        } else {
+            ctx->config = TE_ConfigGetPluginSection((cJSON*)config_root, (char*)g_plugins[i].metadata->name);
+        }
+        ctx->log = TE_LogWrite;
+        ctx->subscribe = TE_PluginSubscribeWrapper;
+        ctx->unsubscribe = TE_PluginUnsubscribeWrapper;
+        ctx->request_redraw = TE_PluginRequestRedrawWrapper;
+        ctx->publish_state = (PublishStateFunc)TE_StatePublish;
+        ctx->query_state = (QueryStateFunc)TE_StateQuery;
+        ctx->core_opaque = &g_plugins[i];
+        ctx->subscribe_message = TE_PluginSubscribeMessageWrapper;
+        ctx->unsubscribe_message = TE_PluginUnsubscribeMessageWrapper;
+        ctx->register_timer = TE_PluginRegisterTimerWrapper;
+        ctx->cancel_timer = TE_PluginCancelTimerWrapper;
         
         g_current_plugin_id = g_plugins[i].plugin_id;
         g_current_plugin_entry = &g_plugins[i];
@@ -245,6 +310,13 @@ static HRESULT PluginDisableFunc(void) {
     return TE_S_OK;
 }
 
+static HRESULT PluginShutdownFunc(void) {
+    if (g_current_plugin_entry && g_current_plugin_entry->interface_ptr && g_current_plugin_entry->interface_ptr->Shutdown) {
+        return g_current_plugin_entry->interface_ptr->Shutdown();
+    }
+    return TE_S_OK;
+}
+
 void TE_PluginLoaderDisableAll(void) {
     AcquireSRWLockExclusive(&g_plugin_lock);
     for (int i = g_plugin_count - 1; i >= 0; i--) {
@@ -258,13 +330,20 @@ void TE_PluginLoaderDisableAll(void) {
     ReleaseSRWLockExclusive(&g_plugin_lock);
 }
 
-void TE_PluginLoaderShutdownAll(void) {
+HRESULT TE_PluginLoaderShutdownAll(void) {
+    HRESULT overall_hr = TE_S_OK;
     AcquireSRWLockExclusive(&g_plugin_lock);
     for (int i = 0; i < g_plugin_count; i++) {
         TE_EventDispatchRemoveByPlugin(g_plugins[i].plugin_id);
         if (g_plugins[i].initialized) {
-            if (g_plugins[i].interface_ptr && g_plugins[i].interface_ptr->Shutdown) {
-                g_plugins[i].interface_ptr->Shutdown();
+            g_current_plugin_id = g_plugins[i].plugin_id;
+            g_current_plugin_entry = &g_plugins[i];
+            HRESULT hr = TE_FaultIsolatedCall(&g_plugins[i].fault_count,
+                                              g_plugins[i].metadata ? (char*)g_plugins[i].metadata->name : "unknown",
+                                              "Shutdown", PluginShutdownFunc);
+            if (FAILED(hr)) {
+                overall_hr = hr;
+                continue; /* Keep the DLL loaded while plugin-owned work may still be running. */
             }
             g_plugins[i].initialized = FALSE;
         }
@@ -273,7 +352,10 @@ void TE_PluginLoaderShutdownAll(void) {
             g_plugins[i].module_handle = NULL;
         }
     }
+    g_current_plugin_id = 0;
+    g_current_plugin_entry = NULL;
     ReleaseSRWLockExclusive(&g_plugin_lock);
+    return overall_hr;
 }
 
 int TE_PluginLoaderGetCount(void) {

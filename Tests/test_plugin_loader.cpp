@@ -3,26 +3,8 @@
 #include <algorithm>
 
 extern "C" {
-#include <sdk/te_types.h>
-#include <sdk/te_plugin.h>
-
-#define TE_MAX_PLUGINS 32
-typedef struct TE_PluginEntry {
-    HMODULE module_handle;
-    const PluginInterface* interface_ptr;
-    const PluginMetadata* metadata;
-    uint32_t plugin_id;
-    BOOL enabled;
-    int fault_count;
-    BOOL initialized;
-    wchar_t dll_path[MAX_PATH];
-} TE_PluginEntry;
-
-int TE_PluginLoaderGetCount(void);
-TE_PluginEntry* TE_PluginLoaderGetEntry(int index);
-TE_PluginEntry* TE_PluginLoaderFindByName(const char* name);
-HRESULT TE_PluginLoaderInit(void);
-void TE_PluginLoaderShutdown(void);
+#include <core/plugin_loader.h>
+#include <core/taskbar_subclass.h>
 
 HRESULT TE_TaskbarSubclassSubscribeMessage(UINT msg) {
     (void)msg;
@@ -52,7 +34,7 @@ TEST_CASE("Plugin loader initialization", "[plugins]") {
         CHECK(TE_MAX_PLUGINS == 32);
     }
 
-    TE_PluginLoaderShutdown();
+    CHECK(TE_PluginLoaderShutdown() == TE_S_OK);
 }
 
 TEST_CASE("Load icon_hover plugin DLL directly", "[plugins][icon_hover]") {

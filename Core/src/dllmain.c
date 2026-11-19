@@ -92,8 +92,12 @@ LRESULT CALLBACK TE_GetMsgHookProc(int nCode, WPARAM wParam, LPARAM lParam)
             HWND taskbar_hwnd = FindWindowW(L"Shell_TrayWnd", NULL);
             if (taskbar_hwnd) {
                 g_taskbarHwnd = taskbar_hwnd;
-                TE_TaskbarSubclassInstall(taskbar_hwnd);
-                PostMessage(taskbar_hwnd, WM_TE_INIT, 0, 0);
+                if (SUCCEEDED(TE_TaskbarSubclassInstall(taskbar_hwnd))) {
+                    PostMessage(taskbar_hwnd, WM_TE_INIT, 0, 0);
+                } else {
+                    g_taskbarHwnd = NULL;
+                    InterlockedExchange(&g_is_initialized, 0);
+                }
             } else {
                 InterlockedExchange(&g_is_initialized, 0);
             }
@@ -114,6 +118,23 @@ LRESULT CALLBACK TE_GetMsgHookProc(int nCode, WPARAM wParam, LPARAM lParam)
                     }
                     PostMessageW(target_root, WM_TE_TASKBAR_MOUSEMOVE, (WPARAM)msg->hwnd, TE_PACK_POINT(msg->pt.x, msg->pt.y));
                 }
+            }
+        }
+
+        /* XAML taskbar buttons receive mouse input in child HWNDs, so their
+           mouse-up does not necessarily pass through the Shell_TrayWnd subclass.
+           Marshal the click to the owning taskbar to give plugins one reliable
+           screen-coordinate input event. */
+        if ((msg->message == WM_LBUTTONUP || msg->message == WM_RBUTTONUP) &&
+            g_taskbarHwnd && wParam == PM_REMOVE) {
+            HWND root = TE_TaskbarFindRoot(msg->hwnd);
+            if (!root && (msg->hwnd == g_taskbarHwnd || IsChild(g_taskbarHwnd, msg->hwnd))) {
+                root = g_taskbarHwnd;
+            }
+            if (root) {
+                UINT click_message = msg->message == WM_RBUTTONUP ? WM_TE_TASKBAR_RCLICK : WM_TE_TASKBAR_CLICK;
+                PostMessageW(root, click_message, (WPARAM)msg->hwnd,
+                             TE_PACK_POINT(msg->pt.x, msg->pt.y));
             }
         }
     }
