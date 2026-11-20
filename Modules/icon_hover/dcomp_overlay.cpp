@@ -33,6 +33,7 @@ static IDCompositionVisual* s_island_visual_target0 = nullptr;
 #include <stdio.h>
 #include <math.h>
 #include <d3d11.h>
+#include <d2d1_1.h>
 #include <emmintrin.h>
 
 #ifdef _MSC_VER
@@ -48,7 +49,8 @@ static const char* LOG_TAG = "DCompOverlay";
 static const wchar_t* OVERLAY_CLASS_NAME = L"TaskbarEngineHoverOverlay";
 
 /** DComp device and visual tree state. */
-static ID2D1Factory* s_d2d_factory = nullptr;
+static ID2D1Factory1* s_d2d_factory = nullptr;
+static ID2D1Device* s_d2d_device = nullptr;
 static ID3D11Device* s_d3d_device = nullptr;
 static IDCompositionDevice* s_dcomp_device = nullptr;
 
@@ -57,7 +59,10 @@ struct TE_TargetVisualTree {
     HWND overlay_hwnd;
     IDCompositionTarget* dcomp_target;
     IDCompositionVisual* root_visual;
+    IDCompositionVisual* icon_layer;
+    IDCompositionVisual* widget_layer;
     IDCompositionEffectGroup* root_effect;
+    IDCompositionEffectGroup* fullscreen_effect;
 
     IDCompositionVisual* icon_visuals[TE_HOVER_MAX_ICONS];
     IDCompositionScaleTransform* scale_transforms[TE_HOVER_MAX_ICONS];
@@ -98,6 +103,13 @@ static UINT s_start_pixel_stride = 0;
 #endif
 
 static HWND s_overlay_hwnd_ref = NULL;
+static uint32_t s_widget_client_count = 0;
+static bool s_widget_created_overlay = false;
+static bool s_widget_destroy_pending = false;
+static HWND s_pending_widget_overlay = NULL;
+static uint64_t s_device_generation = 0;
+static bool s_fullscreen_suppressed[TE_MAX_DCOMP_TARGETS] = {};
+static void TE_DCompDestroyDeviceInternal(bool force);
 
 /** Window class registration flag and owner instance. */
 static BOOL s_class_registered = FALSE;
@@ -126,13 +138,18 @@ HWND TE_DCompCreateOverlayWindow(HWND taskbar_hwnd, int x, int y, int width, int
 
     /* Register overlay window class once */
     if (!s_class_registered) {
-        /* In case a previous instance of icon_hover.dll left OVERLAY_CLASS_NAME registered,
-           cleanly destroy any stale overlay windows and unregister the stale class first
-           so RegisterClassExW associates OVERLAY_CLASS_NAME with our current OverlayWndProc. */
+        /* A previous plugin load in this process can leave its class and HWNDs
+           behind. Never destroy a same-named window owned by another process:
+           FindWindowEx sees those too, and DestroyWindow from here would fail. */
         HWND stale_wnd = FindWindowExW(NULL, NULL, OVERLAY_CLASS_NAME, NULL);
         while (stale_wnd) {
-            DestroyWindow(stale_wnd);
-            stale_wnd = FindWindowExW(NULL, NULL, OVERLAY_CLASS_NAME, NULL);
+            HWND next_wnd = FindWindowExW(NULL, stale_wnd, OVERLAY_CLASS_NAME, NULL);
+            DWORD owner_pid = 0;
+            GetWindowThreadProcessId(stale_wnd, &owner_pid);
+            if (owner_pid == GetCurrentProcessId() && !DestroyWindow(stale_wnd)) {
+                TE_LogWrite(TE_LOG_WARNING, LOG_TAG, "Could not destroy a stale overlay owned by this process");
+            }
+            stale_wnd = next_wnd;
         }
         UnregisterClassW(OVERLAY_CLASS_NAME, hinstance);
         UnregisterClassW(OVERLAY_CLASS_NAME, GetModuleHandleW(NULL));
@@ -159,8 +176,15 @@ HWND TE_DCompCreateOverlayWindow(HWND taskbar_hwnd, int x, int y, int width, int
         s_class_hinstance = hinstance;
     }
 
+    /*
+     * This is a top-level popup owned by the taskbar. WS_EX_TRANSPARENT alone
+     * only affects painting for ordinary windows, and HTTRANSPARENT only
+     * continues hit-testing through windows on the same input thread. The
+     * layered-window combination makes this visual-only overlay click-through
+     * even when taskbar buttons are hosted by a different UI thread.
+     */
     HWND overlay = CreateWindowExW(
-        WS_EX_NOREDIRECTIONBITMAP | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+        WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
         OVERLAY_CLASS_NAME,
         NULL,
         WS_POPUP | WS_VISIBLE,
@@ -173,6 +197,13 @@ HWND TE_DCompCreateOverlayWindow(HWND taskbar_hwnd, int x, int y, int width, int
 
     if (!overlay) {
         TE_LogWrite(TE_LOG_ERROR, LOG_TAG, "Failed to create overlay window");
+        return NULL;
+    }
+
+    /* Layered windows need an explicit alpha setting before they are shown. */
+    if (!SetLayeredWindowAttributes(overlay, 0, 255, LWA_ALPHA)) {
+        DestroyWindow(overlay);
+        TE_LogWrite(TE_LOG_ERROR, LOG_TAG, "Failed to initialize click-through overlay window");
         return NULL;
     }
 
@@ -196,6 +227,11 @@ void TE_DCompMoveOverlayWindow(HWND overlay_hwnd, int x, int y, int width, int h
 void TE_DCompDestroyOverlayWindow(HWND overlay_hwnd)
 {
     if (overlay_hwnd && IsWindow(overlay_hwnd)) {
+        if (s_widget_client_count > 0 && s_targets[0].overlay_hwnd == overlay_hwnd) {
+            s_widget_destroy_pending = true;
+            s_pending_widget_overlay = overlay_hwnd;
+            return;
+        }
         for (int i = 0; i < s_target_count; i++) {
             if (s_targets[i].overlay_hwnd == overlay_hwnd) {
                 TE_DCompRemoveTarget(i);
@@ -222,12 +258,36 @@ HRESULT TE_DCompInitDevice(HWND overlay_hwnd)
 {
     if (!overlay_hwnd) return TE_E_INVALIDARG;
 
+    if (s_dcomp_device) {
+        if (s_targets[0].is_active && s_targets[0].overlay_hwnd == overlay_hwnd) return TE_S_OK;
+        if (!s_widget_created_overlay || !s_targets[0].root_visual) return TE_E_FAIL;
+
+        IDCompositionTarget* replacement_target = nullptr;
+        HRESULT rebind_hr = s_dcomp_device->CreateTargetForHwnd(overlay_hwnd, TRUE, &replacement_target);
+        if (FAILED(rebind_hr) || !replacement_target) return rebind_hr;
+        rebind_hr = replacement_target->SetRoot(s_targets[0].root_visual);
+        if (FAILED(rebind_hr)) {
+            replacement_target->Release();
+            return rebind_hr;
+        }
+        HWND old_overlay = s_targets[0].overlay_hwnd;
+        if (s_targets[0].dcomp_target) s_targets[0].dcomp_target->Release();
+        s_targets[0].dcomp_target = replacement_target;
+        s_targets[0].overlay_hwnd = overlay_hwnd;
+        s_overlay_hwnd_ref = overlay_hwnd;
+        s_widget_created_overlay = false;
+        s_dcomp_device->Commit();
+        if (old_overlay && old_overlay != overlay_hwnd && IsWindow(old_overlay)) DestroyWindow(old_overlay);
+        return TE_S_OK;
+    }
+
     s_overlay_hwnd_ref = overlay_hwnd;
 
     /* Create D2D factory */
-    HRESULT hr = D2D1CreateFactory(D2D1_FACTORY_TYPE_MULTI_THREADED, __uuidof(ID2D1Factory), (void**)&s_d2d_factory);
+    HRESULT hr = D2D1CreateFactory(D2D1_FACTORY_TYPE_MULTI_THREADED, __uuidof(ID2D1Factory1), (void**)&s_d2d_factory);
     if (FAILED(hr)) {
         TE_LogWrite(TE_LOG_ERROR, LOG_TAG, "Failed to create D2D factory");
+        TE_DCompDestroyDeviceInternal(true);
         return TE_E_FAIL;
     }
 
@@ -246,6 +306,7 @@ HRESULT TE_DCompInitDevice(HWND overlay_hwnd)
     }
     if (FAILED(hr)) {
         TE_LogWrite(TE_LOG_ERROR, LOG_TAG, "Failed to create D3D11 device");
+        TE_DCompDestroyDeviceInternal(true);
         return TE_E_FAIL;
     }
 
@@ -254,24 +315,34 @@ HRESULT TE_DCompInitDevice(HWND overlay_hwnd)
     hr = s_d3d_device->QueryInterface(__uuidof(IDXGIDevice), (void**)&dxgi_device);
     if (FAILED(hr)) {
         TE_LogWrite(TE_LOG_ERROR, LOG_TAG, "Failed to get DXGI device");
+        TE_DCompDestroyDeviceInternal(true);
         return TE_E_FAIL;
     }
 
     /* Create DComp device using the DXGI device */
     hr = DCompositionCreateDevice(dxgi_device, __uuidof(IDCompositionDevice), (void**)&s_dcomp_device);
+    if (SUCCEEDED(hr)) {
+        const D2D1_CREATION_PROPERTIES d2d_properties = {
+            D2D1_THREADING_MODE_MULTI_THREADED,
+            D2D1_DEBUG_LEVEL_NONE,
+            D2D1_DEVICE_CONTEXT_OPTIONS_NONE
+        };
+        hr = D2D1CreateDevice(dxgi_device, d2d_properties, &s_d2d_device);
+    }
     dxgi_device->Release();
     
     if (FAILED(hr) || !s_dcomp_device) {
         TE_LogWrite(TE_LOG_ERROR, LOG_TAG, "DCompositionCreateDevice failed");
+        TE_DCompDestroyDeviceInternal(true);
         return TE_E_FAIL;
     }
 
     /* Create primary target (index 0) bound to overlay window */
+    s_target_count = 1;
     hr = s_dcomp_device->CreateTargetForHwnd(overlay_hwnd, TRUE, &s_targets[0].dcomp_target);
     if (FAILED(hr) || !s_targets[0].dcomp_target) {
         TE_LogWrite(TE_LOG_ERROR, LOG_TAG, "CreateTargetForHwnd failed");
-        s_dcomp_device->Release();
-        s_dcomp_device = nullptr;
+        TE_DCompDestroyDeviceInternal(true);
         return TE_E_FAIL;
     }
 
@@ -279,10 +350,7 @@ HRESULT TE_DCompInitDevice(HWND overlay_hwnd)
     hr = s_dcomp_device->CreateVisual(&s_targets[0].root_visual);
     if (FAILED(hr) || !s_targets[0].root_visual) {
         TE_LogWrite(TE_LOG_ERROR, LOG_TAG, "Failed to create root visual");
-        s_targets[0].dcomp_target->Release();
-        s_targets[0].dcomp_target = nullptr;
-        s_dcomp_device->Release();
-        s_dcomp_device = nullptr;
+        TE_DCompDestroyDeviceInternal(true);
         return TE_E_FAIL;
     }
 
@@ -290,26 +358,35 @@ HRESULT TE_DCompInitDevice(HWND overlay_hwnd)
     hr = s_targets[0].dcomp_target->SetRoot(s_targets[0].root_visual);
     if (FAILED(hr)) {
         TE_LogWrite(TE_LOG_ERROR, LOG_TAG, "Failed to set root visual");
-        s_targets[0].root_visual->Release();
-        s_targets[0].root_visual = nullptr;
-        s_targets[0].dcomp_target->Release();
-        s_targets[0].dcomp_target = nullptr;
-        s_dcomp_device->Release();
-        s_dcomp_device = nullptr;
+        TE_DCompDestroyDeviceInternal(true);
         return TE_E_FAIL;
     }
 
-    /* Create root effect group for opacity */
+    hr = s_dcomp_device->CreateVisual(&s_targets[0].icon_layer);
+    if (FAILED(hr) || !s_targets[0].icon_layer) { TE_DCompDestroyDeviceInternal(true); return TE_E_FAIL; }
+    hr = s_dcomp_device->CreateVisual(&s_targets[0].widget_layer);
+    if (FAILED(hr) || !s_targets[0].widget_layer) { TE_DCompDestroyDeviceInternal(true); return TE_E_FAIL; }
+    hr = s_targets[0].root_visual->AddVisual(s_targets[0].icon_layer, TRUE, nullptr);
+    if (SUCCEEDED(hr)) hr = s_targets[0].root_visual->AddVisual(s_targets[0].widget_layer, TRUE, s_targets[0].icon_layer);
+    if (FAILED(hr)) { TE_DCompDestroyDeviceInternal(true); return TE_E_FAIL; }
+
+    hr = s_dcomp_device->CreateEffectGroup(&s_targets[0].fullscreen_effect);
+    if (FAILED(hr) || !s_targets[0].fullscreen_effect) { TE_DCompDestroyDeviceInternal(true); return TE_E_FAIL; }
+    s_targets[0].fullscreen_effect->SetOpacity(1.0f);
+    hr = s_targets[0].root_visual->SetEffect(s_targets[0].fullscreen_effect);
+    if (FAILED(hr)) { TE_DCompDestroyDeviceInternal(true); return TE_E_FAIL; }
+
+    /* Fade only the icon layer so persistent widgets remain visible at idle. */
     hr = s_dcomp_device->CreateEffectGroup(&s_targets[0].root_effect);
     if (SUCCEEDED(hr) && s_targets[0].root_effect) {
         s_targets[0].root_effect->SetOpacity(0.0f);
-        s_targets[0].root_visual->SetEffect(s_targets[0].root_effect);
+        s_targets[0].icon_layer->SetEffect(s_targets[0].root_effect);
     }
     s_targets[0].overlay_hwnd = overlay_hwnd;
     s_targets[0].is_active = true;
-    s_target_count = 1;
-
+    s_fullscreen_suppressed[0] = false;
     s_dcomp_device->Commit();
+    ++s_device_generation;
 
     TE_LogWrite(TE_LOG_INFO, LOG_TAG, "DComp device initialized successfully");
     return TE_S_OK;
@@ -365,13 +442,27 @@ HRESULT TE_DCompAddTarget(HWND taskbar_hwnd, HWND overlay_hwnd, int* out_target_
 
     t->dcomp_target->SetRoot(t->root_visual);
 
+    hr = s_dcomp_device->CreateVisual(&t->icon_layer);
+    if (FAILED(hr) || !t->icon_layer) return TE_E_FAIL;
+    hr = s_dcomp_device->CreateVisual(&t->widget_layer);
+    if (FAILED(hr) || !t->widget_layer) return TE_E_FAIL;
+    t->root_visual->AddVisual(t->icon_layer, TRUE, nullptr);
+    t->root_visual->AddVisual(t->widget_layer, TRUE, t->icon_layer);
+
+    hr = s_dcomp_device->CreateEffectGroup(&t->fullscreen_effect);
+    if (FAILED(hr) || !t->fullscreen_effect) return TE_E_FAIL;
+    t->fullscreen_effect->SetOpacity(1.0f);
+    hr = t->root_visual->SetEffect(t->fullscreen_effect);
+    if (FAILED(hr)) return hr;
+
     hr = s_dcomp_device->CreateEffectGroup(&t->root_effect);
     if (SUCCEEDED(hr) && t->root_effect) {
         t->root_effect->SetOpacity(0.0f);
-        t->root_visual->SetEffect(t->root_effect);
+        t->icon_layer->SetEffect(t->root_effect);
     }
 
     t->is_active = true;
+    s_fullscreen_suppressed[idx] = false;
     if (out_target_index) *out_target_index = idx;
     s_dcomp_device->Commit();
     return TE_S_OK;
@@ -381,9 +472,8 @@ static void ReleaseVisualTreeForTarget(int target_idx)
 {
     if (target_idx < 0 || target_idx >= TE_MAX_DCOMP_TARGETS) return;
     TE_TargetVisualTree* t = &s_targets[target_idx];
-    if (t->root_visual) {
-        t->root_visual->RemoveAllVisuals();
-    }
+    if (t->icon_layer) t->icon_layer->RemoveAllVisuals();
+    if (t->widget_layer) t->widget_layer->RemoveAllVisuals();
     for (int i = 0; i < TE_HOVER_MAX_ICONS; i++) {
         if (t->icon_effect_groups[i]) { t->icon_effect_groups[i]->Release(); t->icon_effect_groups[i] = nullptr; }
         if (t->matrix_transforms[i]) { t->matrix_transforms[i]->Release(); t->matrix_transforms[i] = nullptr; }
@@ -414,21 +504,31 @@ void TE_DCompRemoveTarget(int target_index)
     if (!t->is_active) return;
 
     if (target_index == 0) {
+        if (s_widget_client_count > 0) return;
         TE_DynamicIslandDetachVisualTree();
         s_island_visual_target0 = nullptr;
     }
 
     ReleaseVisualTreeForTarget(target_index);
     if (t->root_effect) { t->root_effect->Release(); t->root_effect = nullptr; }
+    if (t->icon_layer) { t->icon_layer->Release(); t->icon_layer = nullptr; }
+    if (t->widget_layer) { t->widget_layer->Release(); t->widget_layer = nullptr; }
     if (t->root_visual) { t->root_visual->Release(); t->root_visual = nullptr; }
+    if (t->fullscreen_effect) { t->fullscreen_effect->Release(); t->fullscreen_effect = nullptr; }
     if (t->dcomp_target) { t->dcomp_target->Release(); t->dcomp_target = nullptr; }
     t->is_active = false;
     t->overlay_hwnd = NULL;
     t->taskbar_hwnd = NULL;
 }
 
-void TE_DCompDestroyDevice(void)
+static void TE_DCompDestroyDeviceInternal(bool force)
 {
+    if (!force && s_widget_client_count > 0) {
+        s_widget_destroy_pending = true;
+        s_pending_widget_overlay = s_targets[0].overlay_hwnd;
+        return;
+    }
+    const bool had_device = s_dcomp_device || s_d3d_device || s_d2d_device || s_d2d_factory;
     TE_DynamicIslandDetachVisualTree();
     s_island_visual_target0 = nullptr;
 
@@ -436,18 +536,25 @@ void TE_DCompDestroyDevice(void)
 
     for (int i = 0; i < s_target_count; i++) {
         if (s_targets[i].root_effect) { s_targets[i].root_effect->Release(); s_targets[i].root_effect = nullptr; }
+        if (s_targets[i].icon_layer) { s_targets[i].icon_layer->Release(); s_targets[i].icon_layer = nullptr; }
+        if (s_targets[i].widget_layer) { s_targets[i].widget_layer->Release(); s_targets[i].widget_layer = nullptr; }
         if (s_targets[i].root_visual) { s_targets[i].root_visual->Release(); s_targets[i].root_visual = nullptr; }
+        if (s_targets[i].fullscreen_effect) { s_targets[i].fullscreen_effect->Release(); s_targets[i].fullscreen_effect = nullptr; }
         if (s_targets[i].dcomp_target) { s_targets[i].dcomp_target->Release(); s_targets[i].dcomp_target = nullptr; }
         s_targets[i].is_active = false;
     }
     s_target_count = 0;
+    memset(s_targets, 0, sizeof(s_targets));
 
     if (s_start_button_bitmap) { s_start_button_bitmap->Release(); s_start_button_bitmap = nullptr; }
     if (s_start_pixel_data) { free(s_start_pixel_data); s_start_pixel_data = nullptr; s_start_pixel_w = 0; s_start_pixel_h = 0; s_start_pixel_stride = 0; }
 
     if (s_dcomp_device) { s_dcomp_device->Release(); s_dcomp_device = nullptr; }
+    if (s_d2d_device) { s_d2d_device->Release(); s_d2d_device = nullptr; }
     if (s_d3d_device) { s_d3d_device->Release(); s_d3d_device = nullptr; }
     if (s_d2d_factory) { s_d2d_factory->Release(); s_d2d_factory = nullptr; }
+    s_overlay_hwnd_ref = NULL;
+    if (had_device) ++s_device_generation;
 
     /* Cleanly unregister overlay class if no overlay windows remain */
     if (!FindWindowExW(NULL, NULL, OVERLAY_CLASS_NAME, NULL)) {
@@ -458,6 +565,11 @@ void TE_DCompDestroyDevice(void)
     }
 
     TE_LogWrite(TE_LOG_INFO, LOG_TAG, "DComp device destroyed");
+}
+
+void TE_DCompDestroyDevice(void)
+{
+    TE_DCompDestroyDeviceInternal(false);
 }
 
 HRESULT TE_DCompBuildVisualTreeForTarget(int target_index, int count, const TE_IconElementInfo* elements, const HBITMAP* bitmaps, int baseline_y, int overlay_x, int overlay_y)
@@ -531,9 +643,9 @@ HRESULT TE_DCompBuildVisualTreeForTarget(int target_index, int count, const TE_I
 
             /* Add as child of root visual */
             if (i == 0) {
-                t->root_visual->AddVisual(t->icon_visuals[i], TRUE, nullptr);
+                t->icon_layer->AddVisual(t->icon_visuals[i], TRUE, nullptr);
             } else if (t->icon_visuals[i - 1]) {
-                t->root_visual->AddVisual(t->icon_visuals[i], TRUE, t->icon_visuals[i - 1]);
+                t->icon_layer->AddVisual(t->icon_visuals[i], TRUE, t->icon_visuals[i - 1]);
             }
         }
 
@@ -896,7 +1008,7 @@ HRESULT TE_DCompSetOverlayAlphaForTarget(int target_index, float alpha)
     }
 
     if (t->overlay_hwnd && IsWindow(t->overlay_hwnd)) {
-        if (alpha <= 0.0f && !s_custom_start_enabled && !island_visible) {
+        if (alpha <= 0.0f && !s_custom_start_enabled && !island_visible && s_widget_client_count == 0) {
             ShowWindow(t->overlay_hwnd, SW_HIDE);
         } else {
             ShowWindow(t->overlay_hwnd, SW_SHOWNOACTIVATE);
@@ -905,6 +1017,20 @@ HRESULT TE_DCompSetOverlayAlphaForTarget(int target_index, float alpha)
     }
 
     return TE_S_OK;
+}
+
+HRESULT TE_DCompSetFullscreenSuppressedForTarget(int target_index, int suppressed)
+{
+    if (target_index < 0 || target_index >= TE_MAX_DCOMP_TARGETS) return TE_E_INVALIDARG;
+    TE_TargetVisualTree* target = &s_targets[target_index];
+    if (!target->is_active || !target->root_visual || !s_dcomp_device) return TE_E_FAIL;
+    const bool hide = suppressed != 0;
+    if (s_fullscreen_suppressed[target_index] == hide) return TE_S_OK;
+    if (!target->fullscreen_effect) return TE_E_FAIL;
+    const HRESULT hr = target->fullscreen_effect->SetOpacity(hide ? 0.0f : 1.0f);
+    if (FAILED(hr)) return hr;
+    s_fullscreen_suppressed[target_index] = hide;
+    return s_dcomp_device->Commit();
 }
 
 HRESULT TE_DCompSetOverlayAlpha(float alpha)
@@ -945,7 +1071,9 @@ HRESULT TE_DCompHandleDeviceLoss(void)
     }
     int custom_start = s_custom_start_enabled;
 
-    TE_DCompDestroyDevice();
+    /* Existing widget COM references keep their old objects alive until the
+       host sees a new generation and rebuilds its per-widget surfaces. */
+    TE_DCompDestroyDeviceInternal(true);
 
     if (!primary_overlay || !IsWindow(primary_overlay)) {
         TE_LogWrite(TE_LOG_ERROR, LOG_TAG, "Device loss recovery aborted: no valid primary overlay window");
@@ -1373,4 +1501,99 @@ void TE_DCompDetachIslandVisual(IDCompositionVisual* island_visual)
 int TE_DCompIsIslandVisible(void)
 {
     return TE_DynamicIslandIsVisible() ? 1 : 0;
+}
+
+HRESULT TE_DCompWidgetAcquire(HWND taskbar_hwnd, TE_DCompWidgetResources* resources)
+{
+    if (!taskbar_hwnd || !resources) return TE_E_INVALIDARG;
+    memset(resources, 0, sizeof(*resources));
+
+    if (!s_dcomp_device) {
+        RECT rect = {};
+        if (!GetWindowRect(taskbar_hwnd, &rect)) return HRESULT_FROM_WIN32(GetLastError());
+        HWND overlay = TE_DCompCreateOverlayWindow(taskbar_hwnd, rect.left, rect.top,
+                                                   rect.right - rect.left, rect.bottom - rect.top);
+        if (!overlay) return TE_E_FAIL;
+        HRESULT hr = TE_DCompInitDevice(overlay);
+        if (FAILED(hr)) {
+            TE_DCompDestroyOverlayWindow(overlay);
+            return hr;
+        }
+        s_widget_created_overlay = true;
+    }
+
+    if (!s_targets[0].is_active || !s_targets[0].widget_layer || !s_d2d_factory || !s_d2d_device) {
+        return TE_E_FAIL;
+    }
+
+    if (s_targets[0].overlay_hwnd && IsWindow(s_targets[0].overlay_hwnd)) {
+        SetLastError(ERROR_SUCCESS);
+        if (!SetWindowPos(s_targets[0].overlay_hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                          SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW)) {
+            const DWORD error = GetLastError();
+            char message[192]{};
+            snprintf(message, sizeof(message), "SetWindowPos(widget overlay HWND=%p) failed: GetLastError=%lu",
+                     s_targets[0].overlay_hwnd, error);
+            TE_LogWrite(TE_LOG_ERROR, LOG_TAG, message);
+            return HRESULT_FROM_WIN32(error);
+        }
+    } else {
+        TE_LogWrite(TE_LOG_ERROR, LOG_TAG, "Widget overlay HWND is invalid at acquisition");
+        return HRESULT_FROM_WIN32(ERROR_INVALID_WINDOW_HANDLE);
+    }
+
+    ++s_widget_client_count;
+    resources->d2d_factory = s_d2d_factory;
+    resources->d2d_device = s_d2d_device;
+    resources->dcomp_device = s_dcomp_device;
+    resources->widget_root = s_targets[0].widget_layer;
+    resources->overlay_hwnd = s_targets[0].overlay_hwnd;
+    resources->d2d_factory->AddRef();
+    resources->d2d_device->AddRef();
+    resources->dcomp_device->AddRef();
+    resources->widget_root->AddRef();
+    return TE_S_OK;
+}
+
+void TE_DCompWidgetRelease(TE_DCompWidgetResources* resources)
+{
+    bool had_resources = false;
+    if (resources) {
+        had_resources = resources->widget_root || resources->dcomp_device || resources->d2d_device || resources->d2d_factory;
+        if (resources->widget_root) resources->widget_root->Release();
+        if (resources->dcomp_device) resources->dcomp_device->Release();
+        if (resources->d2d_device) resources->d2d_device->Release();
+        if (resources->d2d_factory) resources->d2d_factory->Release();
+        memset(resources, 0, sizeof(*resources));
+    }
+
+    if (had_resources && s_widget_client_count > 0) --s_widget_client_count;
+    if (!had_resources) return;
+    if (s_widget_client_count != 0) return;
+
+    const bool should_destroy = s_widget_destroy_pending || s_widget_created_overlay;
+    HWND overlay = s_pending_widget_overlay;
+    if (!overlay && s_widget_created_overlay && s_target_count > 0) overlay = s_targets[0].overlay_hwnd;
+    s_widget_destroy_pending = false;
+    s_pending_widget_overlay = NULL;
+    s_widget_created_overlay = false;
+    if (should_destroy) {
+        TE_DCompDestroyDevice();
+        if (overlay && IsWindow(overlay)) TE_DCompDestroyOverlayWindow(overlay);
+    }
+}
+
+HRESULT TE_DCompWidgetCommit(void)
+{
+    return TE_DCompCommit();
+}
+
+HWND TE_DCompWidgetGetOverlayWindow(void)
+{
+    return s_target_count > 0 ? s_targets[0].overlay_hwnd : NULL;
+}
+
+uint64_t TE_DCompWidgetGetGeneration(void)
+{
+    return s_device_generation;
 }

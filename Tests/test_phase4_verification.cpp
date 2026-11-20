@@ -18,18 +18,57 @@
 
 using Catch::Matchers::WithinAbs;
 
-/* ── SYS-009: COM MTA Apartment Initialized on Frame Loop Worker Thread ── */
+static volatile LONG g_frame_tick_count = 0;
 
-TEST_CASE("Phase 4 - Dedicated Animation Worker Thread with COM MTA Initialization (SYS-009)", "[phase4][sys_009]") {
-    TE_FrameLoopShutdown();
+static LRESULT CALLBACK FrameLoopTestWindowProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
+    if (msg == TE_WM_FRAME_LOOP_TICK) {
+        InterlockedIncrement(&g_frame_tick_count);
+        TE_FrameLoopOnUiThreadFrameTick();
+        return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wparam, lparam);
+}
+
+static HWND CreateFrameLoopTestWindow(void) {
+    static const wchar_t* class_name = L"TE_FrameLoopTestWindow";
+    WNDCLASSW wc = {};
+    wc.lpfnWndProc = FrameLoopTestWindowProc;
+    wc.hInstance = GetModuleHandleW(NULL);
+    wc.lpszClassName = class_name;
+    RegisterClassW(&wc);
+    return CreateWindowW(class_name, L"", WS_POPUP, 0, 0, 1, 1, NULL, NULL, wc.hInstance, NULL);
+}
+
+static void PumpFrameLoopMessagesFor(DWORD duration_ms) {
+    const ULONGLONG deadline = GetTickCount64() + duration_ms;
+    while (GetTickCount64() < deadline) {
+        MSG msg;
+        while (PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        Sleep(1);
+    }
+}
+
+/* ── SYS-009: Frame timer dispatches animation work to the UI thread ───── */
+
+TEST_CASE("Phase 4 - Frame timer marshals ticks to the UI thread (SYS-009)", "[phase4][sys_009]") {
+    REQUIRE(SUCCEEDED(TE_FrameLoopShutdown()));
     REQUIRE(TE_FrameLoopIsActive() == 0);
+
+    HWND test_hwnd = CreateFrameLoopTestWindow();
+    REQUIRE(test_hwnd != NULL);
+    InterlockedExchange(&g_frame_tick_count, 0);
+    TE_FrameLoopSetTaskbarWindow(test_hwnd);
 
     HRESULT hr = TE_FrameLoopStart();
     REQUIRE(SUCCEEDED(hr));
     REQUIRE(TE_FrameLoopIsActive() == 1);
 
-    // Give worker thread time to initialize
-    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    // Pump the test UI thread so posted frame ticks are handled here.
+    PumpFrameLoopMessagesFor(60);
+    REQUIRE(g_frame_tick_count > 0);
 
     // Verify refresh rate and timer
     double rate = TE_FrameLoopGetRefreshRate();
@@ -40,7 +79,10 @@ TEST_CASE("Phase 4 - Dedicated Animation Worker Thread with COM MTA Initializati
     TE_FrameLoopStop();
     REQUIRE(TE_FrameLoopIsActive() == 0);
 
-    TE_FrameLoopShutdown();
+    REQUIRE(SUCCEEDED(TE_FrameLoopShutdown()));
+    TE_FrameLoopSetTaskbarWindow(NULL);
+    DestroyWindow(test_hwnd);
+    UnregisterClassW(L"TE_FrameLoopTestWindow", GetModuleHandleW(NULL));
     REQUIRE(TE_FrameLoopIsActive() == 0);
 }
 
@@ -165,6 +207,9 @@ TEST_CASE("Phase 4 - Display Refresh Rate Synchronization & High-Resolution Time
 TEST_CASE("Phase 4 - Stationary Mouse Hover Settling to 0.0% CPU (PERF-104)", "[phase4][perf_104]") {
     TE_DynamicIslandDisable();
     TE_IconHoverState saved_state = g_hover_state;
+    HWND test_hwnd = CreateFrameLoopTestWindow();
+    REQUIRE(test_hwnd != NULL);
+    TE_FrameLoopSetTaskbarWindow(test_hwnd);
 
     g_hover_state.enabled = 1;
     g_hover_state.monitor_count = 1;
@@ -196,7 +241,7 @@ TEST_CASE("Phase 4 - Stationary Mouse Hover Settling to 0.0% CPU (PERF-104)", "[
 
     // Keep cursor motionless at (200, 1060) and allow interpolation to reach resting equilibrium
     for (int w = 0; w < 50 && TE_FrameLoopIsActive() != 0; w++) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        PumpFrameLoopMessagesFor(10);
     }
 
     // Timer must automatically sleep when stationary hover reaches equilibrium
@@ -214,12 +259,15 @@ TEST_CASE("Phase 4 - Stationary Mouse Hover Settling to 0.0% CPU (PERF-104)", "[
     REQUIRE(TE_FrameLoopIsActive() == 1);
 
     for (int w = 0; w < 50 && TE_FrameLoopIsActive() != 0; w++) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        PumpFrameLoopMessagesFor(10);
     }
     REQUIRE(TE_FrameLoopIsActive() == 0);
 
     g_hover_state = saved_state;
-    TE_FrameLoopShutdown();
+    REQUIRE(SUCCEEDED(TE_FrameLoopShutdown()));
+    TE_FrameLoopSetTaskbarWindow(NULL);
+    DestroyWindow(test_hwnd);
+    UnregisterClassW(L"TE_FrameLoopTestWindow", GetModuleHandleW(NULL));
 }
 
 /* ── PERF-105: Geometry Generation Desync Frame Drops ─────────────────── */
@@ -274,12 +322,11 @@ TEST_CASE("Phase 4 - Frame Loop Spurious Wakeups from Media Timelines (PERF-501)
     cfg.height = 30;
     cfg.announce_duration_ms = 0;
     TE_DynamicIslandInit(&cfg);
-    TE_DynamicIslandEnable(NULL, 96);
-    TE_DynamicIslandSetWakeCallback(TE_FrameLoopWakeDynamicIsland);
-
     MockMediaSource mock_source;
     mock_source.Initialize();
     TE_DynamicIslandSetMediaSource(&mock_source);
+    TE_DynamicIslandSetWakeCallback(TE_FrameLoopWakeDynamicIsland);
+    TE_DynamicIslandEnable(NULL, 96);
 
     // Initially active playing track
     mock_source.SetMockTrack(L"Song", L"Artist", TEMediaPlaybackStatus::Playing);
@@ -320,11 +367,10 @@ TEST_CASE("Phase 4 - Static Announcement Window Busy Loop Decoupling (PERF-503)"
     cfg.expand_duration_ms = 50;
     cfg.collapse_duration_ms = 50;
     TE_DynamicIslandInit(&cfg);
-    TE_DynamicIslandEnable(NULL, 96);
-
     MockMediaSource mock_source;
     mock_source.Initialize();
     TE_DynamicIslandSetMediaSource(&mock_source);
+    TE_DynamicIslandEnable(NULL, 96);
 
     // Track starts playing, triggering announcement
     mock_source.SetMockTrack(L"New Track", L"New Artist", TEMediaPlaybackStatus::Playing);

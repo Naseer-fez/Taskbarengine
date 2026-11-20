@@ -14,6 +14,8 @@
 #include <sdk/te_jsonc.h>
 #include <cJSON.h>
 #include <windows.h>
+#include <windowsx.h>
+#include <dwmapi.h>
 #include <objbase.h>
 #include <commctrl.h>
 #include <stdio.h>
@@ -27,6 +29,7 @@
 #include "icon_capture.h"
 #include "dcomp_overlay.h"
 #include "frame_loop.h"
+#include "dynamic_island.h"
 
 /* ── Global State ─────────────────────────────────────────────────── */
 
@@ -411,6 +414,8 @@ static void RebuildGeometry(void) {
 
 #define WM_TE_ICONS_DISCOVERED (WM_APP + 142)
 #define SUBCLASS_HOVER_ID 0x5448
+#define FULLSCREEN_SUPPRESSION_TIMER_ID 0x4653
+#define FULLSCREEN_SUPPRESSION_INTERVAL_MS 250
 
 typedef struct DiscoveryPayload {
     int monitor_index;
@@ -421,6 +426,62 @@ typedef struct DiscoveryPayload {
 
 static HANDLE s_discovery_thread = NULL;
 static HANDLE s_discovery_trigger_event = NULL;
+static BOOL s_fullscreen_state[TE_MAX_DCOMP_TARGETS] = { 0 };
+static BOOL s_fullscreen_state_known[TE_MAX_DCOMP_TARGETS] = { 0 };
+
+static BOOL IsFullscreenForegroundOnTaskbar(HWND taskbar) {
+    HWND foreground = GetForegroundWindow();
+    if (!foreground || !taskbar) return FALSE;
+    HWND root = GetAncestor(foreground, GA_ROOT);
+    if (!root || root == taskbar || root == GetShellWindow() || !IsWindowVisible(root)) return FALSE;
+
+    const HMONITOR target_monitor = MonitorFromWindow(taskbar, MONITOR_DEFAULTTONULL);
+    if (!target_monitor || MonitorFromWindow(root, MONITOR_DEFAULTTONULL) != target_monitor) return FALSE;
+
+    MONITORINFO monitor_info = { sizeof(monitor_info) };
+    if (!GetMonitorInfoW(target_monitor, &monitor_info)) return FALSE;
+
+    RECT frame = {};
+    HRESULT hr = DwmGetWindowAttribute(root, DWMWA_EXTENDED_FRAME_BOUNDS, &frame, sizeof(frame));
+    if (FAILED(hr) && !GetWindowRect(root, &frame)) return FALSE;
+
+    /* Extended frame bounds exclude the invisible resize border on maximized
+       windows, so ordinary maximized apps retain the taskbar. */
+    const LONG tolerance = 2;
+    return frame.left <= monitor_info.rcMonitor.left + tolerance &&
+           frame.top <= monitor_info.rcMonitor.top + tolerance &&
+           frame.right >= monitor_info.rcMonitor.right - tolerance &&
+           frame.bottom >= monitor_info.rcMonitor.bottom - tolerance;
+}
+
+static void UpdateFullscreenSuppression(void) {
+    for (int i = 0; i < g_hover_state.monitor_count; ++i) {
+        TE_MonitorState* monitor = &g_hover_state.monitors[i];
+        if (!monitor->is_active || !monitor->taskbar_hwnd) continue;
+        const BOOL suppressed = IsFullscreenForegroundOnTaskbar(monitor->taskbar_hwnd);
+        HRESULT hr = TE_DCompSetFullscreenSuppressedForTarget(monitor->target_index, suppressed);
+        if (FAILED(hr)) {
+            HoverLog(TE_LOG_WARNING, "Could not update fullscreen overlay visibility for target %d (0x%08lX)",
+                     monitor->target_index, (unsigned long)hr);
+        } else if (monitor->target_index >= 0 && monitor->target_index < TE_MAX_DCOMP_TARGETS &&
+                   (!s_fullscreen_state_known[monitor->target_index] ||
+                    s_fullscreen_state[monitor->target_index] != suppressed)) {
+            s_fullscreen_state[monitor->target_index] = suppressed;
+            s_fullscreen_state_known[monitor->target_index] = TRUE;
+            HoverLog(TE_LOG_INFO, "Overlay visuals %s for fullscreen foreground on target %d",
+                     suppressed ? "hidden" : "restored", monitor->target_index);
+        }
+    }
+}
+
+static void EnsureFullscreenSuppressionTimer(void) {
+    if (!g_hover_state.enabled || g_hover_state.monitor_count <= 0) return;
+    HWND primary = g_hover_state.monitors[0].taskbar_hwnd;
+    if (primary && IsWindow(primary) &&
+        !SetTimer(primary, FULLSCREEN_SUPPRESSION_TIMER_ID, FULLSCREEN_SUPPRESSION_INTERVAL_MS, NULL)) {
+        HoverLog(TE_LOG_WARNING, "Could not start fullscreen visibility timer (error=%lu)", GetLastError());
+    }
+}
 static HANDLE s_discovery_stop_event = NULL;
 static SRWLOCK s_discovery_lock = SRWLOCK_INIT;
 static volatile DiscoveryPayload* s_pending_discovery[TE_MAX_MONITORS] = { 0 };
@@ -568,6 +629,9 @@ static DWORD WINAPI UiaDiscoveryWorkerThread(LPVOID lpParam) {
     (void)lpParam;
     /* Initialize COM strictly as MTA for worker thread (SYS-007 & PERF-404) */
     HRESULT hr_co = CoInitializeEx(NULL, COINIT_MULTITHREADED);
+    if (SUCCEEDED(hr_co)) {
+        CoEnableCallCancellation(NULL);
+    }
 
     while (1) {
         HANDLE events[2] = { s_discovery_stop_event, s_discovery_trigger_event };
@@ -661,13 +725,55 @@ static DWORD WINAPI UiaDiscoveryWorkerThread(LPVOID lpParam) {
     }
 
     if (SUCCEEDED(hr_co)) {
+        CoDisableCallCancellation(NULL);
         CoUninitialize();
     }
     return 0;
 }
 
+static HRESULT StopDiscoveryWorker(void) {
+    AcquireSRWLockExclusive(&s_discovery_lock);
+    if (s_discovery_stop_event) {
+        SetEvent(s_discovery_stop_event);
+    }
+    if (s_discovery_thread) {
+        DWORD thread_id = GetThreadId(s_discovery_thread);
+        if (thread_id) {
+            CoCancelCall(thread_id, 1000);
+        }
+        DWORD wait_result = WaitForSingleObject(s_discovery_thread, 3000);
+        if (wait_result != WAIT_OBJECT_0) {
+            ReleaseSRWLockExclusive(&s_discovery_lock);
+            HoverLog(TE_LOG_ERROR, "UIA discovery worker did not stop; retaining plugin module for safety");
+            return TE_E_FAIL;
+        }
+        CloseHandle(s_discovery_thread);
+        s_discovery_thread = NULL;
+    }
+    if (s_discovery_trigger_event) {
+        CloseHandle(s_discovery_trigger_event);
+        s_discovery_trigger_event = NULL;
+    }
+    if (s_discovery_stop_event) {
+        CloseHandle(s_discovery_stop_event);
+        s_discovery_stop_event = NULL;
+    }
+    ReleaseSRWLockExclusive(&s_discovery_lock);
+
+    for (int m = 0; m < TE_MAX_MONITORS; m++) {
+        DiscoveryPayload* payload = (DiscoveryPayload*)InterlockedExchangePointer(
+            (PVOID*)&s_pending_discovery[m], NULL);
+        if (payload) free(payload);
+    }
+    return TE_S_OK;
+}
+
 static LRESULT CALLBACK IconHoverSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData) {
     (void)uIdSubclass; (void)dwRefData;
+    if (msg == WM_TIMER && wParam == FULLSCREEN_SUPPRESSION_TIMER_ID) {
+        UpdateFullscreenSuppression();
+        return 0;
+    }
     if (msg == WM_NCDESTROY) {
         RemoveWindowSubclass(hwnd, IconHoverSubclassProc, uIdSubclass);
         return DefSubclassProc(hwnd, msg, wParam, lParam);
@@ -690,18 +796,15 @@ static LRESULT CALLBACK IconHoverSubclassProc(HWND hwnd, UINT msg, WPARAM wParam
         }
         return 0;
     }
-    if ((msg == WM_LBUTTONUP || msg == WM_LBUTTONDOWN || msg == WM_LBUTTONDBLCLK) && TE_DCompIsCustomStartButtonEnabled()) {
-        POINT pt = { (short)LOWORD(lParam), (short)HIWORD(lParam) };
-        ClientToScreen(hwnd, &pt);
-        RECT sb_bounds;
-        if (TE_DCompGetStartButtonBounds(&sb_bounds) && PtInRect(&sb_bounds, pt)) {
-            if (msg == WM_LBUTTONUP) {
-                PostMessageW(hwnd, WM_SYSCOMMAND, SC_TASKLIST, 0);
-            }
-            return 0;
-        }
-    }
     return DefSubclassProc(hwnd, msg, wParam, lParam);
+}
+
+static BOOL InstallTaskbarSubclass(HWND hwnd) {
+    if (!hwnd || !IsWindow(hwnd)) return FALSE;
+    if (SetWindowSubclass(hwnd, IconHoverSubclassProc, SUBCLASS_HOVER_ID, 0)) return TRUE;
+    HoverLog(TE_LOG_WARNING, "Could not install taskbar input subclass on HWND=%p (error=%lu)",
+             (void*)hwnd, GetLastError());
+    return FALSE;
 }
 
 /**
@@ -945,6 +1048,32 @@ static void OnTaskbarMouse(uint32_t type, const void* data, void* user_data) {
     }
 }
 
+static void OnTaskbarClick(uint32_t type, const void* data, void* user_data) {
+    (void)type; (void)user_data;
+    const TE_TaskbarClickData* click = (const TE_TaskbarClickData*)data;
+    if (!g_hover_state.enabled || !click || click->button != 0) return;
+
+    if (TE_DCompIsCustomStartButtonEnabled()) {
+        int target_index = 0;
+        for (int i = 0; i < g_hover_state.monitor_count; ++i) {
+            if (g_hover_state.monitors[i].taskbar_hwnd == click->taskbar_hwnd) {
+                target_index = g_hover_state.monitors[i].target_index;
+                break;
+            }
+        }
+        RECT start_bounds = { 0 };
+        if (TE_DCompGetStartButtonBoundsForTarget(target_index, &start_bounds) &&
+            PtInRect(&start_bounds, click->cursor_pos)) {
+            PostMessageW(click->taskbar_hwnd, WM_SYSCOMMAND, SC_TASKLIST, 0);
+            return;
+        }
+    }
+
+    if (TE_DynamicIslandIsEnabled()) {
+        TE_DynamicIslandCheckClick((float)click->cursor_pos.x, (float)click->cursor_pos.y);
+    }
+}
+
 /**
  * Update monitor overlay windows and geometry when display or taskbar geometry changes.
  */
@@ -966,6 +1095,7 @@ static void UpdateMonitors(void) {
             }
         }
         if (!found && g_hover_state.monitors[i].is_active) {
+            if (tb && IsWindow(tb)) RemoveWindowSubclass(tb, IconHoverSubclassProc, SUBCLASS_HOVER_ID);
             if (g_hover_state.monitors[i].overlay_hwnd) {
                 TE_DCompRemoveTarget(g_hover_state.monitors[i].target_index);
                 TE_DCompDestroyOverlayWindow(g_hover_state.monitors[i].overlay_hwnd);
@@ -995,6 +1125,11 @@ static void UpdateMonitors(void) {
             int oh = (mon->geometry.taskbarRect.bottom - mon->geometry.taskbarRect.top) + mon->geometry.headroom_y - 1;
             TE_DCompMoveOverlayWindow(mon->overlay_hwnd, ox, oy, ow, oh);
             mon->is_active = 1;
+            if (!InstallTaskbarSubclass(tb) && TE_DCompIsCustomStartButtonEnabled()) {
+                TE_DCompSetCustomStartButtonEnabled(0);
+                TE_UiaHideStartButtonAll(FALSE);
+                HoverLog(TE_LOG_WARNING, "Restored native Start buttons after taskbar reattachment failed");
+            }
         } else if (g_hover_state.monitor_count < TE_MAX_MONITORS) {
             int new_idx = g_hover_state.monitor_count;
             TE_MonitorState* mon = &g_hover_state.monitors[new_idx];
@@ -1019,6 +1154,11 @@ static void UpdateMonitors(void) {
             HRESULT hr = TE_DCompAddTarget(tb, mon->overlay_hwnd, &target_idx);
             mon->target_index = target_idx;
             mon->is_active = (TE_SUCCEEDED(hr) && mon->overlay_hwnd != NULL);
+            if (mon->is_active && !InstallTaskbarSubclass(tb) && TE_DCompIsCustomStartButtonEnabled()) {
+                TE_DCompSetCustomStartButtonEnabled(0);
+                TE_UiaHideStartButtonAll(FALSE);
+                HoverLog(TE_LOG_WARNING, "Restored native Start buttons after subclass installation failed");
+            }
             g_hover_state.monitor_count++;
         }
     }
@@ -1027,6 +1167,9 @@ static void UpdateMonitors(void) {
         g_hover_state.overlay_hwnd = g_hover_state.monitors[0].overlay_hwnd;
         g_hover_state.geometry = g_hover_state.monitors[0].geometry;
     }
+
+    EnsureFullscreenSuppressionTimer();
+    UpdateFullscreenSuppression();
 
     TE_IconCaptureInvalidate();
     RebuildIconData();
@@ -1079,10 +1222,6 @@ static HRESULT Initialize(const PluginContext* ctx) {
     memset(&g_hover_state, 0, sizeof(g_hover_state));
     g_hover_state.ctx = ctx;
     InitializeSRWLock(&g_hover_state.state_lock);
-
-    if (ctx && ctx->log) {
-        TE_LogSetCallback(ctx->log);
-    }
 
     /* Set defaults */
     g_hover_state.config.max_scale = 1.3f;
@@ -1223,22 +1362,26 @@ static HRESULT Enable(void) {
     }
 
 #ifndef TE_HOVER_TESTLIB
-    /* Load custom start button image if specified and hide native Start buttons across all displays */
+    /* Load custom Start first, but do not hide the native buttons until every
+       active taskbar can receive the replacement click handler. */
     if (g_hover_state.config.start_image_path[0] != L'\0') {
         TE_DCompLoadStartImage(g_hover_state.config.start_image_path);
-        if (TE_DCompIsCustomStartButtonEnabled()) {
-            TE_UiaHideStartButtonAll(TRUE);
-        } else {
-            TE_UiaHideStartButtonAll(FALSE);
+    } else {
+        TE_DCompSetCustomStartButtonEnabled(0);
+    }
+
+    BOOL all_taskbars_subclassed = TRUE;
+    for (int i = 0; i < g_hover_state.monitor_count; ++i) {
+        TE_MonitorState* monitor = &g_hover_state.monitors[i];
+        if (monitor->taskbar_hwnd && monitor->is_active) {
+            if (!InstallTaskbarSubclass(monitor->taskbar_hwnd)) all_taskbars_subclassed = FALSE;
         }
+    }
+    if (TE_DCompIsCustomStartButtonEnabled() && all_taskbars_subclassed) {
+        TE_UiaHideStartButtonAll(TRUE);
     } else {
         TE_DCompSetCustomStartButtonEnabled(0);
         TE_UiaHideStartButtonAll(FALSE);
-    }
-
-    /* Subclass primary taskbar to receive UIA discovery messages */
-    if (primary) {
-        SetWindowSubclass(primary, IconHoverSubclassProc, SUBCLASS_HOVER_ID, 0);
     }
 
     /* Discover icons asynchronously via dedicated MTA background worker thread */
@@ -1248,6 +1391,7 @@ static HRESULT Enable(void) {
     g_hover_state.ctx->subscribe(TE_EVENT_SHELL_HOOK, OnShellHook, NULL);
     g_hover_state.ctx->subscribe(TE_EVENT_CONFIG_CHANGED, OnConfigChanged, NULL);
     g_hover_state.ctx->subscribe(TE_EVENT_TASKBAR_MOUSE, OnTaskbarMouse, NULL);
+    g_hover_state.ctx->subscribe(TE_EVENT_TASKBAR_CLICK, OnTaskbarClick, NULL);
     g_hover_state.ctx->subscribe(TE_EVENT_DPI_CHANGED, OnDpiChanged, NULL);
     g_hover_state.ctx->subscribe(TE_EVENT_TASKBAR_GEOMETRY, OnTaskbarGeometry, NULL);
     g_hover_state.ctx->subscribe(TE_EVENT_DISPLAY_CHANGED, OnDisplayChanged, NULL);
@@ -1267,6 +1411,8 @@ static HRESULT Enable(void) {
     }
 
     g_hover_state.enabled = 1;
+    EnsureFullscreenSuppressionTimer();
+    UpdateFullscreenSuppression();
     HoverLog(TE_LOG_INFO, "Enable complete: %d monitors, primary icons %d, overlay ready",
              g_hover_state.monitor_count, g_hover_state.anim_count);
 
@@ -1301,14 +1447,16 @@ static HRESULT Disable(void) {
     g_hover_state.ctx->unsubscribe(TE_EVENT_SHELL_HOOK, OnShellHook);
     g_hover_state.ctx->unsubscribe(TE_EVENT_CONFIG_CHANGED, OnConfigChanged);
     g_hover_state.ctx->unsubscribe(TE_EVENT_TASKBAR_MOUSE, OnTaskbarMouse);
+    g_hover_state.ctx->unsubscribe(TE_EVENT_TASKBAR_CLICK, OnTaskbarClick);
     g_hover_state.ctx->unsubscribe(TE_EVENT_DPI_CHANGED, OnDpiChanged);
     g_hover_state.ctx->unsubscribe(TE_EVENT_TASKBAR_GEOMETRY, OnTaskbarGeometry);
     g_hover_state.ctx->unsubscribe(TE_EVENT_DISPLAY_CHANGED, OnDisplayChanged);
 
-    if (g_hover_state.monitors[0].taskbar_hwnd) {
-        RemoveWindowSubclass(g_hover_state.monitors[0].taskbar_hwnd, IconHoverSubclassProc, SUBCLASS_HOVER_ID);
-    } else if (g_hover_state.ctx && g_hover_state.ctx->taskbar_hwnd) {
-        RemoveWindowSubclass(g_hover_state.ctx->taskbar_hwnd, IconHoverSubclassProc, SUBCLASS_HOVER_ID);
+    for (int i = 0; i < g_hover_state.monitor_count; ++i) {
+        if (g_hover_state.monitors[i].taskbar_hwnd) {
+            KillTimer(g_hover_state.monitors[i].taskbar_hwnd, FULLSCREEN_SUPPRESSION_TIMER_ID);
+            RemoveWindowSubclass(g_hover_state.monitors[i].taskbar_hwnd, IconHoverSubclassProc, SUBCLASS_HOVER_ID);
+        }
     }
 
     /* Destroy secondary overlay windows and targets */
@@ -1331,32 +1479,9 @@ static HRESULT Disable(void) {
     g_hover_state.monitors[0].is_active = 0;
     g_hover_state.monitor_count = 0;
 
-    /* Terminate MTA background discovery thread and flush pending payloads */
-    AcquireSRWLockExclusive(&s_discovery_lock);
-    if (s_discovery_stop_event) {
-        SetEvent(s_discovery_stop_event);
-    }
-    if (s_discovery_thread) {
-        WaitForSingleObject(s_discovery_thread, 3000);
-        CloseHandle(s_discovery_thread);
-        s_discovery_thread = NULL;
-    }
-    if (s_discovery_trigger_event) {
-        CloseHandle(s_discovery_trigger_event);
-        s_discovery_trigger_event = NULL;
-    }
-    if (s_discovery_stop_event) {
-        CloseHandle(s_discovery_stop_event);
-        s_discovery_stop_event = NULL;
-    }
-    ReleaseSRWLockExclusive(&s_discovery_lock);
-    for (int m = 0; m < TE_MAX_MONITORS; m++) {
-        DiscoveryPayload* p = (DiscoveryPayload*)InterlockedExchangePointer(
-            (PVOID*)&s_pending_discovery[m],
-            NULL
-        );
-        if (p) free(p);
-    }
+    /* Do not release worker-owned resources unless its thread has actually exited. */
+    HRESULT worker_hr = StopDiscoveryWorker();
+    if (FAILED(worker_hr)) return worker_hr;
 
     /* Cancel pending shell hook debounce timer */
     if (s_shell_hook_rebuild_timer) {
@@ -1383,27 +1508,12 @@ static HRESULT Shutdown(void) {
         KillTimer(NULL, s_shell_hook_rebuild_timer);
         s_shell_hook_rebuild_timer = 0;
     }
-    AcquireSRWLockExclusive(&s_discovery_lock);
-    if (s_discovery_stop_event) {
-        SetEvent(s_discovery_stop_event);
-    }
-    if (s_discovery_thread) {
-        WaitForSingleObject(s_discovery_thread, 3000);
-        CloseHandle(s_discovery_thread);
-        s_discovery_thread = NULL;
-    }
-    if (s_discovery_trigger_event) {
-        CloseHandle(s_discovery_trigger_event);
-        s_discovery_trigger_event = NULL;
-    }
-    if (s_discovery_stop_event) {
-        CloseHandle(s_discovery_stop_event);
-        s_discovery_stop_event = NULL;
-    }
-    ReleaseSRWLockExclusive(&s_discovery_lock);
+    HRESULT worker_hr = StopDiscoveryWorker();
+    if (FAILED(worker_hr)) return worker_hr;
 
     TE_DynamicIslandShutdown();
-    TE_FrameLoopShutdown();
+    HRESULT frame_hr = TE_FrameLoopShutdown();
+    if (FAILED(frame_hr)) return frame_hr;
     g_hover_state.ctx = NULL;
     return TE_S_OK;
 }

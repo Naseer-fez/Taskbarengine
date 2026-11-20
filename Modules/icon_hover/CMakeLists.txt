@@ -43,9 +43,5 @@ target_compile_definitions(IconHoverPlugin PRIVATE _USE_MATH_DEFINES)
 # Ensure the library name matches the folder name for auto-discovery
 set_target_properties(IconHoverPlugin PROPERTIES OUTPUT_NAME "icon_hover")
 
-# Copy the built plugin to the build modules directory
-add_custom_command(TARGET IconHoverPlugin POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy
-    $<TARGET_FILE:IconHoverPlugin>
-    ${CMAKE_BINARY_DIR}/Modules/icon_hover/$<TARGET_FILE_NAME:IconHoverPlugin>
-)
+# The target already outputs under ${CMAKE_BINARY_DIR}/Modules/icon_hover; a
+# post-build copy to that same path makes the linker fail with a self-copy.

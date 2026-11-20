@@ -25,6 +25,7 @@
 
 #include "gsmtc_source.h"
 #include "media_state_bridge.h"
+#include <sdk/te_log.h>
 
 namespace {
 
@@ -128,24 +129,7 @@ struct GsmtcMediaSource::Impl {
             return;
         }
 
-        try {
-            auto asyncOp = winrt::Windows::Media::Control::GlobalSystemMediaTransportControlsSessionManager::RequestAsync();
-            m_sessionManager = asyncOp.get();
-
-            if (m_sessionManager) {
-                m_sessionChangedRevoker = m_sessionManager.CurrentSessionChanged(
-                    winrt::auto_revoke,
-                    [this](auto const&, auto const&) {
-                        PostCommand(GsmtcCommand::RefreshSession);
-                    }
-                );
-
-                HandleRefreshSession();
-            }
-        } catch (...) {
-            // GSMTC service unprovisioned or failed
-            PublishInactive();
-        }
+        TryAcquireSessionManager();
 
         while (!m_stopRequested) {
             GsmtcCommand cmd = GsmtcCommand::None;
@@ -171,6 +155,10 @@ struct GsmtcMediaSource::Impl {
                 } catch (...) {
                     // Shield worker thread from unexpected exceptions
                 }
+            } else if (!m_sessionManager && !m_stopRequested) {
+                /* RequestAsync may fail transiently during shell/session startup.
+                   Retry from this worker rather than leaving media permanently inactive. */
+                TryAcquireSessionManager();
             }
         }
 
@@ -191,6 +179,43 @@ struct GsmtcMediaSource::Impl {
         }
     }
 
+    void TryAcquireSessionManager() {
+        try {
+            auto asyncOp = winrt::Windows::Media::Control::GlobalSystemMediaTransportControlsSessionManager::RequestAsync();
+            auto manager = asyncOp.get();
+            if (!manager) {
+                TE_LogWrite(TE_LOG_WARNING, "GSMTC", "Session manager request returned no manager");
+                PublishInactive();
+                return;
+            }
+            m_sessionManager = manager;
+            TE_LogWrite(TE_LOG_INFO, "GSMTC", "Media session manager connected");
+            m_sessionChangedRevoker = m_sessionManager.CurrentSessionChanged(
+                winrt::auto_revoke,
+                [this](auto const&, auto const&) {
+                    PostCommand(GsmtcCommand::RefreshSession);
+                }
+            );
+            HandleRefreshSession();
+        } catch (...) {
+            TE_LogWrite(TE_LOG_WARNING, "GSMTC", "Media session manager request failed; retrying");
+            PublishInactive();
+        }
+    }
+
+    template <typename AsyncOperation>
+    void AwaitMediaCommand(AsyncOperation&& operation) {
+        /* This runs only on the dedicated GSMTC worker. Awaiting the result keeps
+           the command alive, reports failures, and lets us refresh actual state. */
+        if (!operation.get()) {
+            TE_LogWrite(TE_LOG_WARNING, "GSMTC", "Media command was rejected by the active session");
+        } else {
+            TE_LogWrite(TE_LOG_INFO, "GSMTC", "Media command completed successfully");
+        }
+        PostCommand(GsmtcCommand::RefreshPlayback);
+        PostCommand(GsmtcCommand::RefreshTimeline);
+    }
+
     void HandleRefreshSession() {
         try {
             m_timelineChangedRevoker.revoke();
@@ -204,6 +229,7 @@ struct GsmtcMediaSource::Impl {
 
             m_currentSession = m_sessionManager.GetCurrentSession();
             if (m_currentSession) {
+                TE_LogWrite(TE_LOG_INFO, "GSMTC", "Current media session connected");
                 m_playbackChangedRevoker = m_currentSession.PlaybackInfoChanged(
                     winrt::auto_revoke,
                     [this](auto const&, auto const&) {
@@ -229,9 +255,11 @@ struct GsmtcMediaSource::Impl {
                 HandleRefreshProperties();
                 HandleRefreshTimeline();
             } else {
+                TE_LogWrite(TE_LOG_INFO, "GSMTC", "No current media session");
                 PublishInactive();
             }
         } catch (...) {
+            TE_LogWrite(TE_LOG_WARNING, "GSMTC", "Could not read current media session");
             PublishInactive();
         }
     }
@@ -367,29 +395,24 @@ struct GsmtcMediaSource::Impl {
                 HandleRefreshTimeline();
                 break;
             case GsmtcCommand::TogglePlayPause:
-                if (m_currentSession) {
-                    m_currentSession.TryTogglePlayPauseAsync();
-                }
+                if (!m_currentSession) HandleRefreshSession();
+                if (m_currentSession) AwaitMediaCommand(m_currentSession.TryTogglePlayPauseAsync());
                 break;
             case GsmtcCommand::Play:
-                if (m_currentSession) {
-                    m_currentSession.TryPlayAsync();
-                }
+                if (!m_currentSession) HandleRefreshSession();
+                if (m_currentSession) AwaitMediaCommand(m_currentSession.TryPlayAsync());
                 break;
             case GsmtcCommand::Pause:
-                if (m_currentSession) {
-                    m_currentSession.TryPauseAsync();
-                }
+                if (!m_currentSession) HandleRefreshSession();
+                if (m_currentSession) AwaitMediaCommand(m_currentSession.TryPauseAsync());
                 break;
             case GsmtcCommand::Next:
-                if (m_currentSession) {
-                    m_currentSession.TrySkipNextAsync();
-                }
+                if (!m_currentSession) HandleRefreshSession();
+                if (m_currentSession) AwaitMediaCommand(m_currentSession.TrySkipNextAsync());
                 break;
             case GsmtcCommand::Previous:
-                if (m_currentSession) {
-                    m_currentSession.TrySkipPreviousAsync();
-                }
+                if (!m_currentSession) HandleRefreshSession();
+                if (m_currentSession) AwaitMediaCommand(m_currentSession.TrySkipPreviousAsync());
                 break;
             default:
                 break;

@@ -3,6 +3,7 @@
 
 #include <sdk/te_types.h>
 
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -10,10 +11,8 @@ extern "C" {
 /**
  * Start the vsync-aligned animation frame loop.
  *
- * Creates a timer queue timer at ~8ms (125 Hz) that:
- * 1. Computes magnification scales from current cursor position
- * 2. Updates DComp transforms
- * 3. Commits to present
+ * Starts a high-resolution worker timer that posts coalesced frame messages
+ * to the Explorer UI thread. Animation state and DComp work run in that message.
  *
  * The timer self-cancels when the settle animation completes.
  * No-op if the frame loop is already running.
@@ -29,9 +28,9 @@ HRESULT TE_FrameLoopStart(void);
 void TE_FrameLoopStop(void);
 
 /**
-  * Completely shut down the frame loop and destroy the timer queue.
+ * Completely shut down the frame-loop worker and destroy its wait handles.
   */
-void TE_FrameLoopShutdown(void);
+HRESULT TE_FrameLoopShutdown(void);
 
 /**
  * Check whether the frame loop timer is currently active.

@@ -9,6 +9,24 @@ extern "C" {
 #endif
 
 struct IDCompositionVisual;
+struct IDCompositionDevice;
+struct ID2D1Device;
+struct ID2D1Factory1;
+
+typedef struct TE_DCompWidgetResources {
+    struct ID2D1Factory1* d2d_factory;
+    struct ID2D1Device* d2d_device;
+    struct IDCompositionDevice* dcomp_device;
+    struct IDCompositionVisual* widget_root;
+    HWND overlay_hwnd;
+} TE_DCompWidgetResources;
+
+/* Shared visual-tree and graphics-resource bridge used by widget_host.dll. */
+TE_EXPORT HRESULT TE_DCompWidgetAcquire(HWND taskbar_hwnd, TE_DCompWidgetResources* resources);
+TE_EXPORT void TE_DCompWidgetRelease(TE_DCompWidgetResources* resources);
+TE_EXPORT HRESULT TE_DCompWidgetCommit(void);
+TE_EXPORT HWND TE_DCompWidgetGetOverlayWindow(void);
+TE_EXPORT uint64_t TE_DCompWidgetGetGeneration(void);
 
 /**
  * Create the transparent overlay window positioned over the taskbar.
@@ -209,6 +227,9 @@ HRESULT TE_DCompUpdateTransformsForTarget(int target_index, int count, const flo
  * Set overlay alpha for a specific target.
  */
 HRESULT TE_DCompSetOverlayAlphaForTarget(int target_index, float alpha);
+
+/** Hide or restore all visuals for a target while a foreground app is fullscreen. */
+HRESULT TE_DCompSetFullscreenSuppressedForTarget(int target_index, int suppressed);
 
 /**
  * Get Start button bounds for a specific target.

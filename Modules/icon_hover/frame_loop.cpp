@@ -5,8 +5,8 @@
  * Drives the magnification, spring bounce, 3D tilt, and dynamic island animations:
  *   1. Paced dynamically to monitor refresh rates (60 Hz, 120 Hz, 144 Hz, 240 Hz)
  *      via DwmGetCompositionTimingInfo and CREATE_WAITABLE_TIMER_HIGH_RESOLUTION (PERF-103).
- *   2. Dedicated worker thread with explicit COM MTA apartment initialization (SYS-009).
- *   3. Lockless double-buffered snapshot architecture for tear-free physics reads (PERF-101).
+ *   2. A dedicated worker timer posts coalesced ticks to the Explorer UI thread.
+ *   3. Animation state and DirectComposition remain owned by that UI thread.
  *   4. Stationary mouse hover detection settling to 0.0% CPU (PERF-104).
  *   5. Geometry generation latching across frame boundaries without frame drops (PERF-105).
  */
@@ -60,7 +60,6 @@ static HANDLE s_wake_event = NULL;
 static HANDLE s_stop_event = NULL;
 static HANDLE s_shutdown_event = NULL;
 static volatile LONG s_loop_active = 0;
-static thread_local bool s_is_callback_thread = false;
 static bool s_worker_initialized = false;
 static int s_is_high_res = 0;
 
@@ -562,17 +561,12 @@ static VOID CALLBACK FrameTimerCallback(PVOID lpParam, BOOLEAN timer_or_wait_fir
     TE_IconHoverState* state = &g_hover_state;
     if (!state->enabled) return;
 
-    /* SYS-009: Explicitly initialize COM as MTA upon entry if uninitialized */
+    /* DirectComposition work stays on the dedicated worker, away from Explorer's UI thread. */
+    const HRESULT com_hr = CoInitializeEx(NULL, COINIT_MULTITHREADED);
     struct ComMtaScopeGuard {
         HRESULT hr;
-        ComMtaScopeGuard() { hr = CoInitializeEx(NULL, COINIT_MULTITHREADED); }
         ~ComMtaScopeGuard() { if (SUCCEEDED(hr)) CoUninitialize(); }
-    } com_guard;
-
-    struct CallbackThreadGuard {
-        CallbackThreadGuard() { s_is_callback_thread = true; }
-        ~CallbackThreadGuard() { s_is_callback_thread = false; }
-    } guard;
+    } com_guard{ com_hr };
 
     /* Calculate delta time */
     LARGE_INTEGER now;
@@ -593,19 +587,8 @@ static VOID CALLBACK FrameTimerCallback(PVOID lpParam, BOOLEAN timer_or_wait_fir
     POINT cur = {};
     bool has_cur = (GetCursorPos(&cur) != FALSE);
 
-    /* Track left-click transition for forwarding clicks on Dynamic Island and Start Button */
-    static bool s_prev_lbutton_down = false;
-    bool curr_lbutton_down = ((GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0);
-    if (curr_lbutton_down && !s_prev_lbutton_down && has_cur) {
-        bool click_handled = false;
-        if (TE_DynamicIslandIsEnabled()) {
-            click_handled = (TE_DynamicIslandCheckClick((float)cur.x, (float)cur.y) != FALSE);
-        }
-        if (!click_handled) {
-            TE_FrameLoopCheckStartButtonClick((float)cur.x, (float)cur.y);
-        }
-    }
-    s_prev_lbutton_down = curr_lbutton_down;
+    /* Click actions are dispatched from taskbar mouse messages. Polling button
+       state here can miss short clicks or race the subclass handler. */
 
     bool all_monitors_settled = true;
     bool any_monitor_dirty = false;
@@ -673,6 +656,9 @@ static VOID CALLBACK FrameTimerCallback(PVOID lpParam, BOOLEAN timer_or_wait_fir
             if (s_waitable_timer) {
                 CancelWaitableTimer(s_waitable_timer);
             }
+            if (s_stop_event) {
+                SetEvent(s_stop_event);
+            }
             s_last_tick_qpc = 0;
             TE_LogWrite(TE_LOG_DEBUG, LOG_TAG, "Settle complete for all displays, frame loop stopped automatically");
         }
@@ -685,15 +671,6 @@ static VOID CALLBACK FrameTimerCallback(PVOID lpParam, BOOLEAN timer_or_wait_fir
 static DWORD WINAPI FrameLoopWorkerThread(LPVOID lpParam)
 {
     (void)lpParam;
-
-    /* Explicit COM MTA initialization for entire worker thread lifetime (SYS-009) */
-    struct ComMtaScopeGuard {
-        HRESULT hr;
-        ComMtaScopeGuard() { hr = CoInitializeEx(NULL, COINIT_MULTITHREADED); }
-        ~ComMtaScopeGuard() { if (SUCCEEDED(hr)) CoUninitialize(); }
-    } com_guard;
-
-    s_is_callback_thread = true;
 
     HANDLE idle_events[2] = { s_shutdown_event, s_wake_event };
 
@@ -760,7 +737,6 @@ static DWORD WINAPI FrameLoopWorkerThread(LPVOID lpParam)
     }
 
 thread_exit:
-    s_is_callback_thread = false;
     return 0;
 }
 
@@ -830,7 +806,7 @@ HRESULT TE_FrameLoopStart(void)
     QueryPerformanceCounter(&now);
     s_last_tick_qpc = (uint64_t)now.QuadPart;
 
-    /* Show overlay */
+    /* Show the overlay immediately; the animation itself remains worker-driven. */
     TE_DCompSetOverlayAlpha(1.0f);
     if (g_hover_state.monitor_count > 0) {
         for (int i = 0; i < g_hover_state.monitor_count; i++) {
@@ -839,9 +815,7 @@ HRESULT TE_FrameLoopStart(void)
             }
         }
     }
-    if (g_hover_state.config.keep_on_top) {
-        TE_DCompEnsureTopmost(NULL);
-    }
+    if (g_hover_state.config.keep_on_top) TE_DCompEnsureTopmost(NULL);
     TE_DCompCommit();
 
     if (s_wake_event) {
@@ -864,20 +838,22 @@ void TE_FrameLoopStop(void)
     if (s_waitable_timer) {
         CancelWaitableTimer(s_waitable_timer);
     }
-
     s_last_tick_qpc = 0;
 
     TE_LogWrite(TE_LOG_DEBUG, LOG_TAG, "Frame loop stopped");
 }
 
-void TE_FrameLoopShutdown(void)
+HRESULT TE_FrameLoopShutdown(void)
 {
     TE_FrameLoopStop();
     if (s_shutdown_event) {
         SetEvent(s_shutdown_event);
     }
     if (s_thread) {
-        WaitForSingleObject(s_thread, 3000);
+        DWORD wait_result = WaitForSingleObject(s_thread, INFINITE);
+        if (wait_result != WAIT_OBJECT_0) {
+            return TE_E_FAIL;
+        }
         CloseHandle(s_thread);
         s_thread = NULL;
     }
@@ -901,6 +877,7 @@ void TE_FrameLoopShutdown(void)
     for (int m = 0; m < TE_MAX_MONITORS; m++) {
         s_has_prev_cursor[m] = false;
     }
+    return TE_S_OK;
 }
 
 int TE_FrameLoopIsActive(void)
@@ -1155,19 +1132,17 @@ HRESULT TE_FrameLoopTriggerIconBounce(int icon_index, float impulse_strength)
 
 void TE_TriggerStartMenu(void)
 {
-    /* Method 1: Synthesize Windows key press */
+    /* Use one trigger only. Sending SC_TASKLIST as well can immediately toggle
+       the menu closed after the synthetic Windows-key press opens it. */
     INPUT inputs[2] = {};
     inputs[0].type = INPUT_KEYBOARD;
     inputs[0].ki.wVk = VK_LWIN;
     inputs[1].type = INPUT_KEYBOARD;
     inputs[1].ki.wVk = VK_LWIN;
     inputs[1].ki.dwFlags = KEYEVENTF_KEYUP;
-    SendInput(2, inputs, sizeof(INPUT));
-
-    /* Method 2: Also post SC_TASKLIST to Shell_TrayWnd */
-    HWND taskbar = FindWindowW(L"Shell_TrayWnd", NULL);
-    if (taskbar) {
-        PostMessageW(taskbar, WM_SYSCOMMAND, SC_TASKLIST, 0);
+    const UINT sent = SendInput(2, inputs, sizeof(INPUT));
+    if (sent != 2) {
+        TE_LogWrite(TE_LOG_WARNING, LOG_TAG, "Could not send complete Start key sequence");
     }
 
     TE_LogWrite(TE_LOG_INFO, LOG_TAG, "Triggered Start Menu open");

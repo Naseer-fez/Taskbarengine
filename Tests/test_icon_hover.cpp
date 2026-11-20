@@ -28,6 +28,37 @@ TEST_CASE("Icon Hover - Mouse Event Structure & Dispatch", "[icon_hover][mouse]"
     REQUIRE(data.is_in_taskbar == FALSE);
 }
 
+TEST_CASE("Icon Hover - DirectComposition overlay passes taskbar clicks through", "[icon_hover][input]") {
+    const wchar_t* class_name = L"TE_OverlayClickThroughTest";
+    WNDCLASSW wc = {};
+    wc.lpfnWndProc = DefWindowProcW;
+    wc.hInstance = GetModuleHandleW(NULL);
+    wc.lpszClassName = class_name;
+    RegisterClassW(&wc);
+
+    HWND taskbar = CreateWindowW(class_name, L"", WS_POPUP, 0, 0, 300, 50,
+                                 NULL, NULL, wc.hInstance, NULL);
+    REQUIRE(taskbar != NULL);
+
+    HWND overlay = TE_DCompCreateOverlayWindow(taskbar, 0, 0, 300, 80);
+    REQUIRE(overlay != NULL);
+
+    LONG_PTR ex_style = GetWindowLongPtrW(overlay, GWL_EXSTYLE);
+    CHECK((ex_style & WS_EX_LAYERED) != 0);
+    CHECK((ex_style & WS_EX_TRANSPARENT) != 0);
+    CHECK((ex_style & WS_EX_NOACTIVATE) != 0);
+
+    BYTE alpha = 0;
+    DWORD flags = 0;
+    CHECK(GetLayeredWindowAttributes(overlay, NULL, &alpha, &flags) != FALSE);
+    CHECK(alpha == 255);
+    CHECK((flags & LWA_ALPHA) != 0);
+
+    TE_DCompDestroyOverlayWindow(overlay);
+    DestroyWindow(taskbar);
+    UnregisterClassW(class_name, wc.hInstance);
+}
+
 TEST_CASE("Icon Hover - High-DPI Headroom and Radius Scaling", "[icon_hover][dpi]") {
     auto calc_headroom = [](uint32_t dpi) -> int {
         return (int)(64.0f * (float)dpi / 96.0f);
@@ -863,4 +894,19 @@ TEST_CASE("Icon Hover - UIA Cross-Thread Deadlock Fix", "[icon_hover][deadlock]"
 
     DestroyWindow(dummy_tb);
     UnregisterClassW(L"TE_DummyTaskbarDeadlock", GetModuleHandleW(NULL));
+}
+
+TEST_CASE("Icon Hover - host logger is not recursively installed as its own callback", "[icon_hover][logging]") {
+    const PluginInterface* plugin = TE_IconHoverGetPluginInterface();
+    REQUIRE(plugin != nullptr);
+
+    PluginContext ctx = {};
+    ctx.struct_size = sizeof(PluginContext);
+    ctx.log = TE_LogWrite;
+
+    /* Ensure this test observes the production host logger with no prior callback. */
+    TE_LogSetCallback(nullptr);
+    REQUIRE(plugin->Initialize(&ctx) == TE_S_OK);
+    CHECK(plugin->Shutdown() == TE_S_OK);
+    TE_LogSetCallback(nullptr);
 }

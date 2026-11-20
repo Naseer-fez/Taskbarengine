@@ -29,7 +29,7 @@ public:
     MediaStateBridge& operator=(MediaStateBridge&&) = delete;
 
     void SetWakeCallback(void (*callback)(void)) {
-        m_wakeCallback = callback;
+        m_wakeCallback.store(callback, std::memory_order_release);
     }
 
     // Called by background worker thread (Exclusive Publish)
@@ -41,8 +41,9 @@ public:
         m_dirty.store(true, std::memory_order_release);
         ReleaseSRWLockExclusive(&m_lock);
 
-        if (wakeAnimation && m_wakeCallback) {
-            m_wakeCallback();
+        const auto wake_callback = m_wakeCallback.load(std::memory_order_acquire);
+        if (wakeAnimation && wake_callback) {
+            wake_callback();
         }
     }
 
@@ -96,5 +97,5 @@ private:
     TEMediaStateSnapshot m_buffers[2];
     std::atomic<int> m_readIndex{0};
     std::atomic<bool> m_dirty{false};
-    void (*m_wakeCallback)(void){nullptr};
+    std::atomic<void (*)(void)> m_wakeCallback{nullptr};
 };

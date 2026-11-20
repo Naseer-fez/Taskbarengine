@@ -41,7 +41,11 @@ inline void SafeReleaseCOM(T*& ptr) {
 
 // RAII test fixture ensuring dynamic island is cleanly initialized and reset per test
 struct DynamicIslandFixture {
+    MockMediaSource mock_media_source;
+
     DynamicIslandFixture() {
+        mock_media_source.Initialize();
+        TE_DynamicIslandSetMediaSource(&mock_media_source);
         TE_DynamicIslandConfig config = {};
         config.enabled = TRUE;
         config.padding_tray = 12;
@@ -58,6 +62,7 @@ struct DynamicIslandFixture {
     ~DynamicIslandFixture() {
         TE_DynamicIslandDisable();
         TE_DynamicIslandShutdown();
+        mock_media_source.Shutdown();
     }
 };
 
@@ -68,6 +73,8 @@ struct DynamicIslandFixture {
 // -----------------------------------------------------------------------------
 
 TEST_CASE("Dynamic Island - Anchoring Coordinates & Tray Padding Across DPI Scales", "[dynamic_island][anchoring][dpi]") {
+    // Geometry does not depend on live GSMTC sessions. The fixture supplies a
+    // mock source so DPI sections do not start WinRT callbacks unnecessarily.
     DynamicIslandFixture fixture;
 
     SECTION("100% DPI (96 DPI) - Baseline Geometry & Vertical Centering") {
@@ -586,6 +593,9 @@ TEST_CASE("Dynamic Island - Lifecycle and Subsystem Invariants", "[dynamic_islan
     }
 
     SECTION("Clean Enable -> Disable -> Enable Cycle") {
+        MockMediaSource mock_source;
+        mock_source.Initialize();
+        TE_DynamicIslandSetMediaSource(&mock_source);
         TE_DynamicIslandConfig cfg = {};
         cfg.enabled = TRUE;
         TE_DynamicIslandInit(&cfg);

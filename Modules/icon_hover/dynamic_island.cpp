@@ -620,6 +620,7 @@ void TE_DynamicIslandDisable(void) {
     }
 
     if (s_owned_media_source) {
+        s_owned_media_source->SetWakeCallback(nullptr);
         s_owned_media_source->Shutdown();
         s_owned_media_source.reset();
     }
@@ -655,6 +656,7 @@ void TE_DynamicIslandShutdown(void) {
         CloseThreadpoolTimer(s_announce_timer);
         s_announce_timer = nullptr;
     }
+    s_wake_callback = nullptr;
     SafeRelease(s_note_flag_geometry);
     SafeRelease(s_play_triangle_geometry);
     s_last_track_change_id = 0;
@@ -974,7 +976,13 @@ void TE_DynamicIslandSetWakeCallback(TE_DynamicIslandWakeCallback callback) {
 }
 
 void TE_DynamicIslandSetMediaSource(IMediaSource* source) {
+    if (s_media_source && s_media_source != source && !s_owned_media_source) {
+        // Externally owned sources stay borrowed. Detach while the caller still
+        // guarantees their lifetime, before replacing the active source.
+        s_media_source->SetWakeCallback(nullptr);
+    }
     if (s_owned_media_source) {
+        s_owned_media_source->SetWakeCallback(nullptr);
         s_owned_media_source->Shutdown();
         s_owned_media_source.reset();
     }
