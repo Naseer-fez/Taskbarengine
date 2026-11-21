@@ -136,6 +136,19 @@ TEST_CASE("Taskbar Transparency - Accent Policy Computation", "[plugin][transpar
         REQUIRE(((policy_zero.GradientColor >> 24) & 0xFF) >= 1);
     }
 
+    SECTION("Acrylic Defaults Produce the Frosted Glass Policy") {
+        REQUIRE(settings.enabled == true);
+        REQUIRE(settings.mode == TE_MODE_ACRYLIC);
+        REQUIRE(settings.opacity == Approx(0.65f));
+        REQUIRE(settings.color_argb == 0x44000000u);
+        REQUIRE(settings.apply_secondary == true);
+
+        const ACCENT_POLICY policy = TE_ComputeAccentPolicy(&settings);
+        REQUIRE(policy.AccentState == ACCENT_ENABLE_ACRYLICBLURBEHIND);
+        REQUIRE(policy.AccentFlags == 2);
+        REQUIRE(policy.GradientColor == 0x2C000000u);
+    }
+
     SECTION("Tint Mode - Semi-Transparent vs Opaque") {
         settings.enabled = true;
         settings.mode = TE_MODE_TINT;
@@ -250,9 +263,9 @@ TEST_CASE("Taskbar Transparency - JSON Configuration Parsing", "[plugin][transpa
         const char* json = "{\"opacity\": 0.4}";
         REQUIRE(TE_TransparencyConfigParse(json, &settings) == true);
         REQUIRE(settings.enabled == true);
-        REQUIRE(settings.mode == TE_MODE_CLEAR);
+        REQUIRE(settings.mode == TE_MODE_ACRYLIC);
         REQUIRE(settings.opacity == Approx(0.4f));
-        REQUIRE(settings.color_argb == 0);
+        REQUIRE(settings.color_argb == 0x44000000u);
         REQUIRE(settings.accent_flags == 2);
         REQUIRE(settings.apply_secondary == true);
     }
@@ -400,9 +413,14 @@ TEST_CASE("Taskbar Transparency - Plugin Lifecycle Interface", "[plugin][transpa
     SECTION("Settings Descriptors Verification") {
         const PluginSettings* settings_desc = plugin->GetSettings();
         REQUIRE(settings_desc != nullptr);
-        REQUIRE(settings_desc->count >= 5);
+        REQUIRE(settings_desc->count >= 6);
         REQUIRE(std::string(settings_desc->descriptors[0].key) == "enabled");
         REQUIRE(std::string(settings_desc->descriptors[1].key) == "mode");
+        REQUIRE(settings_desc->descriptors[1].value.enum_val.default_val == 2);
+        REQUIRE(settings_desc->descriptors[2].value.float_val.default_val == Approx(0.65f));
+        REQUIRE(settings_desc->descriptors[3].value.color_val.default_val == 0x44000000u);
+        REQUIRE(std::string(settings_desc->descriptors[4].key) == "accent_flags");
+        REQUIRE(std::string(settings_desc->descriptors[5].key) == "apply_secondary");
     }
 
     SECTION("Lifecycle Execution (Zero CPU Idle)") {

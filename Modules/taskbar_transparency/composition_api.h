@@ -119,6 +119,7 @@ void TE_CompositionApiShutdown(void);
 bool TE_CompositionIsAvailable(void);
 void TE_CompositionSetApiFunction(pfnSetWindowCompositionAttribute fn);
 pfnSetWindowCompositionAttribute TE_CompositionGetApiFunction(void);
+DWORD TE_CompositionGetLastError(void);
 
 /* Color Packing & Manipulation */
 uint32_t TE_PackABGR(uint8_t a, uint8_t r, uint8_t g, uint8_t b);

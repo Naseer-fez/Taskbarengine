@@ -2,6 +2,7 @@
 
 static pfnSetWindowCompositionAttribute s_pfnSetWindowCompositionAttribute = NULL;
 static bool s_custom_function_injected = false;
+static DWORD s_last_composition_error = ERROR_SUCCESS;
 
 bool TE_CompositionApiInit(void) {
     if (s_custom_function_injected && s_pfnSetWindowCompositionAttribute) {
@@ -129,12 +130,15 @@ ACCENT_POLICY TE_ComputeAccentPolicy(const TE_TransparencySettings* settings) {
 }
 
 bool TE_ApplyAccentPolicy(HWND hwnd, const ACCENT_POLICY* policy) {
+    s_last_composition_error = ERROR_SUCCESS;
     if (!hwnd || !IsWindow(hwnd) || !policy) {
+        s_last_composition_error = ERROR_INVALID_WINDOW_HANDLE;
         return false;
     }
 
     if (!s_pfnSetWindowCompositionAttribute) {
         if (!TE_CompositionApiInit()) {
+            s_last_composition_error = ERROR_PROC_NOT_FOUND;
             return false;
         }
     }
@@ -144,8 +148,14 @@ bool TE_ApplyAccentPolicy(HWND hwnd, const ACCENT_POLICY* policy) {
     data.pvData = (void*)policy;
     data.cbData = sizeof(ACCENT_POLICY);
 
+    SetLastError(ERROR_SUCCESS);
     BOOL res = s_pfnSetWindowCompositionAttribute(hwnd, &data);
+    if (!res) s_last_composition_error = GetLastError();
     return (res != FALSE);
+}
+
+DWORD TE_CompositionGetLastError(void) {
+    return s_last_composition_error;
 }
 
 bool TE_RestoreNativeAccent(HWND hwnd) {
@@ -159,13 +169,23 @@ bool TE_RestoreNativeAccent(HWND hwnd) {
     data.pvData = &policy;
     data.cbData = sizeof(policy);
 
+    BOOL api_ok = FALSE;
     if (s_pfnSetWindowCompositionAttribute || TE_CompositionApiInit()) {
-        s_pfnSetWindowCompositionAttribute(hwnd, &data);
+        SetLastError(ERROR_SUCCESS);
+        api_ok = s_pfnSetWindowCompositionAttribute(hwnd, &data);
+        s_last_composition_error = api_ok ? ERROR_SUCCESS : GetLastError();
+    } else {
+        s_last_composition_error = ERROR_PROC_NOT_FOUND;
     }
 
-    SetWindowPos(hwnd, NULL, 0, 0, 0, 0,
+    SetLastError(ERROR_SUCCESS);
+    const BOOL frame_ok = SetWindowPos(hwnd, NULL, 0, 0, 0, 0,
                  SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
-    RedrawWindow(hwnd, NULL, NULL,
+    const DWORD frame_error = frame_ok ? ERROR_SUCCESS : GetLastError();
+    SetLastError(ERROR_SUCCESS);
+    const BOOL redraw_ok = RedrawWindow(hwnd, NULL, NULL,
                  RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_FRAME);
-    return true;
+    if (!redraw_ok) s_last_composition_error = GetLastError();
+    else if (!frame_ok) s_last_composition_error = frame_error;
+    return api_ok && frame_ok && redraw_ok;
 }

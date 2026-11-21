@@ -8,9 +8,9 @@
 void TE_TransparencyConfigSetDefaults(TE_TransparencySettings* settings) {
     if (!settings) return;
     settings->enabled = true;
-    settings->mode = TE_MODE_CLEAR;
-    settings->opacity = 0.0f;
-    settings->color_argb = 0;
+    settings->mode = TE_MODE_ACRYLIC;
+    settings->opacity = 0.65f;
+    settings->color_argb = 0x44000000u;
     settings->accent_flags = 2;
     settings->apply_secondary = true;
 }

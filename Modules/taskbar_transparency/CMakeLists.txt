@@ -1,8 +1,10 @@
 add_library(taskbar_transparency SHARED
+    taskbar_transparency.def
     composition_api.c
     tray_discovery.c
     transparency_config.c
     taskbar_transparency.c
+    xaml_taskbar_brush.cpp
 )
 
 target_include_directories(taskbar_transparency PRIVATE
@@ -16,6 +18,11 @@ target_link_libraries(taskbar_transparency PRIVATE
     cjson
     user32
     dwmapi
+    ole32
+    oleaut32
+    runtimeobject
+    uuid
+    windowsapp
 )
 
 # Ensure the library name matches the folder name for auto-discovery
