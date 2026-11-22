@@ -1,0 +1,22 @@
+{
+  "manifest_version": 1,
+  "api_version": 2,
+  "id": "sysmon",
+  "name": "System monitor",
+  "description": "Displays CPU and memory usage.",
+  "module": "sysmon.dll",
+  "settings": [
+    { "key": "update_interval_ms", "label": "Update interval", "type": "int", "default": 2000, "min": 1000, "max": 10000, "step": 500 },
+    { "key": "display_mode", "label": "Display mode", "type": "enum", "default": "text", "options": ["text", "bar", "both"] },
+    { "key": "show_cpu", "label": "Show CPU usage", "type": "bool", "default": true },
+    { "key": "show_ram", "label": "Show memory usage", "type": "bool", "default": true },
+    { "key": "font_size", "label": "Font size", "type": "float", "default": 12, "min": 8, "max": 32, "step": 0.5 },
+    { "key": "font_family", "label": "Font family", "type": "string", "default": "Segoe UI Variable" },
+    { "key": "text_color", "label": "Text color", "type": "color", "default": 4294967295 },
+    { "key": "bar_color", "label": "Bar color", "type": "color", "default": 4283215696 },
+    { "key": "bar_warning_color", "label": "Warning bar color", "type": "color", "default": 4294940672 },
+    { "key": "bar_critical_color", "label": "Critical bar color", "type": "color", "default": 4294198070 },
+    { "key": "warning_threshold", "label": "Warning threshold (%)", "type": "float", "default": 75, "min": 0, "max": 100, "step": 1 },
+    { "key": "critical_threshold", "label": "Critical threshold (%)", "type": "float", "default": 90, "min": 0, "max": 100, "step": 1 }
+  ]
+}

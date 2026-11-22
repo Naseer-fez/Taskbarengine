@@ -1,0 +1,9 @@
+{
+  "manifest_version": 1,
+  "api_version": 2,
+  "id": "hello",
+  "name": "Hello widget",
+  "description": "A small interactive example widget.",
+  "module": "hello.dll",
+  "settings": []
+}

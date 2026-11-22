@@ -1,0 +1,16 @@
+{
+  "manifest_version": 1,
+  "api_version": 2,
+  "id": "clock",
+  "name": "Clock",
+  "description": "Displays the current time and optional date.",
+  "module": "clock.dll",
+  "settings": [
+    { "key": "format", "label": "Time format", "type": "string", "default": "HH:mm" },
+    { "key": "show_date", "label": "Show date", "type": "bool", "default": false },
+    { "key": "date_format", "label": "Date format", "type": "string", "default": "ddd, MMM d" },
+    { "key": "font_family", "label": "Font family", "type": "string", "default": "Segoe UI Variable" },
+    { "key": "font_size", "label": "Font size", "type": "float", "default": 13, "min": 8, "max": 32, "step": 0.5 },
+    { "key": "text_color", "label": "Text color", "type": "color", "default": 4294967295 }
+  ]
+}
