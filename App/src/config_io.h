@@ -43,3 +43,7 @@ cJSON* ConfigIO_GetPluginValue(cJSON* root, const char* plugin_name, const char*
  * @return S_OK on success, or an error HRESULT.
  */
 HRESULT ConfigIO_SetPluginValue(cJSON* root, const char* plugin_name, const char* key, cJSON* value);
+
+/** Flat control keys used by the widget settings schema map into root.widgets. */
+cJSON* ConfigIO_GetWidgetValue(cJSON* root, const char* key);
+HRESULT ConfigIO_SetWidgetValue(cJSON* root, const char* key, cJSON* value);

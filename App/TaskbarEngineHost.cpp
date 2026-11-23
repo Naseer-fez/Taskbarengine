@@ -4,6 +4,7 @@
 #include <string>
 #include <fstream>
 #include <sstream>
+#include <thread>
 #include "TaskbarIPC.h"
 
 extern "C" {
@@ -23,10 +24,20 @@ void UninjectPayload();
 #define ID_TRAYICON 1
 #define ID_TRAY_EXIT 1001
 #define ID_TRAY_RELOAD 1002
+#define WM_ENGINE_SHUTDOWN_COMPLETE (WM_APP + 10)
 
 NOTIFYICONDATAW nid = {};
 static UINT g_uMsgTaskbarCreated = 0;
 static HMODULE g_hDll = NULL;
+static volatile LONG g_close_pending = 0;
+
+static DWORD WINAPI HostShutdownWorker(LPVOID param)
+{
+    HWND hwnd = static_cast<HWND>(param);
+    SendIPCCommand(TE_IPC_MSG_SHUTDOWN);
+    PostMessageW(hwnd, WM_ENGINE_SHUTDOWN_COMPLETE, 0, 0);
+    return 0;
+}
 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE /*hPrevInstance*/, PWSTR pCmdLine, int /*nCmdShow*/) {
     if (pCmdLine && (wcsstr(pCmdLine, L"-exit") || wcsstr(pCmdLine, L"--exit") || wcsstr(pCmdLine, L"/exit"))) {
@@ -103,9 +114,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE /*hPrevInstance*/, PWSTR pCmd
     while (running) {
         DWORD wait_res = MsgWaitForMultipleObjectsEx(1, &hExitEvent, INFINITE, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
         if (wait_res == WAIT_OBJECT_0) {
-            SendMessageW(hwnd, WM_CLOSE, 0, 0);
-            running = false;
-            break;
+            PostMessageW(hwnd, WM_CLOSE, 0, 0);
         } else if (wait_res == WAIT_FAILED) {
             break;
         }
@@ -176,7 +185,7 @@ void ShowContextMenu(HWND hwnd, POINT pt) {
 }
 
 void LoadConfigAndNotify(HWND /*hwnd*/) {
-    SendIPCCommand(TE_IPC_MSG_RELOAD_CONFIG);
+    std::thread([] { SendIPCCommand(TE_IPC_MSG_RELOAD_CONFIG); }).detach();
 }
 
 bool SendIPCCommand(TE_IpcMsgType type, const void* payload, uint32_t payload_len) {
@@ -381,10 +390,14 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
             return 0;
 
         case WM_CLOSE:
-            SendIPCCommand(TE_IPC_MSG_SHUTDOWN);
-            Sleep(200);
-            RemoveTrayIcon(hwnd);
-            UninjectPayload();
+            if (InterlockedCompareExchange(&g_close_pending, 1, 0) == 0) {
+                HANDLE worker = CreateThread(NULL, 0, HostShutdownWorker, hwnd, 0, NULL);
+                if (worker) CloseHandle(worker);
+                else PostMessageW(hwnd, WM_ENGINE_SHUTDOWN_COMPLETE, 0, 0);
+            }
+            return 0;
+
+        case WM_ENGINE_SHUTDOWN_COMPLETE:
             DestroyWindow(hwnd);
             return 0;
 

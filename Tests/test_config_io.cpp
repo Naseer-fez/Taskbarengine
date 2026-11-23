@@ -6,15 +6,43 @@
 #include "../App/src/config_io.h"
 
 TEST_CASE("ConfigIO target and roundtrip", "[config_io]") {
-    SECTION("GetConfigPath targets default_config.jsonc") {
+    SECTION("Widget layout migrates legacy strings to canonical arrays and preserves unknown data") {
+        cJSON* root = cJSON_Parse("{\"widgets\":{\"layout\":\"clock, custom.weather, media\",\"weather\":{\"token\":\"keep\"}}}");
+        REQUIRE(root != nullptr);
+
+        cJSON* layout = ConfigIO_GetWidgetValue(root, "layout");
+        REQUIRE(cJSON_IsArray(layout));
+        REQUIRE(cJSON_GetArraySize(layout) == 3);
+        CHECK(std::string(cJSON_GetArrayItem(layout, 1)->valuestring) == "custom.weather");
+        cJSON_Delete(layout);
+
+        cJSON* reordered = cJSON_CreateArray();
+        REQUIRE(reordered != nullptr);
+        REQUIRE(cJSON_AddItemToArray(reordered, cJSON_CreateString("media")));
+        REQUIRE(cJSON_AddItemToArray(reordered, cJSON_CreateString("custom.weather")));
+        REQUIRE(SUCCEEDED(ConfigIO_SetWidgetValue(root, "layout", reordered)));
+
+        cJSON* widgets = cJSON_GetObjectItemCaseSensitive(root, "widgets");
+        REQUIRE(widgets != nullptr);
+        cJSON* saved_layout = cJSON_GetObjectItemCaseSensitive(widgets, "layout");
+        REQUIRE(cJSON_IsArray(saved_layout));
+        CHECK(std::string(cJSON_GetArrayItem(saved_layout, 0)->valuestring) == "media");
+        CHECK(cJSON_GetObjectItemCaseSensitive(widgets, "schema_version")->valueint == 2);
+        CHECK(std::string(cJSON_GetObjectItemCaseSensitive(
+            cJSON_GetObjectItemCaseSensitive(widgets, "weather"), "token")->valuestring) == "keep");
+        cJSON_Delete(root);
+    }
+
+    SECTION("GetConfigPath resolves the active engine configuration") {
         std::wstring path = ConfigIO_GetConfigPath();
         REQUIRE(!path.empty());
         
-        // Path should end in default_config.jsonc
-        std::wstring target_filename = L"default_config.jsonc";
-        REQUIRE(path.size() >= target_filename.size());
-        std::wstring ending = path.substr(path.size() - target_filename.size());
-        CHECK(_wcsicmp(ending.c_str(), target_filename.c_str()) == 0);
+        // The engine uses the per-user config when present and packaged config otherwise.
+        const size_t separator = path.find_last_of(L"\\/");
+        REQUIRE(separator != std::wstring::npos);
+        std::wstring filename = path.substr(separator + 1);
+        CHECK((_wcsicmp(filename.c_str(), L"config.jsonc") == 0 ||
+               _wcsicmp(filename.c_str(), L"default_config.jsonc") == 0));
 
         // File should exist on disk
         DWORD attr = GetFileAttributesW(path.c_str());

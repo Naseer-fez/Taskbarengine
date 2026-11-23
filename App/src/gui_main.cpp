@@ -4,6 +4,7 @@
 #include <winrt/Microsoft.UI.Xaml.Controls.h>
 #include <winrt/Microsoft.UI.Xaml.Controls.Primitives.h>
 #include <winrt/Microsoft.UI.Xaml.Hosting.h>
+#include <winrt/Microsoft.UI.Xaml.Automation.h>
 #include <windows.h>
 #undef FindText
 #undef FindTextW
@@ -12,6 +13,8 @@
 #include <microsoft.ui.xaml.window.h>
 #undef GetCurrentTime
 #include <string>
+#include <vector>
+#include <atomic>
 #include <cJSON.h>
 #include "settings_page.h"
 #include "about_page.h"
@@ -330,67 +333,75 @@ struct App : ApplicationT<App, winrt::Microsoft::UI::Xaml::Markup::IXamlMetadata
         m_window.Title(L"TaskbarEngine Settings");
 
         NavigationView nav;
-        nav.PaneDisplayMode(NavigationViewPaneDisplayMode::Left);
+        nav.PaneDisplayMode(NavigationViewPaneDisplayMode::Auto);
         nav.IsSettingsVisible(false);
+        nav.RequestedTheme(ElementTheme::Dark);
+        nav.PaneTitle(L"TaskbarEngine");
+        nav.IsBackButtonVisible(NavigationViewBackButtonVisible::Collapsed);
         
         Frame contentFrame;
+        try {
+            auto pageBackground = resources.Lookup(box_value(L"ApplicationPageBackgroundThemeBrush"))
+                .as<winrt::Microsoft::UI::Xaml::Media::Brush>();
+            nav.Background(pageBackground);
+            contentFrame.Background(pageBackground);
+        } catch (...) {}
         
+        NavigationViewItemHeader taskbarGroup;
+        taskbarGroup.Content(box_value(L"TASKBAR"));
+        nav.MenuItems().Append(taskbarGroup);
+
         NavigationViewItem resizeItem;
-        resizeItem.Content(box_value(L"Taskbar Resize"));
+        resizeItem.Content(box_value(L"Taskbar size"));
         resizeItem.Icon(SymbolIcon(Symbol::DockBottom));
         resizeItem.Tag(box_value(L"taskbar_resize"));
         nav.MenuItems().Append(resizeItem);
 
+        NavigationViewItemHeader interactionGroup;
+        interactionGroup.Content(box_value(L"INTERACTIONS"));
+        nav.MenuItems().Append(interactionGroup);
+
         NavigationViewItem hoverItem;
-        hoverItem.Content(box_value(L"Icon Magnification"));
+        hoverItem.Content(box_value(L"Icon magnification"));
         hoverItem.Icon(SymbolIcon(Symbol::Zoom));
         hoverItem.Tag(box_value(L"icon_magnification"));
         nav.MenuItems().Append(hoverItem);
 
         NavigationViewItem physicsItem;
-        physicsItem.Content(box_value(L"Physics & Gestures"));
+        physicsItem.Content(box_value(L"Motion & gestures"));
         physicsItem.Icon(SymbolIcon(Symbol::Play));
         physicsItem.Tag(box_value(L"icon_physics"));
         nav.MenuItems().Append(physicsItem);
 
         NavigationViewItem startItem;
-        startItem.Content(box_value(L"Start Button"));
+        startItem.Content(box_value(L"Start button"));
         startItem.Icon(SymbolIcon(Symbol::Home));
         startItem.Tag(box_value(L"start_button"));
         nav.MenuItems().Append(startItem);
 
         NavigationViewItem islandItem;
-        islandItem.Content(box_value(L"Dynamic Island"));
+        islandItem.Content(box_value(L"Media pill"));
         islandItem.Icon(SymbolIcon(Symbol::MusicInfo));
         islandItem.Tag(box_value(L"dynamic_island"));
         nav.MenuItems().Append(islandItem);
 
-        auto schemaOpt = GuiIpcGetSettings();
-        if (schemaOpt.has_value()) {
-            cJSON* root = cJSON_Parse(schemaOpt.value().c_str());
-            if (root) {
-                cJSON* plugins = cJSON_GetObjectItem(root, "plugins");
-                if (plugins && cJSON_IsArray(plugins)) {
-                    cJSON* plugin = nullptr;
-                    cJSON_ArrayForEach(plugin, plugins) {
-                        cJSON* nameNode = cJSON_GetObjectItem(plugin, "name");
-                        if (nameNode && cJSON_IsString(nameNode) && nameNode->valuestring) {
-                            std::string nameStr = nameNode->valuestring;
-                            if (nameStr != "icon_hover" && nameStr != "taskbar_resize" &&
-                                nameStr != "icon_magnification" && nameStr != "icon_physics" &&
-                                nameStr != "start_button" && nameStr != "dynamic_island") {
-                                NavigationViewItem item;
-                                item.Content(box_value(to_hstring(nameStr)));
-                                item.Icon(SymbolIcon(Symbol::Setting));
-                                item.Tag(box_value(to_hstring(nameStr)));
-                                nav.MenuItems().Append(item);
-                            }
-                        }
-                    }
-                }
-                cJSON_Delete(root);
-            }
-        }
+        // These are first-party pages and must remain discoverable even when the
+        // engine IPC endpoint is unavailable during GUI startup.
+        NavigationViewItemHeader appearanceGroup;
+        appearanceGroup.Content(box_value(L"APPEARANCE"));
+        nav.MenuItems().Append(appearanceGroup);
+
+        NavigationViewItem transparencyItem;
+        transparencyItem.Content(box_value(L"Frosted glass"));
+        transparencyItem.Icon(SymbolIcon(Symbol::Setting));
+        transparencyItem.Tag(box_value(L"taskbar_transparency"));
+        nav.MenuItems().Append(transparencyItem);
+
+        NavigationViewItem widgetsItem;
+        widgetsItem.Content(box_value(L"Widgets"));
+        widgetsItem.Icon(SymbolIcon(Symbol::AllApps));
+        widgetsItem.Tag(box_value(L"widget_host"));
+        nav.MenuItems().Append(widgetsItem);
 
         NavigationViewItem aboutItem;
         aboutItem.Content(box_value(L"About"));
@@ -398,7 +409,8 @@ struct App : ApplicationT<App, winrt::Microsoft::UI::Xaml::Markup::IXamlMetadata
         aboutItem.Tag(box_value(L"About"));
         nav.FooterMenuItems().Append(aboutItem);
         
-        nav.SelectionChanged([contentFrame](NavigationView const&, NavigationViewSelectionChangedEventArgs const& args) {
+        auto schemaRequest = std::make_shared<std::atomic<uint64_t>>(0);
+        nav.SelectionChanged([contentFrame, nav, schemaRequest](NavigationView const&, NavigationViewSelectionChangedEventArgs const& args) {
             if (!args.SelectedItem()) return;
             auto item = args.SelectedItem().try_as<NavigationViewItem>();
             if (!item || !item.Tag()) return;
@@ -416,70 +428,145 @@ struct App : ApplicationT<App, winrt::Microsoft::UI::Xaml::Markup::IXamlMetadata
                 contentFrame.Content(CreateStartButtonPage());
             } else if (tag == L"dynamic_island") {
                 contentFrame.Content(CreateDynamicIslandPage());
+            } else if (tag == L"taskbar_transparency") {
+                contentFrame.Content(CreateSettingsPage("taskbar_transparency"));
             } else {
                 std::string pluginName = to_string(tag);
-                auto currentSchemaOpt = GuiIpcGetSettings();
-                std::string schemaStr = "{}";
-                if (currentSchemaOpt.has_value()) {
-                    cJSON* root = cJSON_Parse(currentSchemaOpt.value().c_str());
-                    if (root) {
-                        cJSON* plugins = cJSON_GetObjectItem(root, "plugins");
+                const uint64_t requestId = ++(*schemaRequest);
+                TextBlock loading;
+                loading.Text(L"Loading settings...");
+                loading.Margin(Thickness{ 24, 24, 24, 24 });
+                contentFrame.Content(loading);
+
+                auto dispatcher = winrt::Microsoft::UI::Dispatching::DispatcherQueue::GetForCurrentThread();
+                std::thread([dispatcher, contentFrame, nav, schemaRequest, requestId, pluginName] {
+                    std::string schemaStr = "{}";
+                    auto settings = GuiIpcGetSettings();
+                    if (settings) {
+                        cJSON* root = cJSON_Parse(settings->c_str());
+                        cJSON* plugins = root ? cJSON_GetObjectItem(root, "plugins") : nullptr;
                         if (plugins && cJSON_IsArray(plugins)) {
                             cJSON* plugin = nullptr;
                             cJSON_ArrayForEach(plugin, plugins) {
-                                cJSON* nameNode = cJSON_GetObjectItem(plugin, "name");
-                                if (nameNode && cJSON_IsString(nameNode) && nameNode->valuestring && pluginName == nameNode->valuestring) {
-                                    char* print_str = cJSON_PrintUnformatted(plugin);
-                                    if (print_str) {
-                                        schemaStr = print_str;
-                                        cJSON_free(print_str);
-                                    }
+                                cJSON* name = cJSON_GetObjectItem(plugin, "name");
+                                if (cJSON_IsString(name) && name->valuestring && pluginName == name->valuestring) {
+                                    char* printed = cJSON_PrintUnformatted(plugin);
+                                    if (printed) { schemaStr = printed; cJSON_free(printed); }
                                     break;
                                 }
                             }
                         }
-                        cJSON_Delete(root);
+                        if (root) cJSON_Delete(root);
                     }
-                }
-                contentFrame.Content(CreateSettingsPage(pluginName, schemaStr));
+                    if (dispatcher) dispatcher.TryEnqueue([contentFrame, nav, schemaRequest, requestId, pluginName, schemaStr = std::move(schemaStr)] {
+                        if (*schemaRequest != requestId) return;
+                        auto selected = nav.SelectedItem().try_as<NavigationViewItem>();
+                        if (!selected || !selected.Tag() || to_string(unbox_value<hstring>(selected.Tag())) != pluginName) return;
+                        contentFrame.Content(CreateSettingsPage(pluginName, schemaStr));
+                    });
+                }).detach();
             }
         });
+
+        // Discover optional plugin pages in the background so a slow engine
+        // handshake never delays first window presentation.
+        auto startupDispatcher = winrt::Microsoft::UI::Dispatching::DispatcherQueue::GetForCurrentThread();
+        std::thread([startupDispatcher, nav] {
+            std::vector<std::string> names;
+            auto settings = GuiIpcGetSettings();
+            if (settings) {
+                cJSON* root = cJSON_Parse(settings->c_str());
+                cJSON* plugins = root ? cJSON_GetObjectItem(root, "plugins") : nullptr;
+                if (plugins && cJSON_IsArray(plugins)) {
+                    cJSON* plugin = nullptr;
+                    cJSON_ArrayForEach(plugin, plugins) {
+                        cJSON* name = cJSON_GetObjectItem(plugin, "name");
+                        if (!cJSON_IsString(name) || !name->valuestring) continue;
+                        std::string value = name->valuestring;
+                        if (value != "icon_hover" && value != "taskbar_resize" &&
+                            value != "icon_magnification" && value != "icon_physics" &&
+                            value != "start_button" && value != "dynamic_island" &&
+                            value != "widget_host" && value != "taskbar_transparency") names.push_back(value);
+                    }
+                }
+                if (root) cJSON_Delete(root);
+            }
+            if (startupDispatcher) startupDispatcher.TryEnqueue([nav, names = std::move(names)] {
+                for (const auto& name : names) {
+                    bool exists = false;
+                    for (const auto& existing : nav.MenuItems()) {
+                        auto item = existing.try_as<NavigationViewItem>();
+                        if (item && item.Tag() && to_string(unbox_value<hstring>(item.Tag())) == name) { exists = true; break; }
+                    }
+                    if (exists) continue;
+                    NavigationViewItem item;
+                    item.Content(box_value(to_hstring(name)));
+                    item.Icon(SymbolIcon(Symbol::Setting));
+                    item.Tag(box_value(to_hstring(name)));
+                    nav.MenuItems().Append(item);
+                }
+            });
+        }).detach();
         
         // Engine Status and Control Header
         StackPanel headerPanel;
         headerPanel.Orientation(Orientation::Horizontal);
-        headerPanel.Spacing(16);
-        headerPanel.Padding(Thickness{ 0, 8, 24, 8 });
+        headerPanel.Spacing(10);
+        headerPanel.Padding(Thickness{ 24, 12, 28, 12 });
+        headerPanel.VerticalAlignment(VerticalAlignment::Center);
 
         TextBlock statusIndicator;
         statusIndicator.VerticalAlignment(VerticalAlignment::Center);
         statusIndicator.FontSize(14.0);
         statusIndicator.FontWeight(winrt::Windows::UI::Text::FontWeights::SemiBold());
+        statusIndicator.Margin(Thickness{ 0, 0, 0, 0 });
+
+        TextBlock statusLabel;
+        statusLabel.Text(L"ENGINE STATUS");
+        statusLabel.FontSize(10.0);
+        statusLabel.Opacity(0.72);
+        statusLabel.FontWeight(winrt::Windows::UI::Text::FontWeights::SemiBold());
+        StackPanel engineStatus;
+        engineStatus.Spacing(3);
+        engineStatus.VerticalAlignment(VerticalAlignment::Center);
+        engineStatus.Margin(Thickness{ 0, 0, 8, 0 });
+        engineStatus.Children().Append(statusLabel);
+        engineStatus.Children().Append(statusIndicator);
 
         Button startStopBtn;
-        startStopBtn.Padding(Thickness{ 16, 6, 16, 6 });
+        startStopBtn.Padding(Thickness{ 12, 6, 12, 6 });
 
         Button restartBtn;
-        restartBtn.Content(box_value(L"Restart Engine"));
-        restartBtn.Padding(Thickness{ 16, 6, 16, 6 });
+        restartBtn.Content(box_value(L"Restart engine"));
+        restartBtn.Padding(Thickness{ 12, 6, 12, 6 });
 
         Button restartExplorerBtn;
         restartExplorerBtn.Content(box_value(L"Restart Explorer"));
-        restartExplorerBtn.Padding(Thickness{ 16, 6, 16, 6 });
+        restartExplorerBtn.Padding(Thickness{ 12, 6, 12, 6 });
 
-        auto updateEngineStatusUI = [statusIndicator, startStopBtn, restartBtn, restartExplorerBtn]() {
-            bool running = IsEngineRunning();
+        auto applyEngineStatusUI = [statusIndicator, startStopBtn, restartBtn, restartExplorerBtn](bool running) {
             if (running) {
-                statusIndicator.Text(L"● Engine: Running");
+                statusIndicator.Text(L"\u25CF Engine running");
                 startStopBtn.Content(box_value(L"Stop Engine"));
                 restartBtn.Visibility(Visibility::Visible);
                 restartExplorerBtn.Visibility(Visibility::Collapsed);
             } else {
-                statusIndicator.Text(L"○ Engine: Stopped");
+                statusIndicator.Text(L"\u25CB Engine stopped");
                 startStopBtn.Content(box_value(L"Start Engine"));
                 restartBtn.Visibility(Visibility::Collapsed);
                 restartExplorerBtn.Visibility(Visibility::Visible);
             }
+        };
+
+        auto statusDispatcher = winrt::Microsoft::UI::Dispatching::DispatcherQueue::GetForCurrentThread();
+        auto statusProbePending = std::make_shared<std::atomic_bool>(false);
+        auto updateEngineStatusUI = [statusDispatcher, statusProbePending, applyEngineStatusUI]() {
+            if (statusProbePending->exchange(true)) return;
+            std::thread([statusDispatcher, statusProbePending, applyEngineStatusUI] {
+                const bool running = IsEngineRunning();
+                statusProbePending->store(false);
+                if (statusDispatcher) statusDispatcher.TryEnqueue([applyEngineStatusUI, running] { applyEngineStatusUI(running); });
+            }).detach();
         };
 
         updateEngineStatusUI();
@@ -515,7 +602,7 @@ struct App : ApplicationT<App, winrt::Microsoft::UI::Xaml::Markup::IXamlMetadata
                 RestartExplorerProcess();
                 Sleep(500);
                 dispatcher.TryEnqueue([statusIndicator]() { 
-                    statusIndicator.Text(L"○ Engine: Stopped (Explorer Restarted)");
+                    statusIndicator.Text(L"Engine stopped · taskbar restarted");
                 });
             }).detach();
         });
@@ -527,32 +614,48 @@ struct App : ApplicationT<App, winrt::Microsoft::UI::Xaml::Markup::IXamlMetadata
         });
         engineTimer->Start();
 
-        headerPanel.Children().Append(statusIndicator);
+        headerPanel.Children().Append(engineStatus);
         headerPanel.Children().Append(startStopBtn);
         headerPanel.Children().Append(restartBtn);
         headerPanel.Children().Append(restartExplorerBtn);
 
         // Separator
         TextBlock sep;
-        sep.Text(L"|");
-        sep.Opacity(0.3);
+        sep.Text(L"\u2022");
+        sep.Opacity(0.45);
         sep.VerticalAlignment(VerticalAlignment::Center);
         sep.Margin(Thickness{ 4, 0, 4, 0 });
         headerPanel.Children().Append(sep);
 
         // Run at startup toggle
         ToggleSwitch startupToggle;
-        startupToggle.Header(box_value(L"Run at Startup"));
+        startupToggle.Header(box_value(L"Run at startup"));
         startupToggle.OffContent(box_value(L"Off"));
         startupToggle.OnContent(box_value(L"On"));
         startupToggle.IsOn(IsStartupEnabled());
         startupToggle.VerticalAlignment(VerticalAlignment::Center);
+        startupToggle.MinWidth(150);
         startupToggle.Toggled([](IInspectable const& sender, RoutedEventArgs const&) {
             SetStartupEnabled(sender.as<ToggleSwitch>().IsOn());
         });
         headerPanel.Children().Append(startupToggle);
 
-        nav.Header(headerPanel);
+        Border engineStatusCard;
+        engineStatusCard.CornerRadius(CornerRadius{ 12, 12, 12, 12 });
+        engineStatusCard.BorderThickness(Thickness{ 1, 1, 1, 1 });
+        engineStatusCard.Padding(Thickness{ 12, 8, 16, 8 });
+        engineStatusCard.Child(headerPanel);
+        try {
+            auto statusResources = Application::Current().Resources();
+            if (statusResources.HasKey(box_value(L"CardBackgroundFillColorSecondaryBrush")))
+                engineStatusCard.Background(statusResources.Lookup(box_value(L"CardBackgroundFillColorSecondaryBrush")).as<winrt::Microsoft::UI::Xaml::Media::Brush>());
+            else if (statusResources.HasKey(box_value(L"CardBackgroundFillColorDefaultBrush")))
+                engineStatusCard.Background(statusResources.Lookup(box_value(L"CardBackgroundFillColorDefaultBrush")).as<winrt::Microsoft::UI::Xaml::Media::Brush>());
+            if (statusResources.HasKey(box_value(L"CardStrokeColorDefaultBrush")))
+                engineStatusCard.BorderBrush(statusResources.Lookup(box_value(L"CardStrokeColorDefaultBrush")).as<winrt::Microsoft::UI::Xaml::Media::Brush>());
+        } catch (...) {}
+        winrt::Microsoft::UI::Xaml::Automation::AutomationProperties::SetName(engineStatusCard, L"Engine controls and startup setting");
+        nav.Header(engineStatusCard);
         
         nav.Content(contentFrame);
         nav.SelectedItem(resizeItem);
@@ -619,7 +722,11 @@ static LONG WINAPI CrashHandler(PEXCEPTION_POINTERS pExcept)
 
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
 {
-    AddVectoredExceptionHandler(1, CrashHandler);
+    // WinUI and the C++/WinRT projection use exceptions for recoverable control
+    // flow. A vectored handler runs on first chance and logs every caught throw,
+    // which floods the settings log and obscures real crashes. Log only failures
+    // that reach the process-level unhandled exception filter.
+    SetUnhandledExceptionFilter(CrashHandler);
 
     /* Attach to the interactive user desktop if started from background / sandbox */
     HDESK hDesk = OpenInputDesktop(0, FALSE, GENERIC_ALL);

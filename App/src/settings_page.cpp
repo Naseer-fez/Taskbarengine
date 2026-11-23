@@ -2,23 +2,35 @@
 #include "config_io.h"
 #include "gui_ipc_client.h"
 #include <cJSON.h>
+#include <sdk/te_widget.h>
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Foundation.Collections.h>
 #include <winrt/Windows.UI.h>
 #include <winrt/Microsoft.UI.Xaml.Controls.Primitives.h>
+#include <winrt/Microsoft.UI.Xaml.Automation.h>
+#include <winrt/Microsoft.UI.Xaml.Input.h>
 #undef FindText
 #undef FindTextW
 #undef FindTextA
 #include <winrt/Windows.UI.Text.h>
 #include <winrt/Microsoft.UI.Xaml.Media.h>
 #include <cmath>
+#include <algorithm>
+#include <cstdlib>
+#include <cctype>
 #include <vector>
 
 #include <memory>
 #include <functional>
 #include <chrono>
 #include <mutex>
+#include <condition_variable>
+#include <deque>
+#include <thread>
 #include <commdlg.h>
+#include <fstream>
+#include <sstream>
+#include <unordered_map>
 
 #pragma comment(lib, "comdlg32.lib")
 
@@ -32,7 +44,187 @@ namespace winrt::TaskbarEngine {
 
 static std::mutex g_settings_mutex;
 
-static void SaveAndReload(const std::string& plugin_name, const std::string& key, cJSON* value)
+struct WidgetCatalogItem { std::string id; std::string name; std::string settings_json; };
+
+static std::vector<WidgetCatalogItem> ReadWidgetCatalog()
+{
+    std::vector<WidgetCatalogItem> items;
+    wchar_t exe_path[MAX_PATH]{};
+    if (!GetModuleFileNameW(nullptr, exe_path, MAX_PATH)) return items;
+    std::wstring base(exe_path);
+    const size_t slash = base.find_last_of(L"\\/");
+    if (slash == std::wstring::npos) return items;
+    base.resize(slash);
+    if (GetFileAttributesW((base + L"\\Widgets").c_str()) == INVALID_FILE_ATTRIBUTES) {
+        const size_t parent = base.find_last_of(L"\\/");
+        if (parent != std::wstring::npos) base.resize(parent);
+    }
+    const std::wstring search = base + L"\\Widgets\\*";
+    WIN32_FIND_DATAW data{};
+    HANDLE find = FindFirstFileW(search.c_str(), &data);
+    if (find == INVALID_HANDLE_VALUE) return items;
+    do {
+        if (!(data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || data.cFileName[0] == L'.') continue;
+        std::wstring manifest_path = base + L"\\Widgets\\" + data.cFileName + L"\\widget.json";
+        std::ifstream input(manifest_path, std::ios::binary);
+        if (!input) continue;
+        std::ostringstream contents;
+        contents << input.rdbuf();
+        cJSON* manifest = cJSON_Parse(contents.str().c_str());
+        if (!manifest) continue;
+        cJSON* id = cJSON_GetObjectItemCaseSensitive(manifest, "id");
+        cJSON* name = cJSON_GetObjectItemCaseSensitive(manifest, "name");
+        cJSON* module = cJSON_GetObjectItemCaseSensitive(manifest, "module");
+        cJSON* api_version = cJSON_GetObjectItemCaseSensitive(manifest, "api_version");
+        cJSON* manifest_version = cJSON_GetObjectItemCaseSensitive(manifest, "manifest_version");
+        cJSON* settings = cJSON_GetObjectItemCaseSensitive(manifest, "settings");
+        if (cJSON_IsString(id) && id->valuestring && cJSON_IsString(name) && name->valuestring) {
+            const std::string stable_id = id->valuestring;
+            const bool valid = !stable_id.empty() && stable_id.size() <= 64 &&
+                std::all_of(stable_id.begin(), stable_id.end(), [](unsigned char ch) {
+                    return (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '-' || ch == '_' || ch == '.';
+                });
+            const bool valid_module = cJSON_IsString(module) && module->valuestring && module->valuestring[0] &&
+                std::string(module->valuestring).find_first_of("\\/:*") == std::string::npos &&
+                std::string(module->valuestring).find("..") == std::string::npos;
+            const int directory_chars = WideCharToMultiByte(CP_UTF8, 0, data.cFileName, -1, nullptr, 0, nullptr, nullptr);
+            std::string folder(directory_chars > 1 ? static_cast<size_t>(directory_chars) : 0, '\0');
+            if (directory_chars > 1) {
+                WideCharToMultiByte(CP_UTF8, 0, data.cFileName, -1, folder.data(), directory_chars, nullptr, nullptr);
+                folder.pop_back();
+            }
+            if (valid && valid_module && stable_id == folder && cJSON_IsNumber(api_version) && api_version->valueint == TE_WIDGET_API_VERSION &&
+                cJSON_IsNumber(manifest_version) && manifest_version->valueint == 1 &&
+                std::none_of(items.begin(), items.end(), [&](const auto& item) { return item.id == stable_id; })) {
+                std::string settings_json = "[]";
+                if (cJSON_IsArray(settings)) {
+                    char* printed = cJSON_PrintUnformatted(settings);
+                    if (printed) { settings_json = printed; cJSON_free(printed); }
+                }
+                items.push_back({ stable_id, name->valuestring, settings_json });
+            }
+        }
+        cJSON_Delete(manifest);
+    } while (FindNextFileW(find, &data));
+    FindClose(find);
+    std::sort(items.begin(), items.end(), [](const auto& a, const auto& b) { return a.id < b.id; });
+    return items;
+}
+
+static std::string MergeWidgetCatalogSchema(const std::string& base_schema,
+                                            const std::vector<WidgetCatalogItem>& catalog)
+{
+    cJSON* schema = cJSON_Parse(base_schema.c_str());
+    if (!schema || !cJSON_IsObject(schema)) {
+        if (schema) cJSON_Delete(schema);
+        schema = cJSON_CreateObject();
+    }
+    if (!schema) return base_schema;
+    cJSON* settings = cJSON_GetObjectItemCaseSensitive(schema, "settings");
+    if (!cJSON_IsArray(settings)) {
+        settings = cJSON_CreateArray();
+        if (!settings || !cJSON_AddItemToObject(schema, "settings", settings)) {
+            if (settings) cJSON_Delete(settings);
+            cJSON_Delete(schema);
+            return base_schema;
+        }
+    }
+    if (catalog.size() || base_schema == "{}") {
+        static const char* host_settings = R"JSON([
+            {"key":"enabled","label":"Enable widget bar","type":"bool","default":true},
+            {"key":"layout","label":"Widget order","type":"string","default":"clock,sysmon,media"},
+            {"key":"position_percent","label":"Position along taskbar","type":"slider","default":100,"min":0,"max":100,"step":1,"unit":"%"},
+            {"key":"gap","label":"Widget spacing","type":"slider","default":10,"min":4,"max":32,"step":1,"unit":"DIP"}
+        ])JSON";
+        cJSON* host = cJSON_Parse(host_settings);
+        if (cJSON_IsArray(host)) {
+            cJSON* descriptor = nullptr;
+            cJSON_ArrayForEach(descriptor, host) {
+                cJSON* key = cJSON_GetObjectItemCaseSensitive(descriptor, "key");
+                bool duplicate = false;
+                cJSON* existing = nullptr;
+                cJSON_ArrayForEach(existing, settings) {
+                    cJSON* existing_key = cJSON_GetObjectItemCaseSensitive(existing, "key");
+                    if (cJSON_IsString(existing_key) && cJSON_IsString(key) &&
+                        strcmp(existing_key->valuestring, key->valuestring) == 0) { duplicate = true; break; }
+                }
+                if (!duplicate) {
+                    cJSON* copy = cJSON_Duplicate(descriptor, 1);
+                    if (copy && !cJSON_AddItemToArray(settings, copy)) cJSON_Delete(copy);
+                }
+            }
+        }
+        if (host) cJSON_Delete(host);
+    }
+    for (const auto& widget : catalog) {
+        cJSON* additions = cJSON_Parse(widget.settings_json.c_str());
+        if (!cJSON_IsArray(additions)) { if (additions) cJSON_Delete(additions); continue; }
+        cJSON* descriptor = nullptr;
+        cJSON_ArrayForEach(descriptor, additions) {
+            cJSON* key = cJSON_GetObjectItemCaseSensitive(descriptor, "key");
+            if (!cJSON_IsString(key) || !key->valuestring || !key->valuestring[0]) continue;
+            const std::string full_key = widget.id + "." + key->valuestring;
+            bool duplicate = false;
+            cJSON* existing = nullptr;
+            cJSON_ArrayForEach(existing, settings) {
+                cJSON* existing_key = cJSON_GetObjectItemCaseSensitive(existing, "key");
+                if (cJSON_IsString(existing_key) && existing_key->valuestring && full_key == existing_key->valuestring) { duplicate = true; break; }
+            }
+            if (duplicate) continue;
+            cJSON* copy = cJSON_Duplicate(descriptor, 1);
+            if (!copy) continue;
+            cJSON* copied_key = cJSON_CreateString(full_key.c_str());
+            if (!copied_key) { cJSON_Delete(copy); continue; }
+            if (!cJSON_ReplaceItemInObjectCaseSensitive(copy, "key", copied_key)) {
+                cJSON_Delete(copied_key);
+                cJSON_Delete(copy);
+                continue;
+            }
+            if (!cJSON_AddItemToArray(settings, copy)) cJSON_Delete(copy);
+        }
+        cJSON_Delete(additions);
+    }
+    char* serialized = cJSON_PrintUnformatted(schema);
+    const std::string result = serialized ? serialized : base_schema;
+    if (serialized) cJSON_free(serialized);
+    cJSON_Delete(schema);
+    return result;
+}
+
+static void QueueSettingsWork(std::function<void()> work)
+{
+    struct WorkerState {
+        std::mutex mutex;
+        std::condition_variable ready;
+        std::deque<std::function<void()>> pending;
+    };
+    // Intentionally process-lifetime storage: a settings write may still be in flight
+    // while WinUI is tearing down, and must not race static destruction.
+    static WorkerState* state = [] {
+        auto* worker = new WorkerState();
+        std::thread([worker] {
+            for (;;) {
+                std::function<void()> task;
+                {
+                    std::unique_lock<std::mutex> lock(worker->mutex);
+                    worker->ready.wait(lock, [worker] { return !worker->pending.empty(); });
+                    task = std::move(worker->pending.front());
+                    worker->pending.pop_front();
+                }
+                try { task(); } catch (...) { /* Keep the settings worker alive. */ }
+            }
+        }).detach();
+        return worker;
+    }();
+
+    {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        state->pending.emplace_back(std::move(work));
+    }
+    state->ready.notify_one();
+}
+
+static void SaveAndReloadNow(const std::string& plugin_name, const std::string& key, cJSON* value)
 {
     std::lock_guard<std::mutex> lock(g_settings_mutex);
     std::wstring path = ConfigIO_GetConfigPath();
@@ -48,7 +240,10 @@ static void SaveAndReload(const std::string& plugin_name, const std::string& key
         root = cJSON_CreateObject();
     }
     
-    if (SUCCEEDED(ConfigIO_SetPluginValue(root, plugin_name.c_str(), key.c_str(), value))) {
+    const HRESULT set_hr = plugin_name == "widget_host" && key != "enabled"
+        ? ConfigIO_SetWidgetValue(root, key.c_str(), value)
+        : ConfigIO_SetPluginValue(root, plugin_name.c_str(), key.c_str(), value);
+    if (SUCCEEDED(set_hr)) {
         if (SUCCEEDED(ConfigIO_Save(path, root))) {
             GuiIpcReloadConfig();
         }
@@ -58,13 +253,23 @@ static void SaveAndReload(const std::string& plugin_name, const std::string& key
 
 static cJSON* GetCurrentValue(const std::string& plugin_name, const std::string& key)
 {
-    std::lock_guard<std::mutex> lock(g_settings_mutex);
     std::wstring path = ConfigIO_GetConfigPath();
     cJSON* root = ConfigIO_Load(path);
     cJSON* res = nullptr;
     if (root) {
-        cJSON* val = ConfigIO_GetPluginValue(root, plugin_name.c_str(), key.c_str());
-        if (val) {
+        cJSON* val = plugin_name == "widget_host" && key != "enabled"
+            ? ConfigIO_GetWidgetValue(root, key.c_str())
+            : ConfigIO_GetPluginValue(root, plugin_name.c_str(), key.c_str());
+        if (!val && plugin_name == "widget_host" && key == "position_percent") {
+            cJSON* widgets = cJSON_GetObjectItemCaseSensitive(root, "widgets");
+            cJSON* legacy = widgets ? cJSON_GetObjectItemCaseSensitive(widgets, "position") : nullptr;
+            if (cJSON_IsString(legacy) && legacy->valuestring) {
+                const double percent = strcmp(legacy->valuestring, "left") == 0 ? 0.0 :
+                    strcmp(legacy->valuestring, "center") == 0 ? 50.0 : 100.0;
+                res = cJSON_CreateNumber(percent);
+            }
+        }
+        if (val && !res) {
             res = cJSON_Duplicate(val, 1);
         }
         cJSON_Delete(root);
@@ -77,7 +282,7 @@ struct SettingKeyValue {
     cJSON* value; // takes ownership
 };
 
-static void SaveMultipleAndReload(const std::string& plugin_name, std::vector<SettingKeyValue> items)
+static void SaveMultipleAndReloadNow(const std::string& plugin_name, std::vector<SettingKeyValue> items)
 {
     std::lock_guard<std::mutex> lock(g_settings_mutex);
     std::wstring path = ConfigIO_GetConfigPath();
@@ -94,7 +299,10 @@ static void SaveMultipleAndReload(const std::string& plugin_name, std::vector<Se
     }
 
     for (auto& it : items) {
-        ConfigIO_SetPluginValue(root, plugin_name.c_str(), it.key.c_str(), it.value);
+        if (plugin_name == "widget_host" && it.key != "enabled")
+            ConfigIO_SetWidgetValue(root, it.key.c_str(), it.value);
+        else
+            ConfigIO_SetPluginValue(root, plugin_name.c_str(), it.key.c_str(), it.value);
     }
 
     if (SUCCEEDED(ConfigIO_Save(path, root))) {
@@ -133,7 +341,6 @@ static bool GetBoolSetting(const std::string& plugin_name, const std::string& ke
 
 static cJSON* GetDynamicIslandSubValue(const std::string& key)
 {
-    std::lock_guard<std::mutex> lock(g_settings_mutex);
     std::wstring path = ConfigIO_GetConfigPath();
     cJSON* root = ConfigIO_Load(path);
     cJSON* res = nullptr;
@@ -178,7 +385,7 @@ static bool GetDynamicIslandBool(const std::string& key, bool default_val)
     return default_val;
 }
 
-static void SaveDynamicIslandSetting(const std::string& key, cJSON* value)
+static void SaveDynamicIslandSettingNow(const std::string& key, cJSON* value)
 {
     std::lock_guard<std::mutex> lock(g_settings_mutex);
     std::wstring path = ConfigIO_GetConfigPath();
@@ -234,7 +441,7 @@ static void SaveDynamicIslandSetting(const std::string& key, cJSON* value)
     cJSON_Delete(root);
 }
 
-static void SaveDynamicIslandMultiple(const std::vector<SettingKeyValue>& items)
+static void SaveDynamicIslandMultipleNow(const std::vector<SettingKeyValue>& items)
 {
     std::lock_guard<std::mutex> lock(g_settings_mutex);
     std::wstring path = ConfigIO_GetConfigPath();
@@ -296,6 +503,30 @@ static void SaveDynamicIslandMultiple(const std::vector<SettingKeyValue>& items)
     cJSON_Delete(root);
 }
 
+// UI event handlers enqueue persistence and IPC work so slow storage or a
+// stalled engine cannot stop WinUI's dispatcher from pumping input and paint.
+static void SaveAndReload(const std::string& plugin_name, const std::string& key, cJSON* value)
+{
+    QueueSettingsWork([plugin_name, key, value] { SaveAndReloadNow(plugin_name, key, value); });
+}
+
+static void SaveMultipleAndReload(const std::string& plugin_name, std::vector<SettingKeyValue> items)
+{
+    QueueSettingsWork([plugin_name, items = std::move(items)]() mutable {
+        SaveMultipleAndReloadNow(plugin_name, std::move(items));
+    });
+}
+
+static void SaveDynamicIslandSetting(const std::string& key, cJSON* value)
+{
+    QueueSettingsWork([key, value] { SaveDynamicIslandSettingNow(key, value); });
+}
+
+static void SaveDynamicIslandMultiple(const std::vector<SettingKeyValue>& items)
+{
+    QueueSettingsWork([items] { SaveDynamicIslandMultipleNow(items); });
+}
+
 static std::string GetStringSetting(const std::string& plugin_name, const std::string& key, const std::string& default_val)
 {
     cJSON* node = GetCurrentValue(plugin_name, key);
@@ -346,21 +577,59 @@ static bool PickImageFile(std::wstring& out_path)
 static StackPanel CreatePageHeader(const std::wstring& title_str, const std::wstring& subtitle_str)
 {
     StackPanel header;
-    header.Spacing(4);
-    header.Margin(Thickness{ 0, 0, 0, 16 });
+    header.Margin(Thickness{ 0, 0, 0, 24 });
 
+    Border hero;
+    hero.CornerRadius(CornerRadius{ 16, 16, 16, 16 });
+    hero.BorderThickness(Thickness{ 1, 1, 1, 1 });
+    hero.Padding(Thickness{ 0, 0, 0, 0 });
+    try {
+        auto resources = Application::Current().Resources();
+        if (resources.HasKey(box_value(L"CardBackgroundFillColorSecondaryBrush")))
+            hero.Background(resources.Lookup(box_value(L"CardBackgroundFillColorSecondaryBrush")).as<Brush>());
+        else if (resources.HasKey(box_value(L"CardBackgroundFillColorDefaultBrush")))
+            hero.Background(resources.Lookup(box_value(L"CardBackgroundFillColorDefaultBrush")).as<Brush>());
+        if (resources.HasKey(box_value(L"CardStrokeColorDefaultBrush")))
+            hero.BorderBrush(resources.Lookup(box_value(L"CardStrokeColorDefaultBrush")).as<Brush>());
+    } catch (...) {}
+
+    Grid layout;
+    ColumnDefinition accentColumn;
+    accentColumn.Width(GridLength{ 4.0, GridUnitType::Pixel });
+    ColumnDefinition contentColumn;
+    contentColumn.Width(GridLength{ 1.0, GridUnitType::Star });
+    layout.ColumnDefinitions().Append(accentColumn);
+    layout.ColumnDefinitions().Append(contentColumn);
+    Border accent;
+    try {
+        auto resources = Application::Current().Resources();
+        if (resources.HasKey(box_value(L"AccentFillColorDefaultBrush")))
+            accent.Background(resources.Lookup(box_value(L"AccentFillColorDefaultBrush")).as<Brush>());
+    } catch (...) {}
+    Grid::SetColumn(accent, 0);
+    layout.Children().Append(accent);
+
+    StackPanel content;
+    content.Spacing(7);
+    content.Padding(Thickness{ 24, 20, 24, 20 });
     TextBlock title;
     title.Text(title_str);
-    title.FontSize(26.0);
+    title.FontSize(30.0);
     title.FontWeight(winrt::Windows::UI::Text::FontWeights::SemiBold());
-    header.Children().Append(title);
+    title.TextWrapping(TextWrapping::Wrap);
+    content.Children().Append(title);
 
     TextBlock subtitle;
     subtitle.Text(subtitle_str);
-    subtitle.FontSize(13.0);
-    subtitle.Opacity(0.72);
+    subtitle.FontSize(14.0);
+    subtitle.Opacity(0.8);
     subtitle.TextWrapping(TextWrapping::Wrap);
-    header.Children().Append(subtitle);
+    subtitle.MaxWidth(760);
+    content.Children().Append(subtitle);
+    Grid::SetColumn(content, 1);
+    layout.Children().Append(content);
+    hero.Child(layout);
+    header.Children().Append(hero);
 
     return header;
 }
@@ -369,23 +638,26 @@ static TextBlock CreateSectionHeader(const std::wstring& sec_title)
 {
     TextBlock header;
     header.Text(sec_title);
-    header.FontSize(15.0);
+    header.FontSize(18.0);
     header.FontWeight(winrt::Windows::UI::Text::FontWeights::SemiBold());
-    header.Margin(Thickness{ 0, 14, 0, 6 });
+    header.Margin(Thickness{ 0, 24, 0, 10 });
     return header;
 }
 
 static Border CreateSettingsCard(const std::wstring& title, const std::wstring& desc, FrameworkElement const& control, bool vertical_layout = false)
 {
     Border card;
-    card.CornerRadius(CornerRadius{ 4, 4, 4, 4 });
+    card.CornerRadius(CornerRadius{ 14, 14, 14, 14 });
     card.BorderThickness(Thickness{ 1, 1, 1, 1 });
-    card.Margin(Thickness{ 0, 0, 0, 8 });
-    card.Padding(Thickness{ 16, 12, 16, 12 });
+    card.Margin(Thickness{ 0, 0, 0, 12 });
+    card.Padding(Thickness{ 22, 18, 22, 18 });
+    Microsoft::UI::Xaml::Automation::AutomationProperties::SetName(control, title);
 
     try {
         auto res = Application::Current().Resources();
-        if (res.HasKey(box_value(L"CardBackgroundFillColorDefaultBrush"))) {
+        if (res.HasKey(box_value(L"CardBackgroundFillColorSecondaryBrush"))) {
+            card.Background(res.Lookup(box_value(L"CardBackgroundFillColorSecondaryBrush")).as<Brush>());
+        } else if (res.HasKey(box_value(L"CardBackgroundFillColorDefaultBrush"))) {
             card.Background(res.Lookup(box_value(L"CardBackgroundFillColorDefaultBrush")).as<Brush>());
         }
         if (res.HasKey(box_value(L"CardStrokeColorDefaultBrush"))) {
@@ -395,18 +667,18 @@ static Border CreateSettingsCard(const std::wstring& title, const std::wstring& 
 
     if (vertical_layout) {
         StackPanel vPanel;
-        vPanel.Spacing(8);
+        vPanel.Spacing(10);
 
         TextBlock titleBlock;
         titleBlock.Text(title);
         titleBlock.FontWeight(winrt::Windows::UI::Text::FontWeights::SemiBold());
-        titleBlock.FontSize(14.0);
+        titleBlock.FontSize(16.0);
         vPanel.Children().Append(titleBlock);
 
         if (!desc.empty()) {
             TextBlock descBlock;
             descBlock.Text(desc);
-            descBlock.FontSize(12.0);
+            descBlock.FontSize(13.5);
             descBlock.Opacity(0.72);
             descBlock.TextWrapping(TextWrapping::Wrap);
             vPanel.Children().Append(descBlock);
@@ -431,13 +703,13 @@ static Border CreateSettingsCard(const std::wstring& title, const std::wstring& 
         TextBlock titleBlock;
         titleBlock.Text(title);
         titleBlock.FontWeight(winrt::Windows::UI::Text::FontWeights::SemiBold());
-        titleBlock.FontSize(14.0);
+        titleBlock.FontSize(16.0);
         textPanel.Children().Append(titleBlock);
 
         if (!desc.empty()) {
             TextBlock descBlock;
             descBlock.Text(desc);
-            descBlock.FontSize(12.0);
+            descBlock.FontSize(13.5);
             descBlock.Opacity(0.72);
             descBlock.TextWrapping(TextWrapping::Wrap);
             textPanel.Children().Append(descBlock);
@@ -506,8 +778,9 @@ static PairedSliderControl CreateSliderSettingCard(
     slider->LargeChange(step_v * 4.0);
     slider->Value(cur_val);
     slider->IsThumbToolTipEnabled(true);
-    slider->Width(260);
+    slider->Width(240);
     slider->VerticalAlignment(VerticalAlignment::Center);
+    Microsoft::UI::Xaml::Automation::AutomationProperties::SetName(*slider, title);
 
     numBox->Width(90);
     numBox->SpinButtonPlacementMode(NumberBoxSpinButtonPlacementMode::Inline);
@@ -517,28 +790,35 @@ static PairedSliderControl CreateSliderSettingCard(
     numBox->LargeChange(step_v * 4.0);
     numBox->Value(cur_val);
     numBox->VerticalAlignment(VerticalAlignment::Center);
+    Microsoft::UI::Xaml::Automation::AutomationProperties::SetName(*numBox, title);
 
     auto is_updating = std::make_shared<bool>(false);
     auto debounce = std::make_shared<DispatcherTimer>();
-    debounce->Interval(std::chrono::milliseconds(100));
+    debounce->Interval(std::chrono::milliseconds(400));
+    auto pointer_dragging = std::make_shared<bool>(false);
 
-    auto s = *slider;
-    debounce->Tick([plugin_name, key, s, debounce, decimal_places](IInspectable const&, IInspectable const&) {
+    auto weakSlider = winrt::make_weak(*slider);
+    std::weak_ptr<DispatcherTimer> weakDebounce = debounce;
+    debounce->Tick([plugin_name, key, weakSlider, weakDebounce, decimal_places](IInspectable const&, IInspectable const&) {
         try {
-            debounce->Stop();
-            double val = s.Value();
+            if (auto timer = weakDebounce.lock()) timer->Stop();
+            auto control = weakSlider.get();
+            if (!control) return;
+            double val = control.Value();
             if (decimal_places == 0) val = std::round(val);
             SaveAndReload(plugin_name, key, cJSON_CreateNumber(val));
         } catch (...) {}
     });
 
-    slider->ValueChanged([valLbl, numBox, is_updating, debounce, format_val](auto const&, auto const& e) {
+    slider->ValueChanged([valLbl, numBox, is_updating, debounce, format_val, pointer_dragging](auto const&, auto const& e) {
         if (!*is_updating) {
             *is_updating = true;
             numBox->Value(e.NewValue());
             *is_updating = false;
-            debounce->Stop();
-            debounce->Start();
+            if (!*pointer_dragging) {
+                debounce->Stop();
+                debounce->Start();
+            }
         }
         valLbl.Text(format_val(e.NewValue()));
     });
@@ -554,14 +834,24 @@ static PairedSliderControl CreateSliderSettingCard(
         }
     });
 
-    slider->LostFocus([plugin_name, key, s, debounce, decimal_places](IInspectable const&, RoutedEventArgs const&) {
+    auto persistSlider = [plugin_name, key, weakSlider, debounce, decimal_places, pointer_dragging]() {
         try {
+            *pointer_dragging = false;
             debounce->Stop();
-            double val = s.Value();
+            auto control = weakSlider.get();
+            if (!control) return;
+            double val = control.Value();
             if (decimal_places == 0) val = std::round(val);
             SaveAndReload(plugin_name, key, cJSON_CreateNumber(val));
         } catch (...) {}
+    };
+    slider->PointerPressed([pointer_dragging, debounce](IInspectable const&, Microsoft::UI::Xaml::Input::PointerRoutedEventArgs const&) {
+        *pointer_dragging = true;
+        debounce->Stop();
     });
+    slider->PointerReleased([persistSlider](IInspectable const&, Microsoft::UI::Xaml::Input::PointerRoutedEventArgs const&) { persistSlider(); });
+    slider->PointerCaptureLost([persistSlider](IInspectable const&, Microsoft::UI::Xaml::Input::PointerRoutedEventArgs const&) { persistSlider(); });
+    slider->LostFocus([persistSlider](IInspectable const&, RoutedEventArgs const&) { persistSlider(); });
 
     auto set_value_fn = [slider, numBox, valLbl, debounce, is_updating, format_val](double v) {
         *is_updating = true;
@@ -620,6 +910,7 @@ static PairedSliderControl CreateDynamicIslandSliderSettingCard(
     slider->IsThumbToolTipEnabled(true);
     slider->Width(260);
     slider->VerticalAlignment(VerticalAlignment::Center);
+    Microsoft::UI::Xaml::Automation::AutomationProperties::SetName(*slider, title);
 
     numBox->Width(90);
     numBox->SpinButtonPlacementMode(NumberBoxSpinButtonPlacementMode::Inline);
@@ -629,18 +920,24 @@ static PairedSliderControl CreateDynamicIslandSliderSettingCard(
     numBox->LargeChange(step_v * 4.0);
     numBox->Value(cur_val);
     numBox->VerticalAlignment(VerticalAlignment::Center);
+    Microsoft::UI::Xaml::Automation::AutomationProperties::SetName(*numBox, title);
 
     auto is_updating = std::make_shared<bool>(false);
     auto debounce = std::make_shared<DispatcherTimer>();
-    debounce->Interval(std::chrono::milliseconds(100));
+    debounce->Interval(std::chrono::milliseconds(400));
+    auto pointer_dragging = std::make_shared<bool>(false);
+    auto weakSlider = winrt::make_weak(*slider);
+    std::weak_ptr<DispatcherTimer> weakDebounce = debounce;
 
-    slider->ValueChanged([valLbl, numBox, is_updating, debounce, format_val](auto const&, auto const& e) {
+    slider->ValueChanged([valLbl, numBox, is_updating, debounce, format_val, pointer_dragging](auto const&, auto const& e) {
         if (!*is_updating) {
             *is_updating = true;
             numBox->Value(e.NewValue());
             *is_updating = false;
-            debounce->Stop();
-            debounce->Start();
+            if (!*pointer_dragging) {
+                debounce->Stop();
+                debounce->Start();
+            }
         }
         valLbl.Text(format_val(e.NewValue()));
     });
@@ -656,20 +953,31 @@ static PairedSliderControl CreateDynamicIslandSliderSettingCard(
         }
     });
 
-    auto s = *slider;
-    debounce->Tick([key, s, debounce](IInspectable const&, IInspectable const&) {
+    debounce->Tick([key, weakSlider, weakDebounce](IInspectable const&, IInspectable const&) {
         try {
-            debounce->Stop();
-            SaveDynamicIslandSetting(key, cJSON_CreateNumber(std::round(s.Value())));
+            if (auto timer = weakDebounce.lock()) timer->Stop();
+            auto control = weakSlider.get();
+            if (!control) return;
+            SaveDynamicIslandSetting(key, cJSON_CreateNumber(std::round(control.Value())));
         } catch (...) {}
     });
 
-    slider->LostFocus([key, s, debounce](IInspectable const&, RoutedEventArgs const&) {
+    auto persistSlider = [key, weakSlider, debounce, pointer_dragging]() {
         try {
+            *pointer_dragging = false;
             debounce->Stop();
-            SaveDynamicIslandSetting(key, cJSON_CreateNumber(std::round(s.Value())));
+            auto control = weakSlider.get();
+            if (!control) return;
+            SaveDynamicIslandSetting(key, cJSON_CreateNumber(std::round(control.Value())));
         } catch (...) {}
+    };
+    slider->PointerPressed([pointer_dragging, debounce](IInspectable const&, Microsoft::UI::Xaml::Input::PointerRoutedEventArgs const&) {
+        *pointer_dragging = true;
+        debounce->Stop();
     });
+    slider->PointerReleased([persistSlider](IInspectable const&, Microsoft::UI::Xaml::Input::PointerRoutedEventArgs const&) { persistSlider(); });
+    slider->PointerCaptureLost([persistSlider](IInspectable const&, Microsoft::UI::Xaml::Input::PointerRoutedEventArgs const&) { persistSlider(); });
+    slider->LostFocus([persistSlider](IInspectable const&, RoutedEventArgs const&) { persistSlider(); });
 
     auto set_value_fn = [slider, numBox, valLbl, debounce, is_updating, format_val](double v) {
         *is_updating = true;
@@ -712,11 +1020,10 @@ static Border CreateToggleSettingCard(
         bool is_on = sender.as<ToggleSwitch>().IsOn();
         SaveAndReload(plugin_name, key, cJSON_CreateBool(is_on));
         if (key == "enabled") {
-            if (is_on) {
-                GuiIpcEnablePlugin(plugin_name);
-            } else {
-                GuiIpcDisablePlugin(plugin_name);
-            }
+            QueueSettingsWork([plugin_name, is_on] {
+                if (is_on) GuiIpcEnablePlugin(plugin_name);
+                else GuiIpcDisablePlugin(plugin_name);
+            });
         }
     });
 
@@ -733,12 +1040,13 @@ static ActionBarControls CreateActionBar(const std::wstring& btn_text = L"Apply 
 {
     StackPanel actionPanel;
     actionPanel.Orientation(Orientation::Horizontal);
-    actionPanel.Spacing(16);
+    actionPanel.Spacing(12);
     actionPanel.Margin(Thickness{ 0, 16, 0, 24 });
+    actionPanel.VerticalAlignment(VerticalAlignment::Center);
 
     Button applyBtn;
     applyBtn.Content(box_value(btn_text));
-    applyBtn.Padding(Thickness{ 20, 8, 20, 8 });
+    applyBtn.Padding(Thickness{ 22, 10, 22, 10 });
     applyBtn.FontWeight(winrt::Windows::UI::Text::FontWeights::SemiBold());
 
     TextBlock statusLbl;
@@ -757,9 +1065,11 @@ static void ShowTimedStatus(TextBlock const& lbl, const std::wstring& message, i
     lbl.Text(message);
     auto timer = std::make_shared<DispatcherTimer>();
     timer->Interval(std::chrono::seconds(seconds));
-    timer->Tick([lbl, timer](IInspectable const&, IInspectable const&) {
+    auto token = std::make_shared<winrt::event_token>();
+    *token = timer->Tick([lbl, timer, token](IInspectable const&, IInspectable const&) {
         try {
             timer->Stop();
+            timer->Tick(*token);
             lbl.Text(L"");
         } catch (...) {}
     });
@@ -776,11 +1086,13 @@ Page CreateTaskbarResizePage()
     ScrollViewer scroll;
     StackPanel panel;
     panel.Spacing(8);
-    panel.Padding(Thickness{ 28, 24, 28, 28 });
+    panel.Padding(Thickness{ 36, 28, 36, 36 });
+    panel.MaxWidth(1040);
+    panel.HorizontalAlignment(HorizontalAlignment::Center);
 
     panel.Children().Append(CreatePageHeader(
-        L"Taskbar Resize & Geometry",
-        L"Adjust taskbar height, vertical alignment offsets, icon density, or instantly restore original Windows factory dimensions."
+        L"Taskbar size",
+        L"Set the taskbar height and icon spacing, or return to the Windows default."
     ));
 
     const std::string plugin_name = "taskbar_resize";
@@ -788,12 +1100,12 @@ Page CreateTaskbarResizePage()
     // 1. Master Toggle Card
     auto masterToggle = std::make_shared<ToggleSwitch>();
     panel.Children().Append(CreateToggleSettingCard(
-        L"Enable Taskbar Resize Subsystem",
-        L"When enabled, dynamically adjusts taskbar height and synchronizes the desktop work area via DirectComposition and SPI_SETWORKAREA.",
+        L"Custom taskbar size",
+        L"Turn this on to use the size and spacing settings below.",
         plugin_name, "enabled", true, masterToggle
     ));
 
-    panel.Children().Append(CreateSectionHeader(L"Default Taskbar & Presets"));
+    panel.Children().Append(CreateSectionHeader(L"Presets"));
 
     // 2. The "Default Taskbar" Option Card
     Button defaultTaskbarBtn;
@@ -803,8 +1115,8 @@ Page CreateTaskbarResizePage()
     defaultTaskbarBtn.FontWeight(winrt::Windows::UI::Text::FontWeights::SemiBold());
 
     Border defaultCard = CreateSettingsCard(
-        L"Default Taskbar (Windows 11 Standard - 48 px)",
-        L"Reverts the taskbar to Windows original factory dimensions (48 px height, 0 px padding). Ensures that maximized applications and full-screen modes completely cover the desktop background without gaps or misalignments.",
+        L"Restore Windows default",
+        L"Set the taskbar to its standard 48 px height and turn off custom sizing.",
         defaultTaskbarBtn
     );
     panel.Children().Append(defaultCard);
@@ -832,44 +1144,44 @@ Page CreateTaskbarResizePage()
     presetsRow.Children().Append(presetUltra);
 
     panel.Children().Append(CreateSettingsCard(
-        L"Quick Sizing Presets",
-        L"Apply recommended taskbar height and padding configurations with a single click.",
+        L"Quick sizes",
+        L"Choose a ready-made taskbar size.",
         presetsRow
     ));
 
     // 4. Sliders for Custom Dimensions
-    panel.Children().Append(CreateSectionHeader(L"Custom Dimensions"));
+    panel.Children().Append(CreateSectionHeader(L"Fine tune"));
 
     auto heightCtrl = CreateSliderSettingCard(
         L"Taskbar Height",
-        L"Height of the taskbar in logical pixels (Windows default: 48 px, compact: 32 px, ultra: 24 px).",
+        L"Set the taskbar height.",
         plugin_name, "height", 20.0, 128.0, 1.0, 48.0, L"px"
     );
     panel.Children().Append(heightCtrl.card);
 
     auto padTopCtrl = CreateSliderSettingCard(
         L"Top Padding Offset",
-        L"Fine-tune vertical icon alignment from top in logical pixels (default: 0 px).",
+        L"Move taskbar icons down or up.",
         plugin_name, "padding_top", -20.0, 20.0, 1.0, 0.0, L"px"
     );
     panel.Children().Append(padTopCtrl.card);
 
     auto padBotCtrl = CreateSliderSettingCard(
         L"Bottom Padding Offset",
-        L"Fine-tune vertical icon alignment from bottom in logical pixels (default: 0 px).",
+        L"Adjust the space below taskbar icons.",
         plugin_name, "padding_bottom", -20.0, 20.0, 1.0, 0.0, L"px"
     );
     panel.Children().Append(padBotCtrl.card);
 
     auto spacingCtrl = CreateSliderSettingCard(
         L"Icon Spacing",
-        L"Horizontal spacing between taskbar icons in logical pixels (default: 0 px standard, 4 px relaxed).",
+        L"Set the gap between taskbar icons.",
         plugin_name, "icon_spacing", 0.0, 32.0, 1.0, 0.0, L"px"
     );
     panel.Children().Append(spacingCtrl.card);
 
     // Action Bar
-    auto actionBar = CreateActionBar(L"Apply Dimensions");
+    auto actionBar = CreateActionBar(L"Apply taskbar size");
     panel.Children().Append(actionBar.panel);
 
     // Helper to apply geometry across controls and disk
@@ -891,7 +1203,7 @@ Page CreateTaskbarResizePage()
         items.push_back({ "icon_spacing", cJSON_CreateNumber(sp) });
 
         SaveMultipleAndReload(plugin_name, items);
-        GuiIpcEnablePlugin(plugin_name);
+        QueueSettingsWork([plugin_name] { GuiIpcEnablePlugin(plugin_name); });
         ShowTimedStatus(actionBar.statusLbl, msg);
     };
 
@@ -913,8 +1225,8 @@ Page CreateTaskbarResizePage()
         items.push_back({ "icon_spacing", cJSON_CreateNumber(0) });
 
         SaveMultipleAndReload(plugin_name, items);
-        GuiIpcDisablePlugin(plugin_name);
-        ShowTimedStatus(actionBar.statusLbl, L"✓ Taskbar restored to Windows default factory position. Subsystem disabled.");
+        QueueSettingsWork([plugin_name] { GuiIpcDisablePlugin(plugin_name); });
+        ShowTimedStatus(actionBar.statusLbl, L"Taskbar restored to the Windows default.");
     });
 
     presetDefault.Click([plugin_name, heightCtrl, padTopCtrl, padBotCtrl, spacingCtrl, actionBar, masterToggle](IInspectable const&, RoutedEventArgs const&) {
@@ -935,8 +1247,8 @@ Page CreateTaskbarResizePage()
         items.push_back({ "icon_spacing", cJSON_CreateNumber(0) });
 
         SaveMultipleAndReload(plugin_name, items);
-        GuiIpcDisablePlugin(plugin_name);
-        ShowTimedStatus(actionBar.statusLbl, L"✓ Restored to Windows default taskbar (48 px). Subsystem disabled.");
+        QueueSettingsWork([plugin_name] { GuiIpcDisablePlugin(plugin_name); });
+        ShowTimedStatus(actionBar.statusLbl, L"Taskbar restored to the Windows default.");
     });
 
     presetCompact.Click([applyGeometry](IInspectable const&, RoutedEventArgs const&) {
@@ -965,8 +1277,8 @@ Page CreateTaskbarResizePage()
         items.push_back({ "icon_spacing", cJSON_CreateNumber(sp) });
 
         SaveMultipleAndReload(plugin_name, items);
-        GuiIpcEnablePlugin(plugin_name);
-        ShowTimedStatus(actionBar.statusLbl, L"✓ Dimensions saved to default_config.jsonc and applied!");
+        QueueSettingsWork([plugin_name] { GuiIpcEnablePlugin(plugin_name); });
+        ShowTimedStatus(actionBar.statusLbl, L"Taskbar size saved and applied.");
     });
 
     scroll.Content(panel);
@@ -984,11 +1296,13 @@ Page CreateIconMagnificationPage()
     ScrollViewer scroll;
     StackPanel panel;
     panel.Spacing(8);
-    panel.Padding(Thickness{ 28, 24, 28, 28 });
+    panel.Padding(Thickness{ 36, 28, 36, 36 });
+    panel.MaxWidth(1040);
+    panel.HorizontalAlignment(HorizontalAlignment::Center);
 
     panel.Children().Append(CreatePageHeader(
-        L"Icon Magnification & Dock",
-        L"Configure macOS Dock-style magnification scale, physics influence radius, duration, and falloff curves."
+        L"Icon magnification",
+        L"Choose how taskbar icons grow and move when you point to them."
     ));
 
     const std::string plugin_name = "icon_hover";
@@ -996,35 +1310,35 @@ Page CreateIconMagnificationPage()
     // Master Toggle
     auto masterToggle = std::make_shared<ToggleSwitch>();
     panel.Children().Append(CreateToggleSettingCard(
-        L"Enable Icon Magnification",
-        L"Master toggle for the DirectComposition hardware-accelerated icon magnification layer.",
+        L"Magnify icons on hover",
+        L"Turn icon magnification on or off.",
         plugin_name, "enabled", true, masterToggle
     ));
 
-    panel.Children().Append(CreateSectionHeader(L"Magnification Geometry"));
+    panel.Children().Append(CreateSectionHeader(L"Size and range"));
 
     auto scaleCtrl = CreateSliderSettingCard(
-        L"Max Magnification Scale",
-        L"Peak scale multiplier when cursor is directly over an icon (1.0x to 10.0x).",
+        L"Maximum icon size",
+        L"Set how large an icon can grow.",
         plugin_name, "max_scale", 1.0, 10.0, 0.05, 6.5, L"x", 2
     );
     panel.Children().Append(scaleCtrl.card);
 
     auto radiusCtrl = CreateSliderSettingCard(
-        L"Effect Influence Radius",
-        L"Distance in pixels over which neighboring icons are smoothly scaled (50 to 500 px).",
+        L"Magnification range",
+        L"Set how far the effect reaches across nearby icons.",
         plugin_name, "radius", 50.0, 500.0, 5.0, 190.0, L"px"
     );
     panel.Children().Append(radiusCtrl.card);
 
     auto speedCtrl = CreateSliderSettingCard(
-        L"Animation Duration",
-        L"Duration in milliseconds for the settle spring animation when cursor leaves (50 to 500 ms).",
+        L"Animation speed",
+        L"Set how quickly icons return to their normal size.",
         plugin_name, "speed_ms", 50.0, 500.0, 10.0, 500.0, L"ms"
     );
     panel.Children().Append(speedCtrl.card);
 
-    panel.Children().Append(CreateSectionHeader(L"Curve & Layering"));
+    panel.Children().Append(CreateSectionHeader(L"Motion"));
 
     // Curve ComboBox Card
     ComboBox curveCombo;
@@ -1050,18 +1364,18 @@ Page CreateIconMagnificationPage()
     });
 
     panel.Children().Append(CreateSettingsCard(
-        L"Easing Falloff Curve",
-        L"Mathematical distribution profile applied across neighboring icons.",
+        L"Motion curve",
+        L"Choose how the size change eases between nearby icons.",
         curveCombo
     ));
 
     panel.Children().Append(CreateToggleSettingCard(
-        L"Keep Overlay On Top (Z-Order Protection)",
-        L"Continuously enforces HWND_TOPMOST so taskbar clicks do not obscure magnification animations.",
+        L"Keep magnification visible",
+        L"Keep the effect in front of other taskbar content.",
         plugin_name, "keep_on_top", true
     ));
 
-    auto actionBar = CreateActionBar(L"Apply Magnification Settings");
+    auto actionBar = CreateActionBar(L"Apply icon settings");
     panel.Children().Append(actionBar.panel);
 
     actionBar.applyBtn.Click([plugin_name, scaleCtrl, radiusCtrl, speedCtrl, curveCombo, actionBar](IInspectable const&, RoutedEventArgs const&) {
@@ -1079,7 +1393,7 @@ Page CreateIconMagnificationPage()
         items.push_back({ "curve", cJSON_CreateString(chosen_curve) });
 
         SaveMultipleAndReload(plugin_name, items);
-        ShowTimedStatus(actionBar.statusLbl, L"✓ Magnification settings saved and applied!");
+        ShowTimedStatus(actionBar.statusLbl, L"Icon settings saved and applied.");
     });
 
     scroll.Content(panel);
@@ -1097,27 +1411,29 @@ Page CreatePhysicsSettingsPage()
     ScrollViewer scroll;
     StackPanel panel;
     panel.Spacing(8);
-    panel.Padding(Thickness{ 28, 24, 28, 28 });
+    panel.Padding(Thickness{ 36, 28, 36, 36 });
+    panel.MaxWidth(1040);
+    panel.HorizontalAlignment(HorizontalAlignment::Center);
 
     panel.Children().Append(CreatePageHeader(
-        L"Physics & Interaction Effects",
-        L"Tune notification spring dynamics, 3D perspective pitch/yaw tilt, and drag-and-drop expansion mechanics."
+        L"Motion and gestures",
+        L"Adjust bounce, tilt, and drag feedback for taskbar icons."
     ));
 
     const std::string plugin_name = "icon_hover";
 
     // SECTION 1: Notification Spring Bouncing
-    panel.Children().Append(CreateSectionHeader(L"Notification Inertial Bouncing"));
+    panel.Children().Append(CreateSectionHeader(L"Notification bounce"));
 
     panel.Children().Append(CreateToggleSettingCard(
-        L"Enable Notification Bounce",
-        L"Taskbar icons perform an upward elastic spring bounce when receiving background notifications or alerts.",
+        L"Bounce on notification",
+        L"Animate an app icon when it receives a notification.",
         plugin_name, "bounce_enabled", true
     ));
 
     auto bounceStrengthCtrl = CreateSliderSettingCard(
-        L"Bounce Impulse Strength",
-        L"Initial upward launch velocity applied when an app receives a notification (200 to 1500 px/s).",
+        L"Bounce strength",
+        L"Set how strongly the icon bounces.",
         plugin_name, "bounce_strength", 200.0, 1500.0, 25.0, 800.0, L"px/s"
     );
     panel.Children().Append(bounceStrengthCtrl.card);
@@ -1143,9 +1459,11 @@ Page CreatePhysicsSettingsPage()
         testStatus.Text(L"Switch window or click away in 2s to see bounce...");
         auto timer = std::make_shared<DispatcherTimer>();
         timer->Interval(std::chrono::milliseconds(2000));
-        timer->Tick([timer, testStatus](IInspectable const&, IInspectable const&) {
+            auto token = std::make_shared<winrt::event_token>();
+            *token = timer->Tick([timer, token, testStatus](IInspectable const&, IInspectable const&) {
             try {
                 timer->Stop();
+                    timer->Tick(*token);
                 testStatus.Text(L"Triggered test flash!");
                 HWND topWnd = GetActiveWindow();
                 if (!topWnd) topWnd = GetForegroundWindow();
@@ -1170,45 +1488,45 @@ Page CreatePhysicsSettingsPage()
     ));
 
     // SECTION 2: 3D Tilt & Perspective
-    panel.Children().Append(CreateSectionHeader(L"3D Tilt & Perspective"));
+    panel.Children().Append(CreateSectionHeader(L"Tilt"));
 
     panel.Children().Append(CreateToggleSettingCard(
-        L"Enable 3D Tilt Perspective",
-        L"DirectComposition 3D matrix transformation tilting icons toward cursor coordinates in real time.",
+        L"Tilt icons on hover",
+        L"Add a subtle tilt as the pointer moves across an icon.",
         plugin_name, "tilt_enabled", true
     ));
 
     auto tiltAngleCtrl = CreateSliderSettingCard(
-        L"Maximum Tilt Angle",
-        L"Maximum pitch and yaw rotation angle in degrees when cursor is near icon boundaries (0° to 45°).",
+        L"Tilt amount",
+        L"Set the maximum icon tilt.",
         plugin_name, "max_tilt_angle", 0.0, 45.0, 1.0, 20.0, L"°"
     );
     panel.Children().Append(tiltAngleCtrl.card);
 
     // SECTION 3: Drag & Drop Physics
-    panel.Children().Append(CreateSectionHeader(L"Drag-and-Drop Physics"));
+    panel.Children().Append(CreateSectionHeader(L"Drag and drop"));
 
     panel.Children().Append(CreateToggleSettingCard(
-        L"Enable Drag & Drop Physics",
-        L"During mouse drag operations, scales down the held icon and spreads adjacent icons apart horizontally.",
+        L"Animate dragged icons",
+        L"Shrink the icon being dragged and make room around it.",
         plugin_name, "drag_drop_enabled", true
     ));
 
     auto dragRecessionCtrl = CreateSliderSettingCard(
-        L"Drag Recession Scale",
-        L"Target scale multiplier applied to an icon while being clicked and dragged (0.50x to 1.00x).",
+        L"Dragged icon size",
+        L"Set the size of an icon while you drag it.",
         plugin_name, "drag_recession_scale", 0.50, 1.00, 0.05, 0.65, L"x", 2
     );
     panel.Children().Append(dragRecessionCtrl.card);
 
     auto dropPushCtrl = CreateSliderSettingCard(
-        L"Drop Zone Push Distance",
-        L"Horizontal parting distance in pixels for neighbor icons during drag (10 to 120 px).",
+        L"Space around dragged icon",
+        L"Set how far nearby icons move aside.",
         plugin_name, "drop_zone_push", 10.0, 120.0, 5.0, 50.0, L"px"
     );
     panel.Children().Append(dropPushCtrl.card);
 
-    auto actionBar = CreateActionBar(L"Apply Physics Settings");
+    auto actionBar = CreateActionBar(L"Apply motion settings");
     panel.Children().Append(actionBar.panel);
 
     actionBar.applyBtn.Click([plugin_name, bounceStrengthCtrl, tiltAngleCtrl, dragRecessionCtrl, dropPushCtrl, actionBar](IInspectable const&, RoutedEventArgs const&) {
@@ -1219,7 +1537,7 @@ Page CreatePhysicsSettingsPage()
         items.push_back({ "drop_zone_push", cJSON_CreateNumber(std::round(dropPushCtrl.slider->Value())) });
 
         SaveMultipleAndReload(plugin_name, items);
-        ShowTimedStatus(actionBar.statusLbl, L"✓ Physics settings saved and applied!");
+        ShowTimedStatus(actionBar.statusLbl, L"Motion settings saved and applied.");
     });
 
     scroll.Content(panel);
@@ -1237,21 +1555,23 @@ Page CreateStartButtonPage()
     ScrollViewer scroll;
     StackPanel panel;
     panel.Spacing(8);
-    panel.Padding(Thickness{ 28, 24, 28, 28 });
+    panel.Padding(Thickness{ 36, 28, 36, 36 });
+    panel.MaxWidth(1040);
+    panel.HorizontalAlignment(HorizontalAlignment::Center);
 
     panel.Children().Append(CreatePageHeader(
-        L"Start Button Customization",
-        L"Replace the Windows 11 Start button with a custom image while preserving hover magnification and click forwarding."
+        L"Start button",
+        L"Choose an image for the Start button or restore the Windows icon."
     ));
 
     const std::string plugin_name = "icon_hover";
 
-    panel.Children().Append(CreateSectionHeader(L"Custom Image File"));
+    panel.Children().Append(CreateSectionHeader(L"Button image"));
 
     auto start_image_box = std::make_shared<TextBox>();
     std::string cur_img = GetStringSetting(plugin_name, "start_image_path", "");
     start_image_box->Text(to_hstring(cur_img));
-    start_image_box->PlaceholderText(L"e.g. Config/start_button.png or start_button.svg");
+    start_image_box->PlaceholderText(L"Choose an image file");
     start_image_box->MinWidth(320);
     start_image_box->VerticalAlignment(VerticalAlignment::Center);
 
@@ -1321,19 +1641,19 @@ Page CreateStartButtonPage()
     inputRow.Children().Append(clearBtn);
 
     panel.Children().Append(CreateSettingsCard(
-        L"Start Button Image Path",
-        L"Specify a custom image file (PNG, SVG, JPG, BMP, ICO). Click 'Disable' to restore the standard Windows 11 icon.",
+        L"Image file",
+        L"Choose a PNG, SVG, JPG, BMP, or ICO file.",
         inputRow
     ));
 
     TextBlock infoBlock;
-    infoBlock.Text(L"The custom start button image participates in hover magnification, spring physics, and forwards shell clicks to the interactive Start menu in explorer.exe.");
+    infoBlock.Text(L"The Start button keeps its normal click behavior and works with icon magnification and motion settings.");
     infoBlock.FontSize(12.0);
     infoBlock.Opacity(0.72);
     infoBlock.TextWrapping(TextWrapping::Wrap);
 
     Border infoCard;
-    infoCard.CornerRadius(CornerRadius{ 4, 4, 4, 4 });
+    infoCard.CornerRadius(CornerRadius{ 14, 14, 14, 14 });
     infoCard.BorderThickness(Thickness{ 1, 1, 1, 1 });
     infoCard.Margin(Thickness{ 0, 0, 0, 8 });
     infoCard.Padding(Thickness{ 16, 12, 16, 12 });
@@ -1349,13 +1669,13 @@ Page CreateStartButtonPage()
     infoCard.Child(infoBlock);
     panel.Children().Append(infoCard);
 
-    auto actionBar = CreateActionBar(L"Apply Start Button");
+    auto actionBar = CreateActionBar(L"Apply image");
     panel.Children().Append(actionBar.panel);
 
     actionBar.applyBtn.Click([plugin_name, box_ptr, actionBar](IInspectable const&, RoutedEventArgs const&) {
         std::string img_path = to_string(box_ptr->Text());
         SaveAndReload(plugin_name, "start_image_path", cJSON_CreateString(img_path.c_str()));
-        ShowTimedStatus(actionBar.statusLbl, L"✓ Start button image saved and reloaded!");
+        ShowTimedStatus(actionBar.statusLbl, L"Start button image saved and applied.");
     });
 
     scroll.Content(panel);
@@ -1373,15 +1693,17 @@ Page CreateDynamicIslandPage()
     ScrollViewer scroll;
     StackPanel panel;
     panel.Spacing(8);
-    panel.Padding(Thickness{ 28, 24, 28, 28 });
+    panel.Padding(Thickness{ 36, 28, 36, 36 });
+    panel.MaxWidth(1040);
+    panel.HorizontalAlignment(HorizontalAlignment::Center);
 
     panel.Children().Append(CreatePageHeader(
-        L"Dynamic Island (Media Pill)",
-        L"Hardware-accelerated frosted acrylic capsule anchored adjacent to the system tray displaying live Windows media status."
+        L"Media pill",
+        L"Show playback controls and track details beside the taskbar notification area."
     ));
 
     Border guideCard;
-    guideCard.CornerRadius(CornerRadius{ 6, 6, 6, 6 });
+    guideCard.CornerRadius(CornerRadius{ 14, 14, 14, 14 });
     guideCard.BorderThickness(Thickness{ 1, 1, 1, 1 });
     guideCard.Margin(Thickness{ 0, 0, 0, 12 });
     guideCard.Padding(Thickness{ 16, 14, 16, 14 });
@@ -1399,13 +1721,13 @@ Page CreateDynamicIslandPage()
     guideStack.Spacing(4);
 
     TextBlock guideTitle;
-    guideTitle.Text(L"💡 How Dynamic Island Works on the Windows Taskbar");
+    guideTitle.Text(L"How it works");
     guideTitle.FontWeight(winrt::Windows::UI::Text::FontWeights::SemiBold());
     guideTitle.FontSize(13.5);
     guideStack.Children().Append(guideTitle);
 
     TextBlock guideBody;
-    guideBody.Text(L"• Dynamic Island is an active media player capsule (Spotify, YouTube in Chrome/Edge, Apple Music, VLC).\n• Idle Invariant: When NO media is playing, the pill stays invisible (0% opacity) to keep the taskbar clean.\n• When media plays: The capsule illuminates beside the system tray. Hovering expands track details; clicking pauses/plays.");
+    guideBody.Text(L"The pill appears while media is playing. Point to it to see track details, or select it to play or pause. Choose whether it stays visible when idle.");
     guideBody.FontSize(12.0);
     guideBody.Opacity(0.85);
     guideBody.TextWrapping(TextWrapping::Wrap);
@@ -1424,8 +1746,8 @@ Page CreateDynamicIslandPage()
     });
 
     panel.Children().Append(CreateSettingsCard(
-        L"Enable Dynamic Island",
-        L"Master toggle for the frosted acrylic media pill anchored to the taskbar notification tray.",
+        L"Show media pill",
+        L"Turn the media pill on or off.",
         diToggle
     ));
 
@@ -1439,42 +1761,42 @@ Page CreateDynamicIslandPage()
     });
 
     panel.Children().Append(CreateSettingsCard(
-        L"Idle Visibility Mode",
-        L"Choose whether the compact capsule stays visible at resting opacity when media is idle, or hides and reveals only upon mouse hover proximity.",
+        L"When media is idle",
+        L"Choose whether the pill stays visible or appears only when you point to it.",
         idlePillToggle
     ));
 
-    panel.Children().Append(CreateSectionHeader(L"Capsule Dimensions & Layout"));
+    panel.Children().Append(CreateSectionHeader(L"Size and spacing"));
 
     auto padTrayCtrl = CreateDynamicIslandSliderSettingCard(
-        L"Tray Margin Padding",
-        L"Horizontal spacing in pixels between the system tray (TrayNotifyWnd) and the island (0 to 48 px).",
+        L"Space from notification area",
+        L"Set the gap between the pill and the notification area.",
         "padding_tray", 0.0, 48.0, 1.0, 15.0, L"px"
     );
     panel.Children().Append(padTrayCtrl.card);
 
     auto compactCtrl = CreateDynamicIslandSliderSettingCard(
-        L"Compact Resting Width",
-        L"Base resting width in pixels showing compact playback status (40 to 160 px).",
+        L"Compact width",
+        L"Set the width when the pill is not expanded.",
         "compact_width", 40.0, 160.0, 2.0, 80.0, L"px"
     );
     panel.Children().Append(compactCtrl.card);
 
     auto expandedCtrl = CreateDynamicIslandSliderSettingCard(
-        L"Expanded Announcement Width",
-        L"Hovered and active track announcement width in pixels revealing media title & artist (160 to 400 px).",
+        L"Expanded width",
+        L"Set the width used to show track details.",
         "expanded_width", 160.0, 400.0, 5.0, 240.0, L"px"
     );
     panel.Children().Append(expandedCtrl.card);
 
     auto heightCtrl = CreateDynamicIslandSliderSettingCard(
-        L"Capsule Height",
-        L"Vertical height in pixels of the pill visual (20 to 48 px). Centered vertically within the taskbar.",
+        L"Height",
+        L"Set the height of the media pill.",
         "height", 20.0, 48.0, 1.0, 30.0, L"px"
     );
     panel.Children().Append(heightCtrl.card);
 
-    auto actionBar = CreateActionBar(L"Apply Island Dimensions");
+    auto actionBar = CreateActionBar(L"Apply media pill size");
     panel.Children().Append(actionBar.panel);
 
     actionBar.applyBtn.Click([padTrayCtrl, compactCtrl, expandedCtrl, heightCtrl, diToggle, idlePillToggle, actionBar](IInspectable const&, RoutedEventArgs const&) {
@@ -1487,7 +1809,7 @@ Page CreateDynamicIslandPage()
         items.push_back({ "height", cJSON_CreateNumber(std::round(heightCtrl.slider->Value())) });
 
         SaveDynamicIslandMultiple(items);
-        ShowTimedStatus(actionBar.statusLbl, L"✓ Dynamic Island settings saved and applied!");
+        ShowTimedStatus(actionBar.statusLbl, L"Media pill settings saved and applied.");
     });
 
     scroll.Content(panel);
@@ -1501,23 +1823,199 @@ Page CreateDynamicIslandPage()
 
 static Page CreateGenericPluginSettingsPage(const std::string& plugin_name, const std::string& schema_json)
 {
+    const std::vector<WidgetCatalogItem> widget_catalog = plugin_name == "widget_host" ? ReadWidgetCatalog() : std::vector<WidgetCatalogItem>{};
+    std::unordered_map<std::string, std::string> widget_names;
+    for (const auto& widget : widget_catalog) widget_names.emplace(widget.id, widget.name);
     Page page;
     ScrollViewer scroll;
     StackPanel panel;
-    panel.Spacing(16);
-    panel.Padding(Thickness{ 24, 24, 24, 24 });
+    panel.Spacing(12);
+    panel.Padding(Thickness{ 32, 28, 32, 32 });
+    panel.MaxWidth(1040);
+    panel.HorizontalAlignment(HorizontalAlignment::Center);
     
-    TextBlock title;
-    title.Text(to_hstring(plugin_name + " Settings"));
-    title.FontSize(24.0);
-    title.FontWeight(winrt::Windows::UI::Text::FontWeights::SemiBold());
-    title.Margin(Thickness{ 0, 0, 0, 24 });
-    panel.Children().Append(title);
+    if (plugin_name == "widget_host") {
+        panel.Children().Append(CreatePageHeader(
+            L"Widgets", L"Choose what appears on your taskbar, then arrange it the way you like."));
+    } else {
+        std::string page_title = plugin_name;
+        for (auto& character : page_title) {
+            if (character == '_' || character == '-') character = ' ';
+        }
+        if (!page_title.empty()) page_title[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(page_title[0])));
+        panel.Children().Append(CreatePageHeader(to_hstring(page_title).c_str(),
+            L"Changes save automatically and apply while TaskbarEngine is running."));
+    }
+
+    if (!GuiIpcIsConnected()) {
+        Border stateCard;
+        stateCard.CornerRadius(CornerRadius{ 10, 10, 10, 10 });
+        stateCard.Padding(Thickness{ 16, 14, 16, 14 });
+        stateCard.Margin(Thickness{ 0, 0, 0, 14 });
+        StackPanel stateContent;
+        stateContent.Spacing(4);
+        TextBlock stateTitle;
+        stateTitle.Text(L"Engine is offline");
+        stateTitle.FontWeight(winrt::Windows::UI::Text::FontWeights::SemiBold());
+        stateContent.Children().Append(stateTitle);
+        TextBlock stateText;
+        stateText.Text(L"You can still change settings. They will apply when the engine is running.");
+        stateText.TextWrapping(TextWrapping::Wrap);
+        stateText.Opacity(0.76);
+        stateContent.Children().Append(stateText);
+        stateCard.Child(stateContent);
+        panel.Children().Append(stateCard);
+    }
+
+    if (plugin_name == "widget_host") {
+        panel.Children().Append(CreateSectionHeader(L"Widget bar"));
+        panel.Children().Append(CreateToggleSettingCard(
+            L"Show widgets on the taskbar", L"Turn the complete widget bar on or off.", "widget_host", "enabled", true));
+
+        StackPanel orderingPanel;
+        orderingPanel.Spacing(6);
+        TextBlock orderTitle;
+        orderTitle.Text(L"Choose and arrange widgets");
+        orderTitle.FontSize(15.0);
+        orderTitle.FontWeight(winrt::Windows::UI::Text::FontWeights::SemiBold());
+        orderingPanel.Children().Append(orderTitle);
+        TextBlock orderHint;
+        orderHint.Text(L"Turn a widget on or off. Use the arrows to change its left-to-right position.");
+        orderHint.Opacity(0.72);
+        orderHint.TextWrapping(TextWrapping::Wrap);
+        orderingPanel.Children().Append(orderHint);
+
+        std::vector<std::string> order;
+        cJSON* orderValue = GetCurrentValue("widget_host", "layout");
+        if (orderValue && cJSON_IsArray(orderValue)) {
+            cJSON* entry = nullptr;
+            cJSON_ArrayForEach(entry, orderValue) {
+                if (cJSON_IsString(entry) && entry->valuestring && entry->valuestring[0]) order.emplace_back(entry->valuestring);
+            }
+        } else if (orderValue && cJSON_IsString(orderValue) && orderValue->valuestring) {
+            std::string value = orderValue->valuestring;
+            size_t begin = 0;
+            while (begin < value.size()) {
+                size_t end = value.find(',', begin);
+                std::string item = value.substr(begin, end == std::string::npos ? std::string::npos : end - begin);
+                if (!item.empty()) order.push_back(item);
+                if (end == std::string::npos) break;
+                begin = end + 1;
+            }
+        }
+        if (orderValue) cJSON_Delete(orderValue);
+        if (!widget_catalog.empty()) {
+            for (const auto& widget : widget_catalog)
+                if (std::find(order.begin(), order.end(), widget.id) == order.end()) order.push_back(widget.id);
+        } else {
+            for (const char* name : { "clock", "sysmon", "media" })
+                if (std::find(order.begin(), order.end(), name) == order.end()) order.emplace_back(name);
+        }
+        auto orderItems = std::make_shared<std::vector<std::string>>(std::move(order));
+        auto saveOrder = [orderItems]() {
+            cJSON* layout = cJSON_CreateArray();
+            if (!layout) return;
+            for (const auto& id : *orderItems) {
+                cJSON* item = cJSON_CreateString(id.c_str());
+                if (!item || !cJSON_AddItemToArray(layout, item)) {
+                    if (item) cJSON_Delete(item);
+                    cJSON_Delete(layout);
+                    return;
+                }
+            }
+            SaveAndReload("widget_host", "layout", layout);
+        };
+        auto rows = std::make_shared<std::vector<StackPanel>>();
+        auto refreshOrder = std::make_shared<std::function<void()>>();
+        *refreshOrder = [orderingPanel, orderItems, rows, refreshOrder, widget_names, saveOrder]() {
+            while (orderingPanel.Children().Size() > 2) orderingPanel.Children().RemoveAt(orderingPanel.Children().Size() - 1);
+            rows->clear();
+            for (size_t index = 0; index < orderItems->size(); ++index) {
+                StackPanel row;
+                row.Orientation(Orientation::Horizontal);
+                row.Spacing(12);
+                row.VerticalAlignment(VerticalAlignment::Center);
+                TextBlock name;
+                const auto found_name = widget_names.find((*orderItems)[index]);
+                const std::string display_name = found_name != widget_names.end() ? found_name->second :
+                    (*orderItems)[index] == "sysmon" ? "System monitor" :
+                    (*orderItems)[index] == "clock" ? "Clock" : (*orderItems)[index] == "media" ? "Media" : (*orderItems)[index];
+                name.Text(to_hstring(display_name));
+                name.Width(160);
+                name.VerticalAlignment(VerticalAlignment::Center);
+                ToggleSwitch enabled;
+                enabled.OffContent(box_value(L"Hidden"));
+                enabled.OnContent(box_value(L"Shown"));
+                std::wstring accessible_widget_name = L"Show ";
+                accessible_widget_name += to_hstring(display_name).c_str();
+                Microsoft::UI::Xaml::Automation::AutomationProperties::SetName(enabled, accessible_widget_name);
+                enabled.IsOn(GetBoolSetting("widget_host", (*orderItems)[index] + ".enabled", true));
+                enabled.Toggled([key = (*orderItems)[index] + ".enabled"](IInspectable const& sender, RoutedEventArgs const&) {
+                    SaveAndReload("widget_host", key, cJSON_CreateBool(sender.as<ToggleSwitch>().IsOn()));
+                });
+                Button up;
+                up.Content(box_value(L"\u2191"));
+                up.IsEnabled(index > 0);
+                std::wstring move_left_name = L"Move ";
+                move_left_name += to_hstring(display_name).c_str();
+                move_left_name += L" left";
+                Microsoft::UI::Xaml::Automation::AutomationProperties::SetName(up, move_left_name);
+                Button down;
+                down.Content(box_value(L"\u2193"));
+                down.IsEnabled(index + 1 < orderItems->size());
+                std::wstring move_right_name = L"Move ";
+                move_right_name += to_hstring(display_name).c_str();
+                move_right_name += L" right";
+                Microsoft::UI::Xaml::Automation::AutomationProperties::SetName(down, move_right_name);
+                up.Click([index, orderItems, saveOrder, refreshOrder](IInspectable const&, RoutedEventArgs const&) {
+                    if (index == 0 || index >= orderItems->size()) return;
+                    std::swap((*orderItems)[index], (*orderItems)[index - 1]);
+                    saveOrder();
+                    (*refreshOrder)();
+                });
+                down.Click([index, orderItems, saveOrder, refreshOrder](IInspectable const&, RoutedEventArgs const&) {
+                    if (index + 1 >= orderItems->size()) return;
+                    std::swap((*orderItems)[index], (*orderItems)[index + 1]);
+                    saveOrder();
+                    (*refreshOrder)();
+                });
+                row.Children().Append(name);
+                row.Children().Append(enabled);
+                row.Children().Append(up);
+                row.Children().Append(down);
+                Border rowCard;
+                rowCard.CornerRadius(CornerRadius{ 12, 12, 12, 12 });
+                rowCard.Padding(Thickness{ 14, 10, 14, 10 });
+                rowCard.BorderThickness(Thickness{ 1, 1, 1, 1 });
+                try {
+                    auto rowResources = Application::Current().Resources();
+                    if (rowResources.HasKey(box_value(L"CardBackgroundFillColorDefaultBrush")))
+                        rowCard.Background(rowResources.Lookup(box_value(L"CardBackgroundFillColorDefaultBrush")).as<Brush>());
+                    if (rowResources.HasKey(box_value(L"CardStrokeColorDefaultBrush")))
+                        rowCard.BorderBrush(rowResources.Lookup(box_value(L"CardStrokeColorDefaultBrush")).as<Brush>());
+                } catch (...) {}
+                rowCard.Child(row);
+                orderingPanel.Children().Append(rowCard);
+                rows->push_back(row);
+            }
+        };
+        (*refreshOrder)();
+        Border orderCard;
+        orderCard.CornerRadius(CornerRadius{ 14, 14, 14, 14 });
+        orderCard.BorderThickness(Thickness{ 1, 1, 1, 1 });
+        orderCard.Padding(Thickness{ 16, 14, 16, 14 });
+        orderCard.Margin(Thickness{ 0, 0, 0, 12 });
+        orderCard.Child(orderingPanel);
+        panel.Children().Append(orderCard);
+    }
 
     cJSON* schema = cJSON_Parse(schema_json.c_str());
     if (schema) {
         cJSON* settings = cJSON_GetObjectItem(schema, "settings");
         if (settings && cJSON_IsArray(settings)) {
+            std::string activeWidgetSection;
+            StackPanel activeWidgetSettings;
+            std::unordered_map<std::string, StackPanel> widgetSettingsPanels;
             cJSON* setting = nullptr;
             cJSON_ArrayForEach(setting, settings) {
                 cJSON* c_key = cJSON_GetObjectItem(setting, "key");
@@ -1527,21 +2025,51 @@ static Page CreateGenericPluginSettingsPage(const std::string& plugin_name, cons
                 if (!c_key || !cJSON_IsString(c_key) || !c_label || !cJSON_IsString(c_label) || !c_type || !cJSON_IsString(c_type)) continue;
                 
                 std::string key = c_key->valuestring;
+                if (plugin_name == "widget_host" &&
+                    (key == "enabled" || key == "layout" || key == "clock.enabled" ||
+                     key == "sysmon.enabled" || key == "media.enabled" ||
+                     (key.size() > 8 && key.substr(key.size() - 8) == ".enabled" &&
+                      std::any_of(widget_catalog.begin(), widget_catalog.end(), [&](const auto& widget) {
+                          return key == widget.id + ".enabled";
+                      })))) continue;
+                if (plugin_name == "widget_host") {
+                    const size_t separator = key.find('.');
+                    const std::string section = separator == std::string::npos ? "general" : key.substr(0, separator);
+                    if (activeWidgetSection != section) {
+                        activeWidgetSection = section;
+                        const auto section_name = widget_names.find(section);
+                        const std::string section_title = section_name != widget_names.end() ? section_name->second :
+                            section == "general" ? "Widget host" : section == "sysmon" ? "System monitor" :
+                            section == "clock" ? "Clock" : section == "media" ? "Media" : section;
+                        if (section == "general") {
+                            panel.Children().Append(CreateSectionHeader(L"Layout"));
+                        } else {
+                            auto existing_group = widgetSettingsPanels.find(section);
+                            if (existing_group != widgetSettingsPanels.end()) {
+                                activeWidgetSettings = existing_group->second;
+                            } else {
+                                activeWidgetSettings = StackPanel{};
+                                activeWidgetSettings.Spacing(10);
+                                Expander advanced;
+                                advanced.Header(box_value(to_hstring(section_title + " options")));
+                                advanced.IsExpanded(false);
+                                advanced.Margin(Thickness{ 0, 0, 0, 4 });
+                                advanced.Content(activeWidgetSettings);
+                                widgetSettingsPanels.emplace(section, activeWidgetSettings);
+                                panel.Children().Append(advanced);
+                            }
+                        }
+                    }
+                }
                 std::string label = c_label->valuestring;
                 std::string type = c_type->valuestring;
                 
                 StackPanel itemPanel;
                 itemPanel.Spacing(8);
                 
-                TextBlock lbl;
-                lbl.Text(to_hstring(label));
-                lbl.FontWeight(winrt::Windows::UI::Text::FontWeights::SemiBold());
-                itemPanel.Children().Append(lbl);
-                
                 cJSON* tooltip = cJSON_GetObjectItem(setting, "tooltip");
-                if (tooltip && cJSON_IsString(tooltip) && tooltip->valuestring) {
-                    ToolTipService::SetToolTip(lbl, box_value(to_hstring(tooltip->valuestring)));
-                }
+                const std::wstring description = tooltip && cJSON_IsString(tooltip) && tooltip->valuestring
+                    ? to_hstring(tooltip->valuestring).c_str() : L"";
                 
                 cJSON* current = GetCurrentValue(plugin_name, key);
                 
@@ -1573,9 +2101,10 @@ static Page CreateGenericPluginSettingsPage(const std::string& plugin_name, cons
                         if (cJSON_IsNumber(step)) step_val = step->valuedouble;
                     }
 
-                    double val = 0;
+                    double val = min_val;
                     if (current && cJSON_IsNumber(current)) val = current->valuedouble;
                     else if (cJSON* def = cJSON_GetObjectItem(setting, "default")) val = def->valuedouble;
+                    val = std::clamp(val, min_val, max_val);
 
                     Slider slider;
                     slider.Minimum(min_val);
@@ -1584,18 +2113,87 @@ static Page CreateGenericPluginSettingsPage(const std::string& plugin_name, cons
                     slider.SmallChange(step_val);
                     slider.Value(val);
                     slider.IsThumbToolTipEnabled(true);
-                    slider.MaxWidth(450);
-                    slider.HorizontalAlignment(HorizontalAlignment::Left);
+                    slider.Width(280);
+                    slider.MinWidth(180);
+                    slider.MaxWidth(420);
+                    slider.HorizontalAlignment(HorizontalAlignment::Stretch);
+                    const std::wstring label_text = to_hstring(label).c_str();
+                    Microsoft::UI::Xaml::Automation::AutomationProperties::SetName(slider, label_text);
 
-                    slider.ValueChanged([plugin_name, key, type](auto const&, auto const& args) {
-                        if (std::isnan(args.NewValue())) return;
-                        if (type == "int") {
-                            SaveAndReload(plugin_name, key, cJSON_CreateNumber(std::round(args.NewValue())));
-                        } else {
-                            SaveAndReload(plugin_name, key, cJSON_CreateNumber(args.NewValue()));
+                    TextBlock valueLabel;
+                    valueLabel.FontWeight(winrt::Windows::UI::Text::FontWeights::SemiBold());
+                    valueLabel.MinWidth(64);
+                    valueLabel.TextAlignment(TextAlignment::Right);
+                    valueLabel.VerticalAlignment(VerticalAlignment::Center);
+                    cJSON* unit_value = cJSON_GetObjectItem(setting, "unit");
+                    const std::string unit = cJSON_IsString(unit_value) && unit_value->valuestring ? unit_value->valuestring :
+                        (plugin_name == "widget_host" && key == "gap" ? "DIP" : "");
+                    auto update_value_label = [valueLabel, type, unit](double value) {
+                        char number[32]{};
+                        if (type == "int") snprintf(number, sizeof(number), "%d", static_cast<int>(std::round(value)));
+                        else snprintf(number, sizeof(number), "%.1f", value);
+                        std::wstring display = to_hstring(number).c_str();
+                        if (!unit.empty()) {
+                            display += L" ";
+                            display += to_hstring(unit).c_str();
+                        }
+                        valueLabel.Text(display);
+                    };
+                    update_value_label(val);
+
+                    auto debounce = std::make_shared<DispatcherTimer>();
+                    debounce->Interval(std::chrono::milliseconds(400));
+                    auto pointer_dragging = std::make_shared<bool>(false);
+                    auto weakSlider = winrt::make_weak(slider);
+                    std::weak_ptr<DispatcherTimer> weakDebounce = debounce;
+                    debounce->Tick([plugin_name, key, type, weakSlider, weakDebounce, pointer_dragging](IInspectable const&, IInspectable const&) {
+                        try {
+                            if (*pointer_dragging) return;
+                            if (auto timer = weakDebounce.lock()) timer->Stop();
+                            auto control = weakSlider.get();
+                            if (!control) return;
+                            double value = control.Value();
+                            if (std::isnan(value)) return;
+                            if (type == "int") value = std::round(value);
+                            SaveAndReload(plugin_name, key, cJSON_CreateNumber(value));
+                        } catch (...) {}
+                    });
+                    slider.PointerPressed([pointer_dragging, debounce](auto const&, auto const&) {
+                        *pointer_dragging = true;
+                        debounce->Stop();
+                    });
+                    auto persist_slider_edit = [plugin_name, key, type, weakSlider, debounce, pointer_dragging]() {
+                        *pointer_dragging = false;
+                        debounce->Stop();
+                        try {
+                            auto control = weakSlider.get();
+                            if (!control) return;
+                            double value = control.Value();
+                            if (std::isnan(value)) return;
+                            if (type == "int") value = std::round(value);
+                            SaveAndReload(plugin_name, key, cJSON_CreateNumber(value));
+                        } catch (...) {}
+                    };
+                    slider.PointerReleased([persist_slider_edit](IInspectable const&, Microsoft::UI::Xaml::Input::PointerRoutedEventArgs const&) {
+                        persist_slider_edit();
+                    });
+                    slider.PointerCaptureLost([persist_slider_edit](IInspectable const&, Microsoft::UI::Xaml::Input::PointerRoutedEventArgs const&) {
+                        persist_slider_edit();
+                    });
+                    slider.ValueChanged([debounce, update_value_label, pointer_dragging](auto const&, auto const& args) {
+                        update_value_label(args.NewValue());
+                        if (!*pointer_dragging) {
+                            debounce->Stop();
+                            debounce->Start();
                         }
                     });
-                    itemPanel.Children().Append(slider);
+                    StackPanel sliderRow;
+                    sliderRow.Orientation(Orientation::Horizontal);
+                    sliderRow.Spacing(10);
+                    sliderRow.VerticalAlignment(VerticalAlignment::Center);
+                    sliderRow.Children().Append(slider);
+                    sliderRow.Children().Append(valueLabel);
+                    itemPanel.Children().Append(sliderRow);
                 } else if (type == "enum") {
                     ComboBox combo;
                     cJSON* options = cJSON_GetObjectItem(setting, "options");
@@ -1647,6 +2245,11 @@ static Page CreateGenericPluginSettingsPage(const std::string& plugin_name, cons
                     uint32_t val_color = 0xFFFFFFFF;
                     if (current && cJSON_IsNumber(current)) {
                         val_color = (uint32_t)current->valuedouble;
+                    } else if (current && cJSON_IsString(current) && current->valuestring) {
+                        const char* text = current->valuestring;
+                        if (text[0] == '0' && (text[1] == 'x' || text[1] == 'X')) text += 2;
+                        else if (text[0] == '#') ++text;
+                        val_color = static_cast<uint32_t>(strtoul(text, nullptr, 16));
                     } else if (cJSON* def = cJSON_GetObjectItem(setting, "default")) {
                         if (cJSON_IsNumber(def)) val_color = (uint32_t)def->valuedouble;
                     }
@@ -1657,22 +2260,209 @@ static Page CreateGenericPluginSettingsPage(const std::string& plugin_name, cons
                     c.G = static_cast<uint8_t>((val_color >> 8) & 0xFF);
                     c.B = static_cast<uint8_t>(val_color & 0xFF);
                     picker.Color(c);
-                    
-                    picker.ColorChanged([plugin_name, key](ColorPicker const&, ColorChangedEventArgs const& args) {
-                        auto clr = args.NewColor();
-                        uint32_t argb = ((uint32_t)clr.A << 24) | ((uint32_t)clr.R << 16) | ((uint32_t)clr.G << 8) | (uint32_t)clr.B;
-                        SaveAndReload(plugin_name, key, cJSON_CreateNumber(argb));
+
+                    auto debounce = std::make_shared<DispatcherTimer>();
+                    debounce->Interval(std::chrono::milliseconds(140));
+                    auto weakPicker = winrt::make_weak(picker);
+                    std::weak_ptr<DispatcherTimer> weakDebounce = debounce;
+                    debounce->Tick([plugin_name, key, weakPicker, weakDebounce](IInspectable const&, IInspectable const&) {
+                        try {
+                            if (auto timer = weakDebounce.lock()) timer->Stop();
+                            auto control = weakPicker.get();
+                            if (!control) return;
+                            auto clr = control.Color();
+                            uint32_t argb = ((uint32_t)clr.A << 24) | ((uint32_t)clr.R << 16) | ((uint32_t)clr.G << 8) | (uint32_t)clr.B;
+                            SaveAndReload(plugin_name, key, cJSON_CreateNumber(argb));
+                        } catch (...) {}
+                    });
+                    picker.ColorChanged([debounce](ColorPicker const&, ColorChangedEventArgs const&) {
+                        debounce->Stop();
+                        debounce->Start();
                     });
                     itemPanel.Children().Append(picker);
                 }
 
                 if (current) cJSON_Delete(current);
-                panel.Children().Append(itemPanel);
+                Border settingCard = CreateSettingsCard(to_hstring(label).c_str(), description,
+                    itemPanel, type == "color");
+                if (plugin_name == "widget_host" && activeWidgetSection != "general")
+                    activeWidgetSettings.Children().Append(settingCard);
+                else
+                    panel.Children().Append(settingCard);
             }
         }
         cJSON_Delete(schema);
     }
+
+    cJSON* parsedSchema = cJSON_Parse(schema_json.c_str());
+    const cJSON* parsedSettings = parsedSchema ? cJSON_GetObjectItem(parsedSchema, "settings") : nullptr;
+    if (!parsedSettings || !cJSON_IsArray(parsedSettings) || cJSON_GetArraySize(parsedSettings) == 0) {
+        TextBlock emptyState;
+        emptyState.Text(GuiIpcIsConnected()
+            ? L"Settings for this feature could not be loaded. Check the engine log for details."
+            : L"The engine is offline. Settings will be available when it is running.");
+        emptyState.TextWrapping(TextWrapping::Wrap);
+        emptyState.Opacity(0.75);
+        emptyState.Margin(Thickness{ 0, 8, 0, 0 });
+        panel.Children().Append(emptyState);
+    }
+    if (parsedSchema) cJSON_Delete(parsedSchema);
     
+    scroll.Content(panel);
+    page.Content(scroll);
+    return page;
+}
+
+static Page CreateFrostedGlassPage()
+{
+    constexpr const char* plugin = "taskbar_transparency";
+    Page page;
+    ScrollViewer scroll;
+    StackPanel panel;
+    panel.Spacing(8);
+    panel.Padding(Thickness{ 32, 28, 32, 32 });
+    panel.MaxWidth(1040);
+    panel.HorizontalAlignment(HorizontalAlignment::Center);
+
+    panel.Children().Append(CreatePageHeader(
+        L"Frosted Glass",
+        L"Choose the taskbar material, tint, and opacity. Changes are saved and applied automatically."));
+
+    if (!GuiIpcIsConnected()) {
+        TextBlock offline;
+        offline.Text(L"The engine is offline. Settings can still be saved and will apply when it is running.");
+        offline.TextWrapping(TextWrapping::Wrap);
+        offline.Opacity(0.76);
+        offline.Margin(Thickness{ 0, 0, 0, 8 });
+        panel.Children().Append(offline);
+    }
+
+    panel.Children().Append(CreateSectionHeader(L"Appearance"));
+    panel.Children().Append(CreateToggleSettingCard(
+        L"Enable frosted glass", L"Apply the selected material to the taskbar.", plugin, "enabled", true));
+
+    ComboBox mode;
+    mode.MinWidth(190);
+    mode.Items().Append(box_value(L"Clear"));
+    mode.Items().Append(box_value(L"Blur"));
+    mode.Items().Append(box_value(L"Acrylic"));
+    mode.Items().Append(box_value(L"Tint"));
+    mode.Items().Append(box_value(L"Disabled"));
+    const std::vector<std::string> modes{ "clear", "blur", "acrylic", "tint", "disabled" };
+    const std::string currentMode = GetStringSetting(plugin, "mode", "acrylic");
+    int selectedMode = 2;
+    for (size_t i = 0; i < modes.size(); ++i) {
+        if (modes[i] == currentMode) selectedMode = static_cast<int>(i);
+    }
+    mode.SelectedIndex(selectedMode);
+    mode.SelectionChanged([modes, plugin](IInspectable const& sender, SelectionChangedEventArgs const&) {
+        const int index = sender.as<ComboBox>().SelectedIndex();
+        if (index >= 0 && static_cast<size_t>(index) < modes.size())
+            SaveAndReload(plugin, "mode", cJSON_CreateString(modes[index].c_str()));
+    });
+    panel.Children().Append(CreateSettingsCard(
+        L"Material", L"Choose clear, blur, acrylic, or a solid tint.", mode));
+
+    const double opacity = std::clamp(GetDoubleSetting(plugin, "opacity", 0.65), 0.0, 1.0);
+    auto opacitySlider = std::make_shared<Slider>();
+    auto opacityLabel = std::make_shared<TextBlock>();
+    auto opacityTimer = std::make_shared<DispatcherTimer>();
+    opacityTimer->Interval(std::chrono::milliseconds(160));
+    opacitySlider->Minimum(0);
+    opacitySlider->Maximum(100);
+    opacitySlider->StepFrequency(1);
+    opacitySlider->SmallChange(1);
+    opacitySlider->LargeChange(10);
+    opacitySlider->Value(std::round(opacity * 100.0));
+    opacitySlider->IsThumbToolTipEnabled(true);
+    opacitySlider->Width(320);
+    opacitySlider->MinWidth(200);
+    opacitySlider->MaxWidth(620);
+    opacitySlider->HorizontalAlignment(HorizontalAlignment::Stretch);
+    opacityLabel->FontWeight(winrt::Windows::UI::Text::FontWeights::SemiBold());
+    opacityLabel->MinWidth(52);
+    opacityLabel->VerticalAlignment(VerticalAlignment::Center);
+    auto updateOpacityLabel = [opacityLabel](double value) {
+        wchar_t text[16];
+        swprintf_s(text, L"%d%%", static_cast<int>(std::round(value)));
+        opacityLabel->Text(text);
+    };
+    updateOpacityLabel(opacitySlider->Value());
+    auto weakOpacitySlider = winrt::make_weak(*opacitySlider);
+    std::weak_ptr<DispatcherTimer> weakOpacityTimer = opacityTimer;
+    opacityTimer->Tick([weakOpacitySlider, weakOpacityTimer, plugin](IInspectable const&, IInspectable const&) {
+        try {
+            if (auto timer = weakOpacityTimer.lock()) timer->Stop();
+            auto slider = weakOpacitySlider.get();
+            if (slider) SaveAndReload(plugin, "opacity", cJSON_CreateNumber(slider.Value() / 100.0));
+        } catch (...) {}
+    });
+    opacitySlider->ValueChanged([opacityTimer, updateOpacityLabel](IInspectable const&, auto const& args) {
+        updateOpacityLabel(args.NewValue());
+        opacityTimer->Stop();
+        opacityTimer->Start();
+    });
+    opacitySlider->LostFocus([opacityTimer, weakOpacitySlider, plugin](IInspectable const&, RoutedEventArgs const&) {
+        try {
+            opacityTimer->Stop();
+            auto slider = weakOpacitySlider.get();
+            if (slider) SaveAndReload(plugin, "opacity", cJSON_CreateNumber(slider.Value() / 100.0));
+        } catch (...) {}
+    });
+    Grid opacityControl;
+    ColumnDefinition sliderColumn;
+    sliderColumn.Width(GridLength{ 1.0, GridUnitType::Star });
+    ColumnDefinition valueColumn;
+    valueColumn.Width(GridLength{ 0.0, GridUnitType::Auto });
+    opacityControl.ColumnDefinitions().Append(sliderColumn);
+    opacityControl.ColumnDefinitions().Append(valueColumn);
+    Grid::SetColumn(*opacitySlider, 0);
+    opacityControl.Children().Append(*opacitySlider);
+    Grid::SetColumn(*opacityLabel, 1);
+    opacityLabel->Margin(Thickness{ 16, 0, 0, 0 });
+    opacityControl.Children().Append(*opacityLabel);
+    panel.Children().Append(CreateSettingsCard(
+        L"Opacity", L"Adjust the strength of the acrylic or tint effect.", opacityControl, true));
+
+    uint32_t tint = static_cast<uint32_t>(GetDoubleSetting(plugin, "color", 1140850688.0));
+    ColorPicker tintPicker;
+    tintPicker.IsColorSpectrumVisible(true);
+    tintPicker.IsAlphaEnabled(true);
+    tintPicker.IsHexInputVisible(true);
+    winrt::Windows::UI::Color color{};
+    color.A = static_cast<uint8_t>((tint >> 24) & 0xFF);
+    color.R = static_cast<uint8_t>((tint >> 16) & 0xFF);
+    color.G = static_cast<uint8_t>((tint >> 8) & 0xFF);
+    color.B = static_cast<uint8_t>(tint & 0xFF);
+    tintPicker.Color(color);
+    auto tintTimer = std::make_shared<DispatcherTimer>();
+    tintTimer->Interval(std::chrono::milliseconds(160));
+    auto weakTintPicker = winrt::make_weak(tintPicker);
+    std::weak_ptr<DispatcherTimer> weakTintTimer = tintTimer;
+    tintTimer->Tick([weakTintPicker, weakTintTimer, plugin](IInspectable const&, IInspectable const&) {
+        try {
+            if (auto timer = weakTintTimer.lock()) timer->Stop();
+            auto picker = weakTintPicker.get();
+            if (!picker) return;
+            const auto selected = picker.Color();
+            const uint32_t argb = (static_cast<uint32_t>(selected.A) << 24) |
+                (static_cast<uint32_t>(selected.R) << 16) |
+                (static_cast<uint32_t>(selected.G) << 8) | selected.B;
+            SaveAndReload(plugin, "color", cJSON_CreateNumber(argb));
+        } catch (...) {}
+    });
+    tintPicker.ColorChanged([tintTimer](ColorPicker const&, ColorChangedEventArgs const&) {
+        tintTimer->Stop();
+        tintTimer->Start();
+    });
+    panel.Children().Append(CreateSettingsCard(
+        L"Tint color", L"ARGB color used by acrylic and tint materials.", tintPicker, true));
+
+    panel.Children().Append(CreateSectionHeader(L"Displays"));
+    panel.Children().Append(CreateToggleSettingCard(
+        L"Apply to secondary taskbars", L"Use the same material on taskbars on other monitors.",
+        plugin, "apply_secondary", true));
+
     scroll.Content(panel);
     page.Content(scroll);
     return page;
@@ -1684,6 +2474,8 @@ static Page CreateGenericPluginSettingsPage(const std::string& plugin_name, cons
 
 Page CreateSettingsPage(const std::string& plugin_name, const std::string& schema_json)
 {
+    const std::string effective_schema = plugin_name == "widget_host"
+        ? MergeWidgetCatalogSchema(schema_json, ReadWidgetCatalog()) : schema_json;
     if (plugin_name == "taskbar_resize") {
         return CreateTaskbarResizePage();
     }
@@ -1699,8 +2491,24 @@ Page CreateSettingsPage(const std::string& plugin_name, const std::string& schem
     if (plugin_name == "dynamic_island") {
         return CreateDynamicIslandPage();
     }
+    if (plugin_name == "taskbar_transparency") {
+        return CreateFrostedGlassPage();
+    }
 
-    return CreateGenericPluginSettingsPage(plugin_name, schema_json);
+    // First-party sections remain fully configurable while Engine IPC is stopped.
+    // Values are read from the same active config file used by EngineDLL.
+    if (schema_json == "{}" && plugin_name == "taskbar_transparency") {
+        return CreateGenericPluginSettingsPage(plugin_name,
+            R"SETTINGS({"settings":[
+                {"key":"enabled","label":"Enable taskbar transparency","tooltip":"Apply transparency to the taskbar surface.","type":"bool","default":true},
+                {"key":"mode","label":"Visual mode","tooltip":"Choose clear, blur, acrylic, or a color tint.","type":"enum","default":"acrylic","options":["clear","blur","acrylic","tint","disabled"]},
+                {"key":"opacity","label":"Opacity","tooltip":"Acrylic and tint opacity.","type":"float","default":0.65,"min":0,"max":1,"step":0.05},
+                {"key":"color","label":"Tint color","tooltip":"ARGB tint used by acrylic or tint mode.","type":"color","default":1140850688},
+                {"key":"accent_flags","label":"Accent flags","tooltip":"Windows accent policy flags.","type":"int","default":2,"min":0,"max":255,"step":1},
+                {"key":"apply_secondary","label":"Apply to secondary monitors","tooltip":"Apply the selected effect to secondary taskbars.","type":"bool","default":true}
+            ]})SETTINGS");
+    }
+    return CreateGenericPluginSettingsPage(plugin_name, effective_schema);
 }
 
 }

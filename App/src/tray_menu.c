@@ -2,11 +2,42 @@
 #include "app/ipc_client.h"
 #include <winreg.h>
 #include <strsafe.h>
+#include <string.h>
 
 #define IDM_ENABLE_RESIZE    101
 #define IDM_DISABLE_RESIZE   102
 #define IDM_TOGGLE_STARTUP   103
 #define IDM_EXIT             104
+
+typedef struct TrayIpcWork {
+    TE_IpcMsgType type;
+    char payload[64];
+} TrayIpcWork;
+
+static DWORD WINAPI TrayIpcWorker(LPVOID param)
+{
+    TrayIpcWork* work = (TrayIpcWork*)param;
+    if (work) {
+        uint32_t length = work->payload[0] ? (uint32_t)strlen(work->payload) + 1 : 0;
+        TE_IpcClientSendCommand(work->type, length ? work->payload : NULL, length);
+        HeapFree(GetProcessHeap(), 0, work);
+    }
+    return 0;
+}
+
+static void QueueTrayIpcCommand(TE_IpcMsgType type, const char* payload)
+{
+    TrayIpcWork* work = (TrayIpcWork*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*work));
+    if (!work) return;
+    work->type = type;
+    if (payload && FAILED(StringCchCopyA(work->payload, ARRAYSIZE(work->payload), payload))) {
+        HeapFree(GetProcessHeap(), 0, work);
+        return;
+    }
+    HANDLE thread = CreateThread(NULL, 0, TrayIpcWorker, work, 0, NULL);
+    if (thread) CloseHandle(thread);
+    else HeapFree(GetProcessHeap(), 0, work);
+}
 
 static BOOL IsTrayStartupEnabled(void)
 {
@@ -68,11 +99,9 @@ void TE_TrayMenuShow(HWND hwnd, POINT pt) {
     DestroyMenu(hMenu);
 
     if (cmd == IDM_ENABLE_RESIZE) {
-        const char* name = "taskbar_resize";
-        TE_IpcClientSendCommand(TE_IPC_MSG_ENABLE_PLUGIN, name, (uint32_t)strlen(name) + 1);
+        QueueTrayIpcCommand(TE_IPC_MSG_ENABLE_PLUGIN, "taskbar_resize");
     } else if (cmd == IDM_DISABLE_RESIZE) {
-        const char* name = "taskbar_resize";
-        TE_IpcClientSendCommand(TE_IPC_MSG_DISABLE_PLUGIN, name, (uint32_t)strlen(name) + 1);
+        QueueTrayIpcCommand(TE_IPC_MSG_DISABLE_PLUGIN, "taskbar_resize");
     } else if (cmd == IDM_TOGGLE_STARTUP) {
         TraySetStartupEnabled(!startup);
     } else if (cmd == IDM_EXIT) {

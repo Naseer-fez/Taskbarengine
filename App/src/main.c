@@ -6,10 +6,20 @@
 #include <strsafe.h>
 
 #define TE_TRAY_CALLBACK_MSG (WM_APP + 1)
+#define TE_ENGINE_SHUTDOWN_COMPLETE (WM_APP + 2)
 
 static HHOOK g_hook = NULL;
 static HMODULE g_dll_handle = NULL;
 static HWND g_main_hwnd = NULL;
+static volatile LONG g_close_pending = 0;
+
+static DWORD WINAPI ShutdownEngineWorker(LPVOID param)
+{
+    HWND hwnd = (HWND)param;
+    TE_IpcClientSendCommand(TE_IPC_MSG_SHUTDOWN, NULL, 0);
+    PostMessageW(hwnd, TE_ENGINE_SHUTDOWN_COMPLETE, 0, 0);
+    return 0;
+}
 
 #include <stdio.h>
 
@@ -66,8 +76,14 @@ static LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT msg, WPARAM wparam, LPARA
 
         case WM_CLOSE:
             LogHost("Received WM_CLOSE");
-            TE_IpcClientSendCommand(TE_IPC_MSG_SHUTDOWN, NULL, 0);
-            Sleep(200);
+            if (InterlockedCompareExchange(&g_close_pending, 1, 0) == 0) {
+                HANDLE worker = CreateThread(NULL, 0, ShutdownEngineWorker, hwnd, 0, NULL);
+                if (worker) CloseHandle(worker);
+                else DestroyWindow(hwnd);
+            }
+            return 0;
+
+        case TE_ENGINE_SHUTDOWN_COMPLETE:
             DestroyWindow(hwnd);
             return 0;
 

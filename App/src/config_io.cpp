@@ -4,12 +4,25 @@
 #include <shlobj.h>
 #include <fstream>
 #include <sstream>
+#include <cstring>
 
 #include <vector>
 
 std::wstring ConfigIO_GetConfigPath()
 {
-    // Search relative to the executable path
+    // Keep the GUI on the same per-user configuration file as EngineDLL.
+    // The engine intentionally prefers this location because it is writable
+    // when installed under Program Files.
+    wchar_t appdata[MAX_PATH] = { 0 };
+    const DWORD appdata_len = GetEnvironmentVariableW(L"LOCALAPPDATA", appdata, MAX_PATH);
+    if (appdata_len > 0 && appdata_len < MAX_PATH) {
+        std::wstring user_config = std::wstring(appdata) + L"\\TaskbarEngine\\config.jsonc";
+        if (GetFileAttributesW(user_config.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            return user_config;
+        }
+    }
+
+    // Search relative to the executable path, matching CoreManager's order.
     wchar_t exe_path[MAX_PATH] = { 0 };
     if (GetModuleFileNameW(NULL, exe_path, MAX_PATH)) {
         wchar_t* last_slash = wcsrchr(exe_path, L'\\');
@@ -18,10 +31,13 @@ std::wstring ConfigIO_GetConfigPath()
         }
 
         const wchar_t* relatives[] = {
-            L"\\..\\..\\Config\\default_config.jsonc",
-            L"\\..\\Config\\default_config.jsonc",
+            L"\\Config\\config.jsonc",
+            L"\\default_config.jsonc",
             L"\\Config\\default_config.jsonc",
-            L"\\..\\..\\..\\Config\\default_config.jsonc"
+            L"\\..\\Config\\config.jsonc",
+            L"\\..\\Config\\default_config.jsonc",
+            L"\\..\\..\\Config\\config.jsonc",
+            L"\\..\\..\\Config\\default_config.jsonc"
         };
 
         for (const wchar_t* rel : relatives) {
@@ -37,8 +53,11 @@ std::wstring ConfigIO_GetConfigPath()
 
     // Search relative to current working directory
     const wchar_t* cwd_relatives[] = {
+        L"Config\\config.jsonc",
         L"Config\\default_config.jsonc",
+        L"..\\Config\\config.jsonc",
         L"..\\Config\\default_config.jsonc",
+        L"..\\..\\Config\\config.jsonc",
         L"..\\..\\Config\\default_config.jsonc"
     };
     for (const wchar_t* rel : cwd_relatives) {
@@ -163,21 +182,6 @@ HRESULT ConfigIO_Save(const std::wstring& path, cJSON* root)
         return HRESULT_FROM_WIN32(error);
     }
 
-    // If %LOCALAPPDATA%\TaskbarEngine exists, keep its config.jsonc in sync
-    // so any running engine instance watching AppData receives the update instantly.
-    wchar_t appdata[MAX_PATH] = { 0 };
-    if (GetEnvironmentVariableW(L"LOCALAPPDATA", appdata, MAX_PATH) > 0) {
-        wchar_t appdata_cfg[MAX_PATH] = { 0 };
-        swprintf_s(appdata_cfg, MAX_PATH, L"%s\\TaskbarEngine\\config.jsonc", appdata);
-        if (_wcsicmp(path.c_str(), appdata_cfg) != 0) {
-            wchar_t appdata_dir[MAX_PATH] = { 0 };
-            swprintf_s(appdata_dir, MAX_PATH, L"%s\\TaskbarEngine", appdata);
-            if (GetFileAttributesW(appdata_dir) != INVALID_FILE_ATTRIBUTES) {
-                CopyFileW(path.c_str(), appdata_cfg, FALSE);
-            }
-        }
-    }
-
     return S_OK;
 }
 
@@ -258,5 +262,126 @@ HRESULT ConfigIO_SetPluginValue(cJSON* root, const char* plugin_name, const char
         }
     }
 
+    return S_OK;
+}
+
+cJSON* ConfigIO_GetWidgetValue(cJSON* root, const char* key)
+{
+    if (!root || !key) return nullptr;
+    cJSON* widgets = cJSON_GetObjectItemCaseSensitive(root, "widgets");
+    if (!widgets || !cJSON_IsObject(widgets)) return nullptr;
+
+    if (strcmp(key, "layout") == 0) {
+        cJSON* layout = cJSON_GetObjectItemCaseSensitive(widgets, "layout");
+        if (cJSON_IsArray(layout)) return cJSON_Duplicate(layout, 1);
+        if (!cJSON_IsString(layout) || !layout->valuestring) return nullptr;
+        cJSON* migrated = cJSON_CreateArray();
+        if (!migrated) return nullptr;
+        std::string text = layout->valuestring;
+        size_t begin = 0;
+        while (begin < text.size()) {
+            const size_t end = text.find(',', begin);
+            std::string name = text.substr(begin, end == std::string::npos ? std::string::npos : end - begin);
+            const size_t first = name.find_first_not_of(" \t\r\n");
+            const size_t last = name.find_last_not_of(" \t\r\n");
+            if (first != std::string::npos) {
+                name = name.substr(first, last - first + 1);
+                cJSON* entry = cJSON_CreateString(name.c_str());
+                if (!entry || !cJSON_AddItemToArray(migrated, entry)) {
+                    if (entry) cJSON_Delete(entry);
+                    cJSON_Delete(migrated);
+                    return nullptr;
+                }
+            }
+            if (end == std::string::npos) break;
+            begin = end + 1;
+        }
+        return migrated;
+    }
+
+    const char* dot = strchr(key, '.');
+    if (dot) {
+        const std::string parent_key(key, static_cast<size_t>(dot - key));
+        cJSON* parent = cJSON_GetObjectItemCaseSensitive(widgets, parent_key.c_str());
+        return parent && cJSON_IsObject(parent) ? cJSON_GetObjectItemCaseSensitive(parent, dot + 1) : nullptr;
+    }
+    return cJSON_GetObjectItemCaseSensitive(widgets, key);
+}
+
+HRESULT ConfigIO_SetWidgetValue(cJSON* root, const char* key, cJSON* value)
+{
+    if (!root || !key || !value) { if (value) cJSON_Delete(value); return E_POINTER; }
+    cJSON* widgets = cJSON_GetObjectItemCaseSensitive(root, "widgets");
+    if (widgets && !cJSON_IsObject(widgets)) { cJSON_Delete(value); return E_INVALIDARG; }
+    if (!widgets) {
+        widgets = cJSON_CreateObject();
+        if (!widgets || !cJSON_AddItemToObject(root, "widgets", widgets)) {
+            if (widgets) cJSON_Delete(widgets);
+            cJSON_Delete(value);
+            return E_OUTOFMEMORY;
+        }
+    }
+
+    if (strcmp(key, "layout") == 0 && cJSON_IsString(value)) {
+        cJSON* array = cJSON_CreateArray();
+        if (!array) { cJSON_Delete(value); return E_OUTOFMEMORY; }
+        std::string text = value->valuestring ? value->valuestring : "";
+        size_t begin = 0;
+        while (begin < text.size()) {
+            const size_t end = text.find(',', begin);
+            std::string name = text.substr(begin, end == std::string::npos ? std::string::npos : end - begin);
+            const size_t first = name.find_first_not_of(" \t\r\n");
+            const size_t last = name.find_last_not_of(" \t\r\n");
+            if (first != std::string::npos) {
+                name = name.substr(first, last - first + 1);
+                cJSON* entry = cJSON_CreateString(name.c_str());
+                if (!entry || !cJSON_AddItemToArray(array, entry)) {
+                    if (entry) cJSON_Delete(entry);
+                    cJSON_Delete(array); cJSON_Delete(value); return E_OUTOFMEMORY;
+                }
+            }
+            if (end == std::string::npos) break;
+            begin = end + 1;
+        }
+        cJSON_Delete(value);
+        value = array;
+    }
+    if (strcmp(key, "layout") == 0 && !cJSON_IsArray(value)) {
+        cJSON_Delete(value);
+        return E_INVALIDARG;
+    }
+
+    cJSON* parent = widgets;
+    std::string final_key(key);
+    const size_t dot = final_key.find('.');
+    if (dot != std::string::npos) {
+        const std::string parent_key = final_key.substr(0, dot);
+        final_key = final_key.substr(dot + 1);
+        parent = cJSON_GetObjectItemCaseSensitive(widgets, parent_key.c_str());
+        if (parent && !cJSON_IsObject(parent)) { cJSON_Delete(value); return E_INVALIDARG; }
+        if (!parent) {
+            parent = cJSON_CreateObject();
+            if (!parent || !cJSON_AddItemToObject(widgets, parent_key.c_str(), parent)) {
+                if (parent) cJSON_Delete(parent);
+                cJSON_Delete(value); return E_OUTOFMEMORY;
+            }
+        }
+    }
+    cJSON* existing = cJSON_GetObjectItemCaseSensitive(parent, final_key.c_str());
+    if (existing) {
+        if (!cJSON_ReplaceItemInObjectCaseSensitive(parent, final_key.c_str(), value)) {
+            cJSON_Delete(value); return E_OUTOFMEMORY;
+        }
+    } else if (!cJSON_AddItemToObject(parent, final_key.c_str(), value)) {
+        cJSON_Delete(value); return E_OUTOFMEMORY;
+    }
+    if (strcmp(key, "layout") == 0) {
+        cJSON* version = cJSON_GetObjectItemCaseSensitive(widgets, "schema_version");
+        if (!version) cJSON_AddNumberToObject(widgets, "schema_version", 2);
+        else if (cJSON_IsNumber(version)) {
+            version->valueint = 2;
+            version->valuedouble = 2;
+        }
+    }
     return S_OK;
 }

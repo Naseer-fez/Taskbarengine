@@ -3,7 +3,7 @@
 #include <strsafe.h>
 
 static HANDLE g_monitor_thread = NULL;
-static BOOL g_stop_monitor = FALSE;
+static HANDLE g_stop_event = NULL;
 static HWND g_main_hwnd = NULL;
 static HMODULE g_dll_handle = NULL;
 static HHOOK g_recovered_hook = NULL;
@@ -17,32 +17,33 @@ static unsigned int __stdcall MonitorThread(void* arg) {
         CloseDesktop(hDesk);
     }
 
-    while (!g_stop_monitor) {
+    while (g_stop_event && WaitForSingleObject(g_stop_event, 0) == WAIT_TIMEOUT) {
         HWND taskbar_hwnd = FindWindowW(L"Shell_TrayWnd", NULL);
         if (taskbar_hwnd) {
             DWORD explorer_pid;
             DWORD explorer_tid = GetWindowThreadProcessId(taskbar_hwnd, &explorer_pid);
             HANDLE hThread = OpenThread(SYNCHRONIZE, FALSE, explorer_tid);
             if (hThread) {
-                while (!g_stop_monitor) {
-                    DWORD res = WaitForSingleObject(hThread, 500);
-                    if (res == WAIT_OBJECT_0 || res == WAIT_FAILED) {
-                        break;
-                    }
-                }
+                HANDLE waits[] = { g_stop_event, hThread };
+                DWORD res = WaitForMultipleObjects(2, waits, FALSE, INFINITE);
+                const BOOL stop_requested = (res == WAIT_OBJECT_0);
+                const BOOL explorer_exited = (res == WAIT_OBJECT_0 + 1);
                 CloseHandle(hThread);
-                
-                if (!g_stop_monitor) {
-                    Sleep(2000);
-                    
+
+                if (stop_requested) break;
+                if (explorer_exited) {
+                    WaitForSingleObject(g_stop_event, 2000);
+                }
+
+                if (explorer_exited && WaitForSingleObject(g_stop_event, 0) == WAIT_TIMEOUT) {
                     HWND new_taskbar = NULL;
-                    for (int i=0; i<10; i++) {
+                    for (int i = 0; i < 10 && WaitForSingleObject(g_stop_event, 0) == WAIT_TIMEOUT; i++) {
                         new_taskbar = FindWindowW(L"Shell_TrayWnd", NULL);
                         if (new_taskbar) break;
-                        Sleep(500);
+                        WaitForSingleObject(g_stop_event, 500);
                     }
                     
-                    if (new_taskbar) {
+                    if (new_taskbar && WaitForSingleObject(g_stop_event, 0) == WAIT_TIMEOUT) {
                         DWORD new_tid = GetWindowThreadProcessId(new_taskbar, NULL);
                         HOOKPROC hook_proc = (HOOKPROC)GetProcAddress(g_dll_handle, "TE_GetMsgHookProc");
                         if (!hook_proc) {
@@ -62,7 +63,7 @@ static unsigned int __stdcall MonitorThread(void* arg) {
                 }
             }
         }
-        Sleep(500);
+        if (g_stop_event) WaitForSingleObject(g_stop_event, 500);
     }
     return 0;
 }
@@ -70,16 +71,25 @@ static unsigned int __stdcall MonitorThread(void* arg) {
 void TE_CrashRecoveryStart(HWND main_hwnd, HMODULE dll_handle) {
     g_main_hwnd = main_hwnd;
     g_dll_handle = dll_handle;
-    g_stop_monitor = FALSE;
+    g_stop_event = CreateEventW(NULL, TRUE, FALSE, NULL);
+    if (!g_stop_event) return;
     g_monitor_thread = (HANDLE)_beginthreadex(NULL, 0, MonitorThread, NULL, 0, NULL);
+    if (!g_monitor_thread) {
+        CloseHandle(g_stop_event);
+        g_stop_event = NULL;
+    }
 }
 
 void TE_CrashRecoveryStop(void) {
     if (g_monitor_thread) {
-        g_stop_monitor = TRUE;
-        WaitForSingleObject(g_monitor_thread, 3000);
+        if (g_stop_event) SetEvent(g_stop_event);
+        WaitForSingleObject(g_monitor_thread, INFINITE);
         CloseHandle(g_monitor_thread);
         g_monitor_thread = NULL;
+    }
+    if (g_stop_event) {
+        CloseHandle(g_stop_event);
+        g_stop_event = NULL;
     }
     if (g_recovered_hook) {
         UnhookWindowsHookEx(g_recovered_hook);
