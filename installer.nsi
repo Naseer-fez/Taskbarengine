@@ -37,6 +37,12 @@ Section "Install"
   
   SetOutPath "$INSTDIR\Modules\taskbar_resize"
   File /nonfatal "ReleaseStaging\Modules\taskbar_resize\*.*"
+
+  SetOutPath "$INSTDIR\Modules\widget_host"
+  File /nonfatal "ReleaseStaging\Modules\widget_host\*.*"
+
+  SetOutPath "$INSTDIR\Widgets"
+  File /r /nonfatal "ReleaseStaging\Widgets\*.*"
   
   SetOutPath "$INSTDIR\Modules\taskbar_transparency"
   File /nonfatal "ReleaseStaging\Modules\taskbar_transparency\*.*"

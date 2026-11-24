@@ -18,11 +18,15 @@ add_library(te_core_testlib STATIC
     ${CMAKE_SOURCE_DIR}/Core/src/shell_hook.c
     ${CMAKE_SOURCE_DIR}/Modules/taskbar_transparency/composition_api.c
     ${CMAKE_SOURCE_DIR}/Modules/taskbar_transparency/tray_discovery.c
+    ${CMAKE_SOURCE_DIR}/Modules/taskbar_transparency/transparency_config.c
+    ${CMAKE_SOURCE_DIR}/Modules/taskbar_transparency/taskbar_transparency.c
 )
 
 target_include_directories(te_core_testlib PUBLIC
     ${CMAKE_SOURCE_DIR}/Core/include
     ${CMAKE_SOURCE_DIR}/Modules/taskbar_transparency
+    ${CMAKE_SOURCE_DIR}/SDK/include
+    ${CMAKE_SOURCE_DIR}/ThirdParty/cJSON
 )
 
 target_link_libraries(te_core_testlib PUBLIC
@@ -30,6 +34,7 @@ target_link_libraries(te_core_testlib PUBLIC
     cjson
     shlwapi
 )
+target_compile_definitions(te_core_testlib PRIVATE TE_STATIC_LINK)
 
 add_library(te_resize_testlib STATIC
     ${CMAKE_SOURCE_DIR}/Modules/taskbar_resize/taskbar_resize.c
@@ -107,6 +112,7 @@ add_executable(te_tests
     test_ring_buffer.cpp
     test_ipc_protocol.cpp
     test_taskbar_resize.cpp
+    test_taskbar_transparency.cpp
     test_crash_recovery.cpp
     test_magnification.cpp
     test_state_store.cpp
@@ -119,6 +125,8 @@ add_executable(te_tests
     test_phase3_verification.cpp
     test_phase4_verification.cpp
     test_phase5_verification.cpp
+    test_widget_host.cpp
+    ${CMAKE_SOURCE_DIR}/Modules/widget_host/widget_host_model.cpp
 )
 
 target_compile_definitions(te_tests PRIVATE _CRT_SECURE_NO_WARNINGS)
@@ -139,6 +147,32 @@ target_link_libraries(te_tests PRIVATE
     shlwapi
     windowsapp
     dwrite
+    dcomp
+    d3d11
+    Catch2::Catch2WithMain
+)
+
+target_include_directories(te_tests PRIVATE ${CMAKE_SOURCE_DIR}/Modules/widget_host)
+
+# Keep the widget-host model tests runnable even when an unrelated integration
+# test in the combined suite is temporarily uncompilable.
+add_executable(te_widget_host_tests
+    test_widget_host.cpp
+    ${CMAKE_SOURCE_DIR}/Modules/widget_host/widget_host_model.cpp
+)
+target_compile_definitions(te_widget_host_tests PRIVATE _CRT_SECURE_NO_WARNINGS)
+target_include_directories(te_widget_host_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/Modules/widget_host
+    ${CMAKE_SOURCE_DIR}/SDK/include
+    ${CMAKE_SOURCE_DIR}/ThirdParty/cJSON
+)
+target_link_libraries(te_widget_host_tests PRIVATE
+    te_sdk
+    cjson
+    dcomp
+    d2d1
+    d3d11
+    dxguid
     Catch2::Catch2WithMain
 )
 
@@ -147,3 +181,4 @@ list(APPEND CMAKE_MODULE_PATH ${catch2_SOURCE_DIR}/extras)
 include(CTest)
 include(Catch)
 catch_discover_tests(te_tests)
+catch_discover_tests(te_widget_host_tests)

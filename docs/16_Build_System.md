@@ -25,6 +25,14 @@ TaskbarEngine uses **CMake 3.25+** with the **Ninja** build generator and suppor
 
 ## 3. Building the Project
 
+### Windows one-click build
+
+Run `build.bat` from Explorer or a terminal. It configures CMake, builds every default target, and deploys the resulting runtime files. The batch file does not maintain a source or target list; CMake is the source of truth. Newly added code must be registered in its CMake target, and the same batch file will build it automatically.
+
+The build does not run tests unless requested. Use `build.bat -RunTests` to configure, build, and run them. Use `build.bat -SkipDeploy` to leave the deployment step out. `build_no_pause.bat` accepts the same options and returns to the calling terminal without pausing.
+
+The script locates MSVC and Windows App SDK packages from the current environment and common installation locations. Set `WINAPPSDK_ROOT`, `WINAPPSDK_CPPWINRT`, or `WINAPPSDK_FRAMEWORK_DIR` when they are installed somewhere nonstandard; set `TASKBARENGINE_MSVC_ROOT` to the MSVC installation root when Visual Studio is installed outside its standard location.
+
 ### A. Configuring and Building with CMake Presets
 ```powershell
 # Configure MSVC Release build

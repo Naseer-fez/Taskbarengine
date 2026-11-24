@@ -64,26 +64,20 @@ Copy-Item $engineDll -Destination "$StagingDir\" -Force
 Copy-Item $engineDll -Destination "$StagingDir\Core\" -Force
 Write-Host "  -> EngineDLL.dll" -ForegroundColor Green
 
-# 3. Copy Plugins / Modules
+# 3. Copy every built plugin and widget module, preserving the runtime tree.
 Write-Host "[3/7] Copying plugin modules..." -ForegroundColor Yellow
-$modules = @(
-    @{ Name = "taskbar_resize"; Dll = "taskbar_resize.dll"; Src = "$BuildDir\Modules\taskbar_resize\taskbar_resize.dll" },
-    @{ Name = "icon_hover"; Dll = "icon_hover.dll"; Src = "$BuildDir\Modules\icon_hover\icon_hover.dll" },
-    @{ Name = "TaskbarPayload"; Dll = "TaskbarPayload.dll"; Src = "$BuildDir\Modules\TaskbarPayload\TaskbarPayload.dll" },
-    @{ Name = "dummy"; Dll = "DummyPlugin.dll"; Src = "$BuildDir\Modules\dummy\DummyPlugin.dll" }
-)
+$builtModules = Join-Path $BuildDir "Modules"
+Get-ChildItem -LiteralPath $builtModules -Filter "*.dll" -File -Recurse | ForEach-Object {
+    $relative = $_.FullName.Substring($builtModules.Length).TrimStart('\', '/')
+    $destination = Join-Path (Join-Path $StagingDir "Modules") $relative
+    New-Item -ItemType Directory -Path (Split-Path -Parent $destination) -Force | Out-Null
+    Copy-Item -LiteralPath $_.FullName -Destination $destination -Force
+    Write-Host "  -> Module: $relative" -ForegroundColor Green
+}
 
-foreach ($mod in $modules) {
-    if (Test-Path $mod.Src) {
-        $modDir = "$StagingDir\Modules\$($mod.Name)"
-        New-Item -ItemType Directory -Path $modDir -Force | Out-Null
-        Copy-Item $mod.Src -Destination "$modDir\$($mod.Dll)" -Force
-        # Also copy flat into Modules/ for maximum compatibility
-        Copy-Item $mod.Src -Destination "$StagingDir\Modules\$($mod.Dll)" -Force
-        Write-Host "  -> Module: $($mod.Name) ($($mod.Dll))" -ForegroundColor Green
-    } else {
-        Write-Warning "Module binary not found: $($mod.Src)"
-    }
+# Widget host discovers its widget DLLs from the root Widgets directory.
+if (Test-Path -LiteralPath (Join-Path $BuildDir "Widgets")) {
+    Copy-Item -LiteralPath (Join-Path $BuildDir "Widgets") -Destination $StagingDir -Recurse -Force
 }
 
 # 4. Copy Configurations and Assets

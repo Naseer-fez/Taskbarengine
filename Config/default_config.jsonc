@@ -5,6 +5,17 @@
 		"log_max_size_mb":	5
 	},
 	"plugins":	{
+		"widget_host":	{
+			"enabled":	true
+		},
+		"taskbar_transparency":	{
+			"enabled":	true,
+			"mode":	"acrylic",
+			"opacity":	0.65,
+			"color":	"0x44000000",
+			"accent_flags":	2,
+			"apply_secondary":	true
+		},
 		"taskbar_resize":	{
 			"enabled":	false,
 			"height":	48,
@@ -28,13 +39,48 @@
 			"keep_on_top":	true,
 			"start_image_path":	"",
 			"dynamic_island":	{
-				"enabled":	false,
+				"enabled":	true,
 				"padding_tray":	6,
 				"compact_width":	80,
 				"expanded_width":	240,
 				"height":	30,
-				"show_idle_pill":	false
+				"show_idle_pill":	true
 			}
+		}
+	},
+	"widgets":	{
+		"schema_version":	2,
+		"layout":	["clock", "sysmon", "media"],
+		"position":	"right",
+		"gap":	8,
+		"clock":	{
+			"enabled":	true,
+			"format":	"HH:mm",
+			"show_date":	false,
+			"date_format":	"ddd, MMM d",
+			"font_family":	"Segoe UI Variable",
+			"font_size":	13,
+			"text_color":	"0xFFFFFFFF"
+		},
+		"sysmon":	{
+			"enabled":	true,
+			"show_cpu":	true,
+			"show_ram":	true,
+			"display_mode":	"text",
+			"update_interval_ms":	2000,
+			"text_color":	"0xFFFFFFFF",
+			"bar_color":	"0xFF4CAF50",
+			"bar_warning_color":	"0xFFFF9800",
+			"bar_critical_color":	"0xFFF44336",
+			"warning_threshold":	75,
+			"critical_threshold":	90
+		},
+		"media":	{
+			"enabled":	true,
+			"show_artist":	true,
+			"max_width":	200,
+			"font_size":	12,
+			"text_color":	"0xFFFFFFFF"
 		}
 	}
 }
